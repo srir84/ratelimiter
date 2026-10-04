@@ -1,0 +1,33 @@
+// /hit request paths, including refusals, post-acquire failures, and background refund retries.
+digraph flow {
+  graph [rankdir=TB, bgcolor="white", pad=0.25, nodesep=0.35, ranksep=0.5, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=16, margin="0.16,0.1", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=13, arrowsize=0.75];
+  arrival [label="GET /hit\n1. capture arrival time  2. validate headers\n3. reserve local slots"];
+  bad [label="400 / 404 / 405\nno charge, no row"];
+  svc [label="Slots full\n503 service_overloaded\nno charge, no row"];
+  acquire [shape=diamond, style=filled, label="acquire(key = user ID)", fillcolor="#E8F1FF", color="#3264A8"];
+  deny [label="LIMITED\n429 + Retry-After\nno charge, no row"];
+  db [label="Harness DB (deadline P)\ninsert row or read existing", fillcolor="#E8F1FF", color="#3264A8"];
+  ok [label="200 + timestamp\n(charge kept)"];
+  fail [label="Confirmed failure\n500 / 503 sent NOW"];
+  refund [label="release() → library refunds in background\nretries until final, retention ends,\nor drain ends (at most one credit)"];
+  appunk [label="App outcome unknown\n503 — report, no refund"];
+  unavail [label="UNAVAILABLE (not applied)\nclosed → 503\nopen → bypass (degraded)"];
+  unknown [label="OUTCOME UNKNOWN / RECEIPT ERROR\n503 both modes\ntoken may be / is charged"];
+  refuse [label="CANCELLED / BUSY / CONFIG / CLOCK /\nINTEGRITY / CAPACITY / NOT READY\n503 both modes, no charge, no row"];
+  arrival -> bad [label="invalid"];
+  arrival -> svc [label="no slot"];
+  arrival -> acquire [label="valid"];
+  acquire -> deny [label="limited"];
+  acquire -> db [label="allowed"];
+  acquire -> unavail [label="not applied"];
+  acquire -> unknown [label="unknown"];
+  acquire -> refuse [label="refused"];
+  unavail -> db [label="open mode only\n(no receipt)", style=dashed];
+  db -> ok [label="commit / row exists"];
+  db -> fail [label="confirmed failure,\nrollback, or service\nabort after acquire"];
+  db -> appunk [label="unknown / P without\nconfirmed rollback"];
+  fail -> refund [label="if receipt"];
+  refund -> refund [label="any non-final result\n(REF-4, API-19)"];
+}

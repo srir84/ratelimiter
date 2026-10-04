@@ -1,0 +1,16 @@
+// Library-held signed receipts and temporary refund markers.
+digraph receipts {
+  graph [rankdir=TB, bgcolor="white", pad=0.25, nodesep=0.65, ranksep=0.5, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=18, margin="0.18,0.15", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=14, arrowsize=0.75];
+  acquired [label="NORMAL ALLOW\nDeduct + advance bucket sequence\nReturn a permit with a signed, expiring receipt\nLibrary holds it in memory; no receipt row", fillcolor="#E8F1FF", color="#3264A8"];
+  keep [label="Success or unknown: permit.done()\nKeep charge\nLibrary discards receipt"];
+  refunded [label="Confirmed failure + valid receipt\nVerify signature, generation, expiry\nAtomic: capped credit + refund marker"];
+  expired [label="AT / AFTER RECEIPT EXPIRY\nReceipt can never credit again\nRemove its refund marker, if any\nForget a full bucket after all receipts expire\nand no markers remain\nRecreated bucket gets a new generation"];
+  acquired -> keep [label="host: done"];
+  acquired -> refunded [label="permit.release() →\nlibrary refunds before expiry"];
+  refunded -> refunded [label="Repeat before expiry:\nno extra credit"];
+  refunded -> expired [label="Keep marker until expiry"];
+  keep -> expired [label="Bucket refills +\nlast receipt expires"];
+  {rank=same; keep; refunded;}
+}

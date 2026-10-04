@@ -1,0 +1,14 @@
+// Receipt lifetime must cover the host's release delay, the refund deadline, and an outage anywhere inside it.
+digraph timeline {
+  graph [rankdir=LR, bgcolor="white", pad=0.25, nodesep=0.3, ranksep=0.35, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=15, margin="0.14,0.1", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=13, arrowsize=0.75];
+  t0 [label="t = 0\njust before acquire\nreceipt issued", fillcolor="#E8F1FF", color="#3264A8"];
+  t1 [label="≤ max_release_delay\nhost calls release()\n(per instance)"];
+  t3 [label="≤ + refund_deadline + outage\nrefund confirmed\n(outage ≤ outage_tolerance,\nany time in this window)"];
+  t4 [label="+ margin\n(> 0, covers clock-rate\ndifference)"];
+  t5 [label="receipt_lifetime\nreceipt EXPIRES\nmarker may go", fillcolor="#FDECEC", color="#B42318"];
+  t0 -> t1 -> t3 -> t4 -> t5;
+  rule [shape=note, fillcolor="#FFFFFF", fontsize=14, label="Startup checks (each instance):\nmax_release_delay + refund_deadline + outage_tolerance + margin  ≤  receipt_lifetime\nmargin  ≥  receipt_lifetime × clock_rate_bound\nDefaults: 30 s refund deadline, 5 s outage tolerance, 60 s lifetime"];
+  t3 -> rule [style=invis];
+}

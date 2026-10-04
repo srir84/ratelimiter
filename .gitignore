@@ -1,0 +1,14 @@
+.data/
+.out/
+bin/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+# Run data: keep frozen thresholds and each run's report and context; never a run's store/ (AOF, acl.conf with passwords) or logs.
+runs/*/*
+!runs/thresholds/*
+!runs/*/report.md
+!runs/*/report.json
+!runs/*/context.json

@@ -1,0 +1,238 @@
+# golangci-lint v2 (pinned in tools/setup.sh). The rules behind each setting are in AGENTS.md.
+# Exceptions live only in this file, each with its reason. Code never carries //nolint or #nosec;
+# tools/trace fails on them. A rule that blocks code DESIGN requires is a stop-and-report.
+version: "2"
+
+run:
+  relative-path-mode: gomod
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - depguard
+    - errcheck
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - gochecknoglobals
+    - gochecknoinits
+    - gosec
+    - govet
+    - ineffassign
+    - noctx
+    - sloglint
+    - staticcheck
+    - unused
+    - usetesting
+
+  settings:
+    depguard:
+      rules:
+        product-stdlib-only:
+          files:
+            - "**/limiter/**"
+            - "**/limitertest/**"
+            - "**/internal/**"
+            - "!**/internal/testutil/**"
+          list-mode: strict
+          allow:
+            - $gostd
+            - ratelimiter
+          deny:
+            - pkg: net/http
+              desc: "the product makes no HTTP calls"
+            - pkg: os/exec
+              desc: "the product starts no processes"
+        network-only-in-store:
+          files:
+            - "**/limiter/**"
+            - "**/limitertest/**"
+            - "**/internal/**"
+            - "!**/internal/store/**"
+            - "!**/internal/testutil/**"
+          deny:
+            - pkg: "net$"
+              desc: "only internal/store opens connections to the store"
+        binaries-and-harness:
+          files:
+            - "**/cmd/**"
+            - "**/harness/**"
+            - "**/tools/**"
+            - "**/internal/testutil/**"
+          list-mode: strict
+          allow:
+            - $gostd
+            - ratelimiter
+            - github.com/BurntSushi/toml
+            - github.com/jackc/pgx/v5
+            - github.com/shirou/gopsutil/v4
+        rladmin-modules:
+          files:
+            - "**/cmd/rladmin/**"
+          list-mode: strict
+          allow:
+            - $gostd
+            - ratelimiter
+            - github.com/BurntSushi/toml
+        no-math-rand-v1:
+          files:
+            - $all
+          deny:
+            - pkg: "math/rand$"
+              desc: "use math/rand/v2 (jitter, seeded schedules) or crypto/rand (keys, IDs)"
+        secrets-use-crypto-rand:
+          files:
+            - "**/internal/receipt/**"
+            - "**/internal/fingerprint/**"
+            - "**/cmd/rladmin/**"
+          deny:
+            - pkg: math/rand/v2
+              desc: "signing keys and epoch IDs come from crypto/rand"
+        runlog-unbuffered:
+          files:
+            - "**/harness/runlog/**"
+          deny:
+            - pkg: bufio
+              desc: "one write(2) per line: a userspace buffer loses lines on SIGKILL (DESIGN §B3)"
+        postgres-only-in-dbclient:
+          files:
+            - $all
+            - "!**/harness/dbclient/**"
+          deny:
+            - pkg: github.com/jackc/pgx/v5
+              desc: "only harness/dbclient talks to PostgreSQL"
+
+    errcheck:
+      # Off: no untrusted `any` flows in this design (RESP decodes to typed values), and
+      # container/heap's Push(x any) needs a plain assertion (plan S6).
+      check-type-assertions: false
+
+    exhaustive:
+      default-signifies-exhaustive: false
+      # Enums from other packages that code switches on in part (signals, file modes, ...).
+      # Our own closed sets (Result kinds, reply codes, permit states) are always checked.
+      ignore-enum-types: '^(syscall\.Signal|syscall\.Errno|os\.Signal|reflect\.Kind|time\.(Month|Weekday|Duration)|io/fs\.FileMode|log/slog\.Level|net/http\.ConnState|go/token\.Token|go/ast\.ObjKind)$'
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: ^(fmt\.Print(f|ln)?|print|println)$
+          msg: "[print] product: report through Result, Health, Metrics; harness: the slog logger from main; CLI output: the io.Writer from main"
+        - pattern: ^log\.(Print|Printf|Println|Fatal|Fatalf|Fatalln|Panic|Panicf|Panicln|Default|SetOutput)$
+          msg: "[print] use log/slog with the logger passed in from main"
+        - pattern: ^os\.(Getenv|LookupEnv|Environ|Setenv|Unsetenv|Clearenv)$
+          msg: "[env] only main files, harness/config and internal/testutil read the environment; tests use t.Setenv"
+        - pattern: ^context\.(Background|TODO)$
+          msg: "[ctx] take ctx from the caller; to outlive it use context.WithoutCancel(ctx) or the lifetime context from internal/core/limiter.go"
+        - pattern: ^http\.(Get|Head|Post|PostForm|DefaultClient|DefaultTransport|ListenAndServe|ListenAndServeTLS|Serve|ServeTLS)$
+          pkg: ^net/http$
+          msg: "[http] build http.Client and http.Server in main with explicit timeouts"
+        - pattern: ^panic$
+          msg: "[panic] return an error or a Result kind"
+        - pattern: ^recover$
+          msg: "[recover] only the listener dispatcher (internal/core/listener.go) recovers"
+        - pattern: ^testing\.(T|B|F|TB|common)\.Skip(f|Now)?$
+          msg: "[skip] a missing tool or store is a failure, never a skip"
+        - pattern: ^rand\.(Int|IntN|Int32|Int32N|Int64|Int64N|Uint|Uint32|Uint32N|Uint64|Uint64N|UintN|N|Float32|Float64|ExpFloat64|NormFloat64|Perm|Shuffle)$
+          pkg: ^math/rand/v2$
+          msg: "[seeded] harness randomness comes from rand.New(rand.NewPCG(seed, stream)) so runs repeat"
+        - pattern: ^os\.Exit$
+          msg: "[exit] only main files exit"
+        - pattern: ^time\.Time\.Unix(Nano|Micro|Milli)?$
+          msg: "[walltime] budget time comes from the store; product code uses only deadlines, timers and monotonic durations"
+
+    gosec:
+      excludes:
+        - G104 # unhandled errors: errcheck owns this
+        - G404 # math/rand/v2 is only for jitter and seeded schedules; depguard keeps it out of receipt, fingerprint and rladmin
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment # struct layout is not a goal here; readability wins
+        - shadow # noisy with err; the rule is "wrap and return"
+
+    sloglint:
+      no-global: all
+      static-msg: true
+      key-naming-case: snake
+
+    usetesting:
+      context-background: true
+      context-todo: true
+      os-setenv: true
+      os-temp-dir: true
+
+  exclusions:
+    generated: strict
+    rules:
+      # Tests: fixed seeds, temp files, subprocesses and table variables are normal.
+      - path: _test\.go$
+        linters: [gosec, gochecknoglobals]
+      - path: _test\.go$
+        linters: [forbidigo]
+        text: '\[(env|ctx|exit|panic|walltime|seeded)\]'
+      # A binary's main*.go files wire everything: env, root context, exit codes.
+      - path: ^(cmd|tools)/[^/]+/main[^/]*\.go$
+        linters: [forbidigo]
+        text: '\[(env|ctx|exit)\]'
+      # The instance lifetime context (refund workers, cleanup runner, epoch watch).
+      - path: ^internal/core/limiter\.go$
+        linters: [forbidigo]
+        text: '\[ctx\]'
+      # The script values S4 exports are built once from the embedded files at package init,
+      # never written afterwards; a missing embedded file is a build defect (like regexp.MustCompile).
+      - path: ^internal/scripts/
+        linters: [gochecknoglobals]
+      - path: ^internal/scripts/
+        linters: [forbidigo]
+        text: '\[panic\]'
+      # CLI output to stdout/stderr: a failed write there changes nothing. Everything else,
+      # evidence files included, checks every write.
+      - path: ^(cmd/[^/]+/main[^/]*\.go|cmd/rladmin/|tools/trace/)
+        linters: [errcheck]
+        text: 'fmt\.Fprint'
+      # Host listener code may panic (DESIGN §A5.11).
+      - path: ^internal/core/listener\.go$
+        linters: [forbidigo]
+        text: '\[recover\]'
+      - path: ^(harness/config|internal/testutil)/
+        linters: [forbidigo]
+        text: '\[env\]'
+      # Product jitter (backoff, cleanup period) uses the global math/rand/v2 functions.
+      - path: ^(limiter|limitertest|internal)/
+        linters: [forbidigo]
+        text: '\[seeded\]'
+      # Harness log fields are wall-clock ns (HARNESS formats).
+      - path: ^(cmd/(hitapi|hitgen|orchestrator|sampler|faultctl)|harness|tools|internal/testutil)/
+        linters: [forbidigo]
+        text: '\[walltime\]'
+      # Mutable globals matter in the product (several Limiters per process); tables are fine elsewhere.
+      - path: ^(cmd|harness|tools|internal/testutil)/
+        linters: [gochecknoglobals]
+      # Test-only helpers and the dev tool: they spawn stores, use fixed seeds and temp files.
+      - path: ^(internal/testutil|harness/fixtures|tools)/
+        linters: [gosec]
+      # Local tools act on operator-given paths, URLs and binaries.
+      - path: ^(cmd|harness)/
+        linters: [gosec]
+        text: 'G(204|304|702|703|704)'
+      # EVALSHA names a script by its SHA-1: a protocol id, not security.
+      - path: ^internal/scripts/
+        linters: [gosec]
+        text: 'G(401|505)'
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  uniq-by-line: false
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - ratelimiter

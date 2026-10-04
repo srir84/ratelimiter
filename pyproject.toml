@@ -1,0 +1,71 @@
+# Lint and type-check settings for refmodel/ and report/. Rules: AGENTS.md §4.
+# Runtime code uses the standard library only; dev tools are pinned in requirements-dev.txt.
+# pytest settings stay in pytest.ini.
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+extend-exclude = [".data", ".out", "runs", "bin", "**/testdata"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W", "F",  # pycodestyle, pyflakes
+  "I",            # import order
+  "N",            # naming
+  "UP",           # modern syntax for 3.13
+  "B",            # bugbear
+  "C4",           # comprehensions
+  "SIM",          # simplifications
+  "RUF",          # ruff-specific
+  "S",            # security (bandit)
+  "BLE",          # no blind except
+  "DTZ",          # timezone-aware datetimes only
+  "T20",          # no print outside CLI entry points
+  "PTH",          # pathlib, not string paths
+  "TID",          # banned APIs (below)
+]
+ignore = [
+  "S311",  # seeded random.Random(seed) is the point (reproducible cases); this code does no cryptography
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The modules the plan runs as CLIs print their results.
+"refmodel/replay.py" = ["T201"]
+"refmodel/check_bud11.py" = ["T201"]
+"report/__main__.py" = ["T201"]
+"report/validate.py" = ["T201"]
+"report/completion.py" = ["T201"]
+"report/budget.py" = ["T201"]
+"report/thresholds.py" = ["T201"]
+# SPEC's notation (C(t), S(t), E(t), ×, −) may be mirrored, so the model reads line by line against SPEC.
+"refmodel/**" = ["N802", "N803", "N806", "RUF001", "RUF002", "RUF003"]
+"report/**" = ["N802", "N803", "N806", "RUF001", "RUF002", "RUF003"]
+# Tests use assert.
+"**/test_*.py" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"os.getenv".msg = "Python tools take inputs from arguments and files only."
+"os.environ".msg = "Python tools take inputs from arguments and files only."
+"os.putenv".msg = "Python tools take inputs from arguments and files only."
+"subprocess".msg = "Python tools start no processes."
+"socket".msg = "Python tools use no network."
+"urllib.request".msg = "Python tools use no network."
+"http.client".msg = "Python tools use no network."
+"pickle".msg = "Use JSON; pickle runs code on load."
+"random.random".msg = "Use a seeded random.Random(seed) instance."
+"random.randint".msg = "Use a seeded random.Random(seed) instance."
+"random.randrange".msg = "Use a seeded random.Random(seed) instance."
+"random.choice".msg = "Use a seeded random.Random(seed) instance."
+"random.shuffle".msg = "Use a seeded random.Random(seed) instance."
+"random.uniform".msg = "Use a seeded random.Random(seed) instance."
+"random.seed".msg = "Use a seeded random.Random(seed) instance."
+"pytest.skip".msg = "A missing tool or input is a failure, never a skip."
+"pytest.importorskip".msg = "A missing tool or input is a failure, never a skip."
+"pytest.mark.skip".msg = "A missing tool or input is a failure, never a skip."
+"pytest.mark.skipif".msg = "A missing tool or input is a failure, never a skip."
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+warn_unreachable = true
+# Paths come from the Makefile (only the packages that exist yet).

@@ -1,0 +1,20 @@
+// Bucket lifecycle: creation, cleanup eligibility, removal, recreation, state loss, quarantine.
+digraph lifecycle {
+  graph [rankdir=LR, bgcolor="white", pad=0.25, nodesep=0.5, ranksep=0.6, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=15, margin="0.16,0.12", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=13, arrowsize=0.75];
+  absent [label="ABSENT\nno bucket, no index entry,\nno marker, no quarantine"];
+  active [label="ACTIVE\nbucket + index entry\ngeneration G, sequence n", fillcolor="#E8F1FF", color="#3264A8"];
+  eligible [label="ELIGIBLE\nfull + latest receipt expired\n+ its markers expired"];
+  lost [label="QUARANTINED\nbucket/index/marker mismatch\nor malformed data", fillcolor="#FDECEC", color="#B42318"];
+  absent -> active [label="first acquire:\nfull bucket, NEW generation"];
+  active -> active [label="acquire / refund\n(index updated atomically)"];
+  active -> eligible [label="time passes"];
+  eligible -> active [label="key returns"];
+  eligible -> absent [label="cleanup re-checks, then removes\nbucket + index entry in ONE step\n(no marker of it left behind)"];
+  active -> lost [label="unexpected delete\nor corruption", style=dashed, color="#B42318", fontcolor="#B42318"];
+  eligible -> lost [label="cleanup finds\norphaned entry", style=dashed, color="#B42318", fontcolor="#B42318"];
+  lost -> lost [label="refuse acquire + refund (both modes)\nsurvives cleanup + restarts"];
+  lost -> active [label="operator restores a balance (new generation),\nthen clears quarantine (ADM-2, ADM-3)", style=dotted];
+  note [shape=note, fillcolor="#FFFFFF", fontsize=13, label="Epoch-wide: epoch record or high-water mark\nmissing, or integrity hold set → refuse ALL keys\nNew epoch = new epoch_id, all state new"];
+}

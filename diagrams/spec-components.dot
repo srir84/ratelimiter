@@ -1,0 +1,18 @@
+// The rate limiter product: library inside each host instance, one dedicated store, admin tool.
+digraph components {
+  graph [rankdir=LR, bgcolor="white", pad=0.25, nodesep=0.5, ranksep=0.7, fontname="Helvetica", fontsize=18, dpi=160, compound=true];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=15, margin="0.16,0.12", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=13, arrowsize=0.75];
+  subgraph cluster_hosts {
+    label="Host service · N identical instances"; color="#98A2B3"; style="rounded,dashed";
+    subgraph cluster_i1 { label="instance"; color="#D0D5DD"; style="rounded";
+      h1 [label="host code"]; l1 [label="limiter library", fillcolor="#E8F1FF", color="#3264A8"]; h1 -> l1 [label="acquire · done\nrelease · close"]; }
+    subgraph cluster_i2 { label="instance"; color="#D0D5DD"; style="rounded";
+      h2 [label="host code"]; l2 [label="limiter library", fillcolor="#E8F1FF", color="#3264A8"]; h2 -> l2; }
+  }
+  store [shape=cylinder, label="Limiter store (dedicated)\nepoch record (+ integrity hold)\nhigh-water mark · buckets\nrefund markers · cleanup index\nquarantine flags\n+ the library's atomic scripts", fillcolor="#E8F1FF", color="#3264A8"];
+  admin [label="Admin tool (changes fenced)\nstart epoch · restore key\nclear quarantine · status · inspect", fillcolor="#E8F1FF", color="#3264A8"];
+  l1 -> store [label="one atomic script\nper call"]; l2 -> store;
+  admin -> store;
+  legend [shape=note, fontsize=13, fillcolor="#FFFFFF", label="Blue = the rate limiter (product)\nGrey = any host service using it"];
+}

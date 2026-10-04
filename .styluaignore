@@ -1,0 +1,5 @@
+**/testdata/
+.data/
+.out/
+runs/
+bin/

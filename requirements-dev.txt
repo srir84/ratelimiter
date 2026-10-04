@@ -1,0 +1,4 @@
+# Dev tools only (runtime Python code uses the standard library). Installed by `make setup`.
+pytest==9.0.2
+ruff==0.15.8
+mypy==2.1.0

@@ -1,0 +1,31 @@
+// How every acquire is classified. Refunds follow spec-refund-order.
+digraph classes {
+  graph [rankdir=TB, bgcolor="white", pad=0.25, nodesep=0.3, ranksep=0.42, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=15, margin="0.14,0.1", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=13, arrowsize=0.75];
+  q0 [shape=diamond, style=filled, fillcolor="#E8F1FF", color="#3264A8", label="Key valid, host deadline not passed,\njoined, signer usable,\nslots free?"];
+  q1 [shape=diamond, style=filled, fillcolor="#E8F1FF", color="#3264A8", label="Command sent\nto store?"];
+  q2 [shape=diamond, style=filled, fillcolor="#E8F1FF", color="#3264A8", label="Confirmed\nreply?"];
+  q3 [shape=diamond, style=filled, fillcolor="#E8F1FF", color="#3264A8", label="Store-side checks\nin order (atomic)"];
+  q4 [shape=diamond, style=filled, fillcolor="#E8F1FF", color="#3264A8", label="Receipt\nsigned?"];
+  v [label="validation_error / not_ready /\nconfig_error / busy / cancelled\nno state change"];
+  u [label="unavailable\nDEFINITELY not applied\n→ failure_mode decides"];
+  k [label="outcome_unknown\nMAY have applied\nrefused in both modes", fillcolor="#FFF6E5", color="#B54708"];
+  c [label="1 epoch record / high-water mark\nmissing or HELD → integrity (ALL keys)\nnot mine → config_error"];
+  ck [label="2 clock_error\nbad reading"];
+  i [label="3 state_integrity_error (this key)\nquarantined / bucket–index–marker\nmismatch / malformed  → quarantine", fillcolor="#FDECEC", color="#B42318"];
+  cap [label="4 capacity_error\ntracked-bucket limit full"];
+  lim [label="limited\nretry_after_ns, no charge"];
+  ok [label="allowed\n1 token + receipt", fillcolor="#E8F1FF", color="#3264A8"];
+  re [label="receipt_error\ncharged, no receipt\nno permit, report", fillcolor="#FFF6E5", color="#B54708"];
+  q0 -> v [label="no"]; q0 -> q1 [label="yes"];
+  q1 -> v [label="not sent: host deadline\nor cancel came first", style=dashed];
+  q1 -> u [label="provably not sent: store unreachable\n(refused / connect timeout /\ndependency deadline before send)"]; q1 -> q2 [label="yes / maybe"];
+  q2 -> k [label="no (timeout, lost reply,\ndeadline after send)\nor any other error reply"]; q2 -> q3 [label="yes"];
+  q2 -> u [label="\"not ready\" reply\n(loading / busy):\nrefused before running", style=dashed];
+  q3 -> c; q3 -> ck; q3 -> i; q3 -> cap;
+  q3 -> lim [label="no token"];
+  q3 -> q4 [label="deducted"];
+  q4 -> ok [label="yes"]; q4 -> re [label="no"];
+  note [shape=note, fillcolor="#FFFFFF", fontsize=13, label="Errors 1–4 never fail open\nand change no budget state"];
+}

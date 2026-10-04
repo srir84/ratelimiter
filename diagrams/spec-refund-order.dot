@@ -1,0 +1,29 @@
+// refund(receipt): checks in fixed order; first failure decides.
+digraph refund {
+  graph [rankdir=TB, bgcolor="white", pad=0.25, nodesep=0.3, ranksep=0.28, fontname="Helvetica", fontsize=18, dpi=160];
+  node [shape=box, style="rounded,filled", fillcolor="#F5F7FA", color="#667085", fontname="Helvetica", fontsize=14, margin="0.14,0.08", penwidth=1.2];
+  edge [color="#667085", fontname="Helvetica", fontsize=12, arrowsize=0.7];
+  s0 [label="1  Signature + format OK?  (local)"];
+    s1 [label="2  Epoch record + high-water mark\npresent, well-formed, not held, mine?"];
+    s2 [label="3  Clock reading valid?"];
+    s3 [label="4  Receipt epoch_id = current epoch?"];
+    s4 [label="5  Budget time < expiry?"];
+    s5 [label="6  Key not quarantined? Bucket present?\nBucket / index / markers consistent?"];
+    s6 [label="7  Generation matches?\nSequence ≤ current?"];
+    s7 [label="8  Marker already exists?\n(index entry w/o marker = step 6 failure)"];
+    s8 [label="9  Room for a new marker?"];
+    ok [label="applied\nrefill + credit ≤ 1 (capped)\nwrite marker + index entry", fillcolor="#E8F1FF", color="#3264A8"];
+  note [shape=note, fillcolor="#FFFFFF", fontsize=13, label="Steps 2–9 run in ONE atomic\nstep in shared state.\nNon-final results (r1, r2, r5, r8)\nare retried until final, retention\nends, or drain ends (REF-4a)"];
+  {rank=same; ok; note;}
+  r0 [label="receipt_invalid"]; r1 [label="missing / malformed / held → state_integrity_error (all keys)\nnot mine → config_error"]; r2 [label="clock_error"];
+  r3 [label="receipt_invalid"]; r4 [label="receipt_expired\n(terminal)", fillcolor="#FDECEC", color="#B42318"];
+  r5 [label="state_integrity_error\n(+ quarantine)", fillcolor="#FDECEC", color="#B42318"];
+  r6 [label="receipt_invalid"]; r7 [label="already_applied\n(= confirmed)", fillcolor="#E8F1FF", color="#3264A8"];
+  r8 [label="capacity_error\n(retried until final, retention\nends, or drain ends)"];
+  s0 -> s1 [label="yes"]; s1 -> s2 [label="yes"]; s2 -> s3 [label="yes"]; s3 -> s4 [label="yes"];
+  s4 -> s5 [label="yes"]; s5 -> s6 [label="yes"]; s6 -> s7 [label="yes"]; s7 -> s8 [label="no"]; s8 -> ok [label="yes"];
+  s0 -> r0 [label="no"]; s1 -> r1 [label="no"]; s2 -> r2 [label="no"]; s3 -> r3 [label="no"];
+  s4 -> r4 [label="no"]; s5 -> r5 [label="no"]; s6 -> r6 [label="no"]; s7 -> r7 [label="yes"]; s8 -> r8 [label="no"];
+  {rank=same; s0; r0;} {rank=same; s1; r1;} {rank=same; s2; r2;} {rank=same; s3; r3;} {rank=same; s4; r4;}
+  {rank=same; s5; r5;} {rank=same; s6; r6;} {rank=same; s7; r7;} {rank=same; s8; r8;}
+}
