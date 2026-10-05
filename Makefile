@@ -56,9 +56,14 @@ ifneq ($(PY_PKGS),)
 	$(PYTHON) -m ruff format $(PY_PKGS)
 endif
 
+# A second pass at GOMAXPROCS 1 and 4 over the packages without timing windows (DESIGN
+# §C1; IMPLEMENTATION_PLAN S2 step 11), in two runs because -run applies to every package
+# of one go test. internal/store stays out: its tests have timing windows.
 .PHONY: test-unit
 test-unit: bin/trace
 	$(TRACE) gotest -o .out/test-unit.json -- -race -count=1 ./...
+	$(TRACE) gotest -o .out/test-unit-cpu.json -- -race -count=1 -cpu 1,4 ./internal/settings/... ./internal/keys/... ./internal/fingerprint/... ./internal/receipt/... ./internal/metrics/...
+	$(TRACE) gotest -o .out/test-unit-cpu-core.json -- -race -count=1 -cpu 1,4 -run 'TestPermitTransitionPairsRace$$' ./internal/core/
 
 # L0 store conformance (DESIGN §C2; IMPLEMENTATION_PLAN S1 step 8): the whole suite, one
 # package at a time, without -race, which distorts the timings. Only this unfiltered run
