@@ -1,0 +1,5 @@
+user default off
+user rl_lib on >{{.LibPassword}} resetkeys ~rl:* -@all +evalsha +script|load +scan +ping +auth +hgetall +hexists +hset +hdel +hincrby +hlen +zscore +zadd +zrem +zrange +del +unlink +get +time
+user rl_admin on >{{.AdminPassword}} resetkeys ~rl:* -@all +evalsha +script|load +ping +auth +info +slowlog|get +bgrewriteaof +hgetall +hget +hexists +hset +hdel +hincrby +hlen +zscore +zadd +zrem +zrange +zcard +del +get +time
+user rl_fixture on >{{.FixturePassword}} resetkeys ~rl:* -@all +set +get +del +hset +hdel +zrem +zadd +flushall +ping +auth +type +eval
+user rl_ops on >{{.OpsPassword}} resetkeys -@all +config|get +config|set +info +bgrewriteaof +shutdown +ping +auth

@@ -1,0 +1,17 @@
+{"Action":"start","Package":"ratelimiter/harness/spectest"}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_1"}
+{"Action":"pass","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_1","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_2"}
+{"Action":"fail","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_2","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_3"}
+{"Action":"skip","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_3","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_7"}
+{"Action":"fail","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_7","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_8"}
+{"Action":"fail","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_8","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_7"}
+{"Action":"pass","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_7","Elapsed":0}
+{"Action":"run","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_9"}
+{"Action":"skip","Package":"ratelimiter/harness/spectest","Test":"TestT_COR_9","Elapsed":0}
+{"Action":"fail","Package":"ratelimiter/harness/spectest","Elapsed":0}
+{"Action":"pass","Package":"ratelimiter/internal/misplaced","Test":"TestT_COR_4","Elapsed":0}

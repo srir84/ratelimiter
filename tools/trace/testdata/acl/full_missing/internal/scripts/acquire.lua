@@ -1,0 +1,15 @@
+#!lua
+redis.call('HGETALL', KEYS[1])
+redis.call('HEXISTS', KEYS[2], 'f')
+redis.call('HSET', KEYS[3], 'f', '1')
+redis.call('HDEL', KEYS[3], 'f')
+redis.call('HINCRBY', KEYS[3], 'n', 1)
+redis.call('HLEN', KEYS[3])
+redis.call('ZSCORE', KEYS[4], 'm')
+redis.call('ZADD', KEYS[4], 1, 'm')
+redis.call('ZREM', KEYS[4], 'm')
+redis.call('ZRANGE', KEYS[4], 0, 1)
+redis.call('DEL', KEYS[5])
+redis.call('GET', KEYS[6])
+redis.call('TIME')
+return { 1, 0, '' }
