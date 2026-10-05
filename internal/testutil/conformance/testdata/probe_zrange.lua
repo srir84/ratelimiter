@@ -1,0 +1,3 @@
+#!lua flags=no-writes
+-- ZRANGE KEYS[1] ARGV[1] ARGV[2] BYSCORE LIMIT ARGV[3] ARGV[4] WITHSCORES.
+return redis.call('ZRANGE', KEYS[1], ARGV[1], ARGV[2], 'BYSCORE', 'LIMIT', ARGV[3], ARGV[4], 'WITHSCORES')

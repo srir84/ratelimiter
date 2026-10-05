@@ -60,6 +60,26 @@ endif
 test-unit: bin/trace
 	$(TRACE) gotest -o .out/test-unit.json -- -race -count=1 ./...
 
+# L0 store conformance (DESIGN §C2; IMPLEMENTATION_PLAN S1 step 8): the whole suite, one
+# package at a time, without -race, which distorts the timings. Only this unfiltered run
+# rewrites .data/conformance.json.
+.PHONY: test-store
+test-store: bin/trace
+	$(TRACE) gotest -o .out/test-store.json -- -tags conformance -count=1 -p 1 -timeout 45m ./internal/testutil/...
+
+# The functional assertions only, without the timing tests; slice-check runs it from S4 on.
+.PHONY: test-store-quick
+test-store-quick: bin/trace
+	$(TRACE) gotest -o .out/test-store-quick.json -- -tags conformance -count=1 -p 1 -timeout 10m \
+		-skip 'TestC2_Row09_Throughput|TestC2_Row13_Curve|TestC2_Row14_NoWrites|TestC2_FsyncFloor|TestC2_ScanUnlink200k' \
+		./internal/testutil/...
+
+# The pinned store's durability source lines (DESIGN §A3.0, §C8). Needs the network, so
+# it is not part of slice-check; run it when the pinned version changes.
+.PHONY: verify-store-source
+verify-store-source:
+	bash tools/verify-store-source.sh
+
 # bin/bench: hitapi and rladmin built without tags, the system under test and the
 # product tool; bin/test: every binary built with -tags rltest, where the harness
 # tools always run from (DESIGN §B1). Only the packages that exist so far, judged by
