@@ -3,8 +3,11 @@ package store
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"net"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,10 +15,400 @@ import (
 
 	"ratelimiter/internal/scripts"
 	"ratelimiter/internal/store/resp"
+	"ratelimiter/internal/testutil"
+	"ratelimiter/internal/testutil/fakeresp"
 )
 
 // The production adapter satisfies the interface that limitertest aliases (§A5.12).
 var _ Adapter = (*StoreAdapter)(nil)
+
+// The package's first six tests fail by assertion on defects that would crash or hang the
+// tests after them first (DESIGN §C9: neither a crash nor a hang is a kill), so bin/mutate,
+// which runs tests in file order with -failfast and without -shuffle, counts those defects as
+// kills; they stay first, in this order. TestPickDecides and TestDialReturnsEachFailure call
+// pick and dial directly, so a pick or a dial that returns neither a connection nor an error
+// fails them before any caller dereferences the missing connection, and TestPickDecides
+// takes a ready connection before any pick finds none ready. TestSuccessfulDialReadiesAtOnce
+// checks the slot's success path before any test's dial fails; TestDialFailuresInChild
+// checks that the adapter uses its injected Dial and Rand before any test builds an adapter
+// without them; TestStallAfterPartialBatchReply checks the stall rule before any reply
+// empties a FIFO, and the send observer before any test writes without one;
+// TestEntriesReturnAndCloseEnds checks Do's observer label for a two-word command before any
+// test sends a one-word one. Each call and each Close there runs on a goroutine of its own
+// with a bounded wait (within, waitDone), so a hang fails the test by assertion; nothing
+// catches a panic, which crashes the test binary.
+
+// TestPickDecides: pick decides in this order (DESIGN §A5.4; plan S3 step 8): a closed set is
+// unavailable (errAdapterClosed), even with ctx already ended; an ended ctx returns its cause
+// (context.Cause) at once; a ready connection is taken, with n commands reserved on it, even
+// while the kind's last dial failed within its backoff; and with none ready during that
+// backoff, a call fails fast (errFailFast). It runs pick on a bare connSet, with no
+// connection goroutines; the ready connection is a net.Pipe end that nothing reads.
+func TestPickDecides(t *testing.T) {
+	pick := func(s *connSet, ctx context.Context, n int, what string) (*pipeConn, error) {
+		t.Helper()
+		var pc *pipeConn
+		var err error
+		mustWithin(t, what, time.Second, func() { pc, err = s.pick(ctx, n) })
+		return pc, err
+	}
+	// A call ctx that its dependency deadline, start + D, has already ended.
+	ended, cancel := context.WithDeadlineCause(t.Context(), time.Now().Add(-time.Millisecond), errDependencyDeadline)
+	defer cancel()
+
+	closed := newConnSet(Call, t.Context(), nil)
+	closed.shutdown()
+	if pc, err := pick(closed, ended, 1, "a pick on a closed set"); pc != nil || !errors.Is(err, errAdapterClosed) {
+		t.Fatalf("a pick on a closed set, its ctx ended = %v, %v; want no connection and %v", pc, err, errAdapterClosed)
+	}
+	open := newConnSet(Call, t.Context(), nil)
+	if pc, err := pick(open, ended, 1, "a pick with its ctx ended"); pc != nil || !errors.Is(err, errDependencyDeadline) {
+		t.Fatalf("a pick with its ctx ended = %v, %v; want no connection and its cause, %v", pc, err, errDependencyDeadline)
+	}
+	c, s := net.Pipe()
+	t.Cleanup(func() { _, _ = c.Close(), s.Close() })
+	ready := newPipeConn(c, testD, nil, open.remove)
+	if !open.add(ready) {
+		t.Fatal("adding a ready connection to an open set failed")
+	}
+	open.dialFailed(time.Now().Add(time.Minute)) // another slot's dial failed meanwhile
+	if pc, err := pick(open, t.Context(), 2, "a pick with a connection ready"); pc != ready || err != nil || ready.load.Load() != 2 {
+		t.Fatalf("a pick of 2 with a connection ready = %v, %v, %d reserved; want that connection, no error, 2", pc, err, ready.load.Load())
+	}
+	open.remove(ready)
+	if pc, err := pick(open, t.Context(), 1, "a pick within the backoff"); pc != nil || !errors.Is(err, errFailFast) {
+		t.Fatalf("a pick within the backoff of a failed dial = %v, %v; want no connection and %v", pc, err, errFailFast)
+	}
+}
+
+// TestDialReturnsEachFailure: dial connects one connection and authenticates it (DESIGN
+// §A5.4). It returns the connection once AUTH succeeds; for each way it can fail it returns
+// an error and no connection, and closes the connection it opened: a connect that fails (the
+// dialer's error, wrapped), an AUTH the store refuses, and a connect that completes after its
+// set shut down (errAdapterClosed, with nothing written). It calls dial directly, on an
+// adapter with no connection slots.
+func TestDialReturnsEachFailure(t *testing.T) {
+	pw := newPassword(t)
+	srv := fakeresp.Start(t, "rl_lib", pw)
+	refused := errors.New("connection refused (test)")
+	var failConnect atomic.Bool
+	var writes atomic.Int64 // on every connection dial opened
+	var opened tapList
+	a := &StoreAdapter{
+		addr: srv.Addr(), user: "rl_lib", pass: pw, d: testD, life: t.Context(),
+		dialFn: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if failConnect.Load() {
+				return nil, refused
+			}
+			c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			tc := &tapConn{Conn: c, intercept: func(*tapConn, []byte) (bool, int, error) {
+				writes.Add(1)
+				return false, 0, nil
+			}}
+			opened.add(tc)
+			return tc, nil
+		},
+	}
+	set := newConnSet(Call, t.Context(), nil)
+
+	pc, err := a.dial(set)
+	if err != nil || pc == nil {
+		t.Fatalf("a dial the store accepts = %v, %v; want a connection and no error", pc, err)
+	}
+	_ = pc.conn.Close()
+
+	failConnect.Store(true)
+	pc, err = a.dial(set)
+	if pc != nil || !errors.Is(err, refused) {
+		t.Fatalf("a dial that cannot connect = %v, %v; want no connection and the dialer's error", pc, err)
+	}
+	failConnect.Store(false)
+
+	srv.ReplyError("AUTH", "WRONGPASS invalid username-password pair or user is disabled.", 1)
+	pc, err = a.dial(set)
+	if pc != nil || err == nil || errors.Is(err, errAdapterClosed) {
+		t.Fatalf("a dial whose AUTH the store refuses = %v, %v; want no connection and the handshake's error", pc, err)
+	}
+
+	set.shutdown()
+	before := writes.Load()
+	pc, err = a.dial(set)
+	if pc != nil || !errors.Is(err, errAdapterClosed) {
+		t.Fatalf("a dial that connects after its set shut down = %v, %v; want no connection and %v", pc, err, errAdapterClosed)
+	}
+	conns := opened.all()
+	closed := 0
+	for _, tc := range conns {
+		if tc.closed.Load() {
+			closed++
+		}
+	}
+	if len(conns) != 3 || closed != 3 || writes.Load() != before {
+		t.Errorf("%d connections opened, %d of them closed, %d writes after the shutdown; want 3 (the test closed the first), 3, 0",
+			len(conns), closed, writes.Load()-before)
+	}
+}
+
+// TestSuccessfulDialReadiesAtOnce: a slot whose first dial succeeds makes that connection
+// ready at once, with no backoff and no jitter draw (DESIGN §A5.4: the backoff follows a
+// failed dial or a lost connection). Every dial here succeeds, so the adapter never calls
+// Options.Rand; a call that comes anyway waits for the test's end, so its slot does nothing
+// more until then.
+func TestSuccessfulDialReadiesAtOnce(t *testing.T) {
+	pw := newPassword(t)
+	srv := fakeresp.Start(t, "rl_lib", pw)
+	var dials, draws atomic.Int64
+	a := startBounded(t, Options{
+		Addr: srv.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: 5 * time.Second, Limits: testLimits(), // no handshake runs out of time
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			dials.Add(1)
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		},
+		Rand: func() float64 {
+			draws.Add(1)
+			<-t.Context().Done()
+			return 0.5
+		},
+	})
+	waitFor(t, "every slot ready, or a jitter draw", 2*time.Second, func() bool {
+		ready := a.ReadyConns(Call) == 1 && a.ReadyConns(Refund) == 1 && a.ReadyConns(Maintenance) == 1
+		return ready || draws.Load() > 0
+	})
+	if d, r := dials.Load(), draws.Load(); d != 3 || r != 0 {
+		t.Fatalf("%d dials and %d jitter draws before every slot was ready, want 3 (one per slot) and 0", d, r)
+	}
+}
+
+// TestDialFailuresInChild: a dial that cannot connect, one whose AUTH the store refuses, and
+// one that completes only after Close each end without a connection (DESIGN §A5.4). After a
+// failure the slot draws its jitter from Options.Rand, backs off and dials again through
+// Options.Dial, closing the connection it opened; after Close it closes the late connection
+// unused. It runs in a child copy of the test binary (testutil.InChild): a defect that
+// crashes a connection goroutine on these paths crashes only the child, which InChild
+// reports as a crash, never as a failure by assertion, and the package's other tests still
+// run.
+func TestDialFailuresInChild(t *testing.T) {
+	if !testutil.InChild(t, 20*time.Second) {
+		return
+	}
+	pw := newPassword(t)
+	srv := fakeresp.Start(t, "rl_lib", pw)
+	srv.ReplyError("AUTH", "WRONGPASS invalid username-password pair or user is disabled.", 3)
+	var dials, draws atomic.Int64
+	var reached tapList // the connections that reached the store
+	a := startBounded(t, Options{
+		Addr: srv.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: testD, Limits: testLimits(),
+		// The 3 slots' first dials cannot connect; the next 3 reach the store, which refuses
+		// their AUTH; every later dial succeeds.
+		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			if dials.Add(1) <= 3 {
+				return nil, errors.New("connection refused (test)")
+			}
+			c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			tc := &tapConn{Conn: c}
+			reached.add(tc)
+			return tc, nil
+		},
+		Rand: func() float64 { draws.Add(1); return 0.99 }, // backoffs of 49.75 ms, then 99.5 ms
+	})
+	waitFor(t, "every slot ready after a failed connect and a refused AUTH", 3*time.Second, func() bool {
+		return a.ReadyConns(Call) == 1 && a.ReadyConns(Refund) == 1 && a.ReadyConns(Maintenance) == 1
+	})
+	if d, r := dials.Load(), draws.Load(); d != 9 || r != 6 {
+		t.Errorf("%d dials and %d jitter draws, want 9 (3 refused, 3 with AUTH refused, 3 ready) and 6 (one per failed dial)", d, r)
+	}
+	closed := 0
+	for _, tc := range reached.all() {
+		if tc.closed.Load() {
+			closed++
+		}
+	}
+	if n := len(reached.all()); n != 6 || closed != 3 {
+		t.Errorf("%d connections reached the store and %d of them were closed, want 6 and 3 (those whose AUTH was refused)", n, closed)
+	}
+
+	// Each slot's dial completes only after Close began: it closes that connection unused.
+	var dialing, writes atomic.Int64
+	var late tapList
+	b := startBounded(t, Options{
+		Addr: srv.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: time.Minute, Limits: testLimits(), // only Close ends these dials
+		Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			dialing.Add(1)
+			<-ctx.Done() // the adapter's lifetime ends at Close …
+			c, s := net.Pipe()
+			_ = s.Close() // nothing would read what the client end writes
+			tc := &tapConn{Conn: c, intercept: func(*tapConn, []byte) (bool, int, error) {
+				writes.Add(1)
+				return false, 0, nil
+			}}
+			late.add(tc)
+			return tc, nil // … and the dial completes all the same
+		},
+	})
+	waitFor(t, "3 dials in progress", time.Second, func() bool { return dialing.Load() == 3 })
+	mustWithin(t, "Close", 2*time.Second, b.Close)
+	conns := late.all()
+	closed = 0
+	for _, tc := range conns {
+		if tc.closed.Load() {
+			closed++
+		}
+	}
+	if len(conns) != 3 || closed != 3 || writes.Load() != 0 {
+		t.Errorf("%d connections completed after Close, %d closed, %d writes on them; want 3, 3, 0", len(conns), closed, writes.Load())
+	}
+}
+
+// TestStallAfterPartialBatchReply: when the store answers the first command of a batch and
+// never the second, the stall rule moves to the second, the new FIFO head, and closes the
+// connection once it has waited D since its write (DESIGN §A5.4; plan S3 step 4). The first
+// response is ok with its reply; the second, sent and never answered, outcome_unknown. The
+// store end is a net.Pipe (pipeStore), so the test decides to the byte what arrives.
+func TestStallAfterPartialBatchReply(t *testing.T) {
+	pw := newPassword(t)
+	srv := fakeresp.Start(t, "rl_lib", pw) // the redial after the stall reaches it
+	sc := scripts.New("acquire", "-- partial batch reply")
+	srv.Load(sc.Text)
+	srv.Handle(sc.SHA, echoAcquire)
+	p := newPipeStore(t, srv.Addr())
+	obs := &observer{}
+	a := startBounded(t, Options{
+		Addr: srv.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: testD, Limits: testLimits(), Dial: p.dial, SendObserver: obs.record,
+	})
+	waitFor(t, "ready connections", 5*time.Second, func() bool {
+		return a.ReadyConns(Call) == 1 && a.ReadyConns(Refund) == 1 && a.ReadyConns(Maintenance) == 1
+	})
+	end := p.callEnd(t, a)
+	if err := end.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("setting the store end's read deadline: %v", err)
+	}
+	r := resp.NewReader(end)
+
+	began := time.Now() // before the batch's write
+	var rs []Response
+	batch := goDone(func() {
+		rs = a.CallBatch(t.Context(), []Request{acquireReq(sc, 1), acquireReq(sc, 2)})
+	})
+	for g := 1; g <= 2; g++ {
+		v, err := r.ReadValue()
+		if err != nil || len(v.Elems) != 4 || v.Elems[0].Str != "EVALSHA" || v.Elems[3].Str != strconv.Itoa(g) {
+			t.Fatalf("the store read %s, %v; want the batch's EVALSHA with g %d", v, err, g)
+		}
+	}
+	if _, err := end.Write(resp.AppendValue(nil, allowed(1))); err != nil { // the first command's reply only
+		t.Fatalf("answering the first command: %v", err)
+	}
+	if err := end.SetReadDeadline(time.Now().Add(testD + time.Second)); err != nil {
+		t.Fatalf("setting the store end's read deadline: %v", err)
+	}
+	if v, err := r.ReadValue(); !errors.Is(err, io.EOF) {
+		t.Fatalf("after the first reply the store end read %s, %v; want EOF: the stall rule did not close the connection for the unanswered second command", v, err)
+	}
+	if el := time.Since(began); el < testD {
+		t.Errorf("the connection closed %v after the batch began, before D", el)
+	}
+	if !waitDone(t, "CallBatch", 2*time.Second, batch) {
+		t.FailNow()
+	}
+	if rs[0].Outcome != OK || rs[0].Reply.Elems[4].Int != 1 {
+		t.Errorf("response 1 = %v, want ok with its own reply", rs[0].Outcome)
+	}
+	if rs[1].Outcome != OutcomeUnknown || !rs[1].Sent || rs[1].SentCommands != 1 {
+		t.Errorf("response 2 = %v, Sent %v, SentCommands %d; want outcome_unknown, true, 1", rs[1].Outcome, rs[1].Sent, rs[1].SentCommands)
+	}
+	// The observer hears each command of the batch once, with all its bytes (§A5.12).
+	want := []int{cmdLen("EVALSHA", sc.SHA, "0", "1"), cmdLen("EVALSHA", sc.SHA, "0", "2")}
+	if got := obs.bytesOf("acquire"); !slices.Equal(got, want) {
+		t.Errorf("observer bytes for acquire = %v, want %v", got, want)
+	}
+}
+
+// TestEntriesReturnAndCloseEnds: every call returns, and Close ends at once, in each state a
+// call can find the adapter in: no connection ready yet, with the host's ctx already
+// cancelled (cancelled at once) or live (unavailable at start + D); ready, with the host's
+// ctx live or already cancelled; and closed (DESIGN §A5.4; SPEC API-1, API-22). Do labels a
+// command for the send observer by its name in upper case, with SCRIPT's subcommand when it
+// has one (§A5.12).
+func TestEntriesReturnAndCloseEnds(t *testing.T) {
+	pw := newPassword(t)
+	sc := scripts.New("acquire", "-- entries return")
+	var r Response
+	cancelled, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	hang := fakeresp.Start(t, "rl_lib", pw)
+	hang.HangAuth() // no connection ever becomes ready
+	n := startBounded(t, Options{
+		Addr: hang.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: testD, Limits: testLimits(),
+	})
+	start := time.Now()
+	mustWithin(t, "a call with no connection ready and the host's ctx cancelled", 2*time.Second, func() {
+		r = n.Call(cancelled, acquireReq(sc, 1))
+	})
+	if el := time.Since(start); r.Outcome != Cancelled || r.Sent || el >= testD {
+		t.Errorf("a call with no connection ready and the host's ctx cancelled = %v, Sent %v after %v; want cancelled, false, at once (before D)",
+			r.Outcome, r.Sent, el)
+	}
+	start = time.Now()
+	mustWithin(t, "a call with no connection ready", 2*time.Second, func() { r = n.Call(t.Context(), acquireReq(sc, 2)) })
+	if el := time.Since(start); r.Outcome != Unavailable || r.Sent || el < testD {
+		t.Errorf("a call with no connection ready = %v, Sent %v after %v; want unavailable, false at start + D", r.Outcome, r.Sent, el)
+	}
+	mustWithin(t, "Close with no connection ready", time.Second, n.Close)
+
+	srv := fakeresp.Start(t, "rl_lib", pw)
+	srv.Load(sc.Text)
+	srv.Handle(sc.SHA, echoAcquire)
+	obs := &observer{}
+	a := startBounded(t, Options{
+		Addr: srv.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		DependencyDeadline: testD, Limits: testLimits(), SendObserver: obs.record,
+	})
+	waitFor(t, "ready connections", 5*time.Second, func() bool {
+		return a.ReadyConns(Call) == 1 && a.ReadyConns(Refund) == 1 && a.ReadyConns(Maintenance) == 1
+	})
+	mustWithin(t, "a call", 2*time.Second, func() { r = a.Call(t.Context(), acquireReq(sc, 1)) })
+	if r.Outcome != OK || r.Reply.Elems[4].Int != 1 || r.SentCommands != 1 {
+		t.Fatalf("a call = %v, SentCommands %d; want ok with its own reply, 1", r.Outcome, r.SentCommands)
+	}
+	mustWithin(t, "a call with the host's ctx cancelled", 2*time.Second, func() { r = a.Call(cancelled, acquireReq(sc, 2)) })
+	if r.Outcome != Cancelled || r.Sent {
+		t.Errorf("a call with the host's ctx cancelled = %v, Sent %v; want cancelled, false", r.Outcome, r.Sent)
+	}
+	before := len(obs.all())
+	mustWithin(t, "Do(ping hello)", 2*time.Second, func() { _, r = a.Do(t.Context(), Call, "ping", "hello") })
+	if r.Outcome != OK {
+		t.Errorf("Do(ping hello) = %v, want ok", r.Outcome)
+	}
+	// Checked before the next Do is sent: a two-word command other than SCRIPT is labelled
+	// by its name alone.
+	if got, want := obs.all()[before:], []obsRec{{"PING", cmdLen("ping", "hello")}}; !slices.Equal(got, want) {
+		t.Fatalf("Do(ping hello) records = %v, want %v", got, want)
+	}
+	mustWithin(t, "Do(SCRIPT)", 2*time.Second, func() { _, r = a.Do(t.Context(), Call, "SCRIPT") }) // no subcommand
+	if !r.Sent {
+		t.Errorf("Do(SCRIPT): Sent false, want true")
+	}
+	if got, want := obs.all()[before+1:], []obsRec{{"SCRIPT", cmdLen("SCRIPT")}}; !slices.Equal(got, want) {
+		t.Errorf("Do(SCRIPT) records = %v, want %v", got, want)
+	}
+	mustWithin(t, "Close", time.Second, a.Close)
+	mustWithin(t, "a call after Close", time.Second, func() { r = a.Call(t.Context(), acquireReq(sc, 3)) })
+	if r.Outcome != Unavailable || r.Sent {
+		t.Errorf("a call after Close = %v, Sent %v; want unavailable, false", r.Outcome, r.Sent)
+	}
+}
 
 func TestSendObserver(t *testing.T) {
 	e := newEnv(t)
@@ -364,7 +757,10 @@ func startEachEntry(t *testing.T, e *env, sc scripts.Script, start time.Time) (w
 	}
 	return func() {
 		t.Helper()
-		wg.Wait()
+		// A call stuck for good fails the test here, not by the test binary's timeout.
+		if !within(t, "the 3 calls", 2*time.Second, wg.Wait) {
+			t.FailNow()
+		}
 		for i, entry := range entries {
 			for j, r := range rs[i] {
 				if r.Outcome != Unavailable || r.Sent || r.SentCommands != 0 {
@@ -449,8 +845,13 @@ func TestHostCancelWhileWaitingForWriteLock(t *testing.T) {
 	})
 	wait()
 	close(release)
-	if a := <-doneA; a.Outcome != Unavailable || a.Sent {
-		t.Errorf("A = %v, Sent %v; want unavailable, false: its write sent nothing", a.Outcome, a.Sent)
+	select { // A stuck for good fails the test here, not by the test binary's timeout
+	case a := <-doneA:
+		if a.Outcome != Unavailable || a.Sent {
+			t.Errorf("A = %v, Sent %v; want unavailable, false: its write sent nothing", a.Outcome, a.Sent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("A still running 2 s after its write was released")
 	}
 	select {
 	case <-pc.done:

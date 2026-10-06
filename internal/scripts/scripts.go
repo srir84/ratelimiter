@@ -3,13 +3,16 @@
 // text SCRIPT LOAD sends when the store does not know it yet. Scripts are content-addressed,
 // so two versions never overwrite each other (STA-16).
 //
-// The embedded *.lua files and the exported script values arrive in S4; until then New is
-// the only way to build a Script (IMPLEMENTATION_PLAN S3 step 1).
+// Each script is assembled from its embedded file and the shared prelude.lua (DESIGN §A4.2;
+// IMPLEMENTATION_PLAN S4 step 3): its first line (the #!lua header), "\n", the whole
+// prelude, then the rest of its file. prelude.lua is never a script itself.
 package scripts
 
 import (
 	"crypto/sha1"
+	"embed"
 	"encoding/hex"
+	"strings"
 )
 
 // Script is one store script: Name is its §A4.1 name without ".lua" (e.g. "acquire"),
@@ -21,4 +24,56 @@ type Script struct{ Name, SHA, Text string }
 func New(name, text string) Script {
 	sum := sha1.Sum([]byte(text))
 	return Script{Name: name, SHA: hex.EncodeToString(sum[:]), Text: text}
+}
+
+//go:embed *.lua
+var files embed.FS
+
+// The scripts written so far (IMPLEMENTATION_PLAN S4), assembled once at package
+// initialization and never changed afterwards.
+var (
+	ReadEpoch       = assemble("read_epoch")
+	Hold            = assemble("hold")
+	AdminStartEpoch = assemble("admin_start_epoch")
+	AdminStatus     = assemble("admin_status")
+	AdminInspect    = assemble("admin_inspect")
+	Acquire         = assemble("acquire")
+)
+
+// ByName returns the script with the §A4.1 name, and false for a name with no script yet.
+func ByName(name string) (Script, bool) {
+	switch name {
+	case "read_epoch":
+		return ReadEpoch, true
+	case "hold":
+		return Hold, true
+	case "admin_start_epoch":
+		return AdminStartEpoch, true
+	case "admin_status":
+		return AdminStatus, true
+	case "admin_inspect":
+		return AdminInspect, true
+	case "acquire":
+		return Acquire, true
+	}
+	return Script{}, false
+}
+
+// assemble builds the script name from <name>.lua and prelude.lua (§A4.2): the file's first
+// line, "\n", the prelude, then the rest of the file. A missing embedded file or a file with
+// no line after its header is a build defect, so it panics during package initialization.
+func assemble(name string) Script {
+	prelude, err := files.ReadFile("prelude.lua")
+	if err != nil {
+		panic("scripts: " + err.Error())
+	}
+	src, err := files.ReadFile(name + ".lua")
+	if err != nil {
+		panic("scripts: " + err.Error())
+	}
+	header, rest, ok := strings.Cut(string(src), "\n")
+	if !ok || !strings.HasPrefix(header, "#!lua") {
+		panic("scripts: " + name + ".lua does not start with a #!lua header line")
+	}
+	return New(name, header+"\n"+string(prelude)+rest)
 }

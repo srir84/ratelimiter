@@ -145,6 +145,38 @@ func TestHandshake(t *testing.T) {
 		}
 	})
 
+	t.Run("array refusal echoes the password", func(t *testing.T) {
+		c, peer := net.Pipe()
+		t.Cleanup(func() { _ = c.Close(); _ = peer.Close() })
+		done := make(chan struct{})
+		go func() { // a peer that answers AUTH with an array repeating the password, nested too
+			defer close(done)
+			if _, err := resp.NewReader(peer).ReadValue(); err != nil {
+				return
+			}
+			reply := resp.Value{Kind: resp.Array, Elems: []resp.Value{
+				{Kind: resp.Bulk, Str: pw + " is not accepted"},
+				{Kind: resp.Array, Elems: []resp.Value{{Kind: resp.Bulk, Str: pw}}},
+			}}
+			_, _ = peer.Write(resp.AppendValue(nil, reply))
+		}()
+		err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(5*time.Second), nil)
+		<-done
+		if err == nil {
+			t.Fatal("Handshake refused by the store succeeded")
+		}
+		// Compared, never printed: no 8-byte piece of the password is in the error.
+		msg := err.Error()
+		for i := 0; i+8 <= len(pw); i++ {
+			if strings.Contains(msg, pw[i:i+8]) {
+				t.Fatal("Handshake error contains the password, or part of it")
+			}
+		}
+		if !strings.Contains(msg, "is not accepted") {
+			t.Errorf("Handshake error lost the rest of the store's refusal")
+		}
+	})
+
 	t.Run("closed connection", func(t *testing.T) {
 		c := dialServer(t, srv)
 		if err := c.Close(); err != nil {

@@ -755,18 +755,29 @@ func TestEOFFailsAllInFlight(t *testing.T) {
 		}()
 	}
 	waitFor(t, "5 commands written", 2*time.Second, func() bool { return len(e.obs.bytesOf("acquire")) == 5 })
+	// A Do behind them, which the store answers only after them, is in flight too.
+	var pingV resp.Value
+	var ping Response
+	pinged := goDone(func() { pingV, ping = e.a.Do(t.Context(), Call, "PING") })
+	waitFor(t, "the PING written", 2*time.Second, func() bool { return len(e.obs.bytesOf("PING")) == 1 })
 	dropped := time.Now()
 	e.srv.DropConns()
 	wg.Wait()
+	if !waitDone(t, "Do(PING)", 2*time.Second, pinged) {
+		t.FailNow()
+	}
 	el := time.Since(dropped)
 	close(release)
 	for i, r := range results {
-		if r.Outcome != OutcomeUnknown || !r.Sent {
-			t.Errorf("call %d = %v, Sent %v; want outcome_unknown, true", i+1, r.Outcome, r.Sent)
+		if r.Outcome != OutcomeUnknown || !r.Sent || r.Raw != "" {
+			t.Errorf("call %d = %v, Sent %v, Raw %q; want outcome_unknown, true, no reply", i+1, r.Outcome, r.Sent, r.Raw)
 		}
 	}
+	if ping.Outcome != OutcomeUnknown || !ping.Sent || pingV.Kind != 0 {
+		t.Errorf("Do(PING) = %s, %v, Sent %v; want no reply, outcome_unknown, true", pingV, ping.Outcome, ping.Sent)
+	}
 	if el >= 200*time.Millisecond {
-		t.Errorf("the calls ended %v after the drop, want at once (before their own deadline)", el)
+		t.Errorf("the calls and the Do ended %v after the drop, want at once (before their own deadline)", el)
 	}
 	waitFor(t, "a reconnect", 2*time.Second, func() bool {
 		return e.srv.Accepted() > accepted && e.a.ReadyConns(Call) == 1
@@ -849,11 +860,58 @@ func TestWaitingWriterRepicks(t *testing.T) {
 		return len(set.ready) == 1 && set.ready[0].load.Load() == 2
 	})
 	close(release) // call 1's write fails after 5 bytes, which closes the connection
-	wg.Wait()
+	// A call stuck for good fails the test here, not by the test binary's timeout.
+	if !within(t, "calls 1 and 2", 2*time.Second, wg.Wait) {
+		t.FailNow()
+	}
 	if r1.Outcome != OutcomeUnknown || r1.SentCommands != 1 {
 		t.Errorf("call 1 = %v, SentCommands %d; want outcome_unknown, 1", r1.Outcome, r1.SentCommands)
 	}
 	if r2.Outcome != OK || r2.Reply.Elems[4].Int != 2 || r2.SentCommands != 1 {
 		t.Errorf("call 2 = %v, SentCommands %d; want ok with its own reply on the redialed connection, 1", r2.Outcome, r2.SentCommands)
+	}
+}
+
+// TestFailedDeadlineClearStillCloses: a connection on which setting the read deadline failed
+// is broken (DESIGN §A5.4: a connection is closed on an I/O error), so it still closes by the
+// read deadline it kept. Here a reply that matches no command sent pops the one call in the
+// FIFO while its write is still under way, and the reader's clearing SetReadDeadline fails;
+// the write then fails with nothing sent, so it has no call of its own left to take back out
+// of the FIFO and leaves the read deadline as it is: the connection closes at that write's
+// time + D instead of staying open with no deadline. It drives one pipeConn over a net.Pipe
+// whose client end fails one SetReadDeadline and intercepts the write.
+func TestFailedDeadlineClearStillCloses(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { _ = s.Close() })
+	buf := resp.AppendCommand(nil, "PING")
+	ping := &call{label: "PING", start: 0, end: len(buf), res: make(chan result, 1)}
+	tc := &tapConn{Conn: c, intercept: func(tc *tapConn, _ []byte) (bool, int, error) {
+		tc.failReadDeadline.Store(true) // the reader's clear, after the reply below, fails
+		if _, err := s.Write([]byte("+PONG\r\n")); err != nil {
+			t.Errorf("the store end's reply: %v", err)
+		}
+		waitFor(t, "the reader to take the reply", time.Second, func() bool { return len(ping.res) == 1 })
+		return true, 0, injectedError{} // nothing of the PING left
+	}}
+	pc := newPipeConn(tc, testD, nil, func(*pipeConn) {})
+	go pc.readLoop()
+	t.Cleanup(func() {
+		pc.close()
+		<-pc.readerDone
+	})
+
+	began := time.Now() // before the write sets the read deadline to its own time + D
+	n, closed, err := pc.write(t.Context(), []*call{ping}, buf)
+	if n != 0 || closed || err == nil || !tc.readDeadlineFailed.Load() {
+		t.Fatalf("write = %d, %v, %v, with the reader's SetReadDeadline failed %v; want 0 bytes, open, an error, true",
+			n, closed, err, tc.readDeadlineFailed.Load())
+	}
+	select {
+	case <-pc.done:
+		if el := time.Since(began); el < testD {
+			t.Errorf("the connection closed %v after the write, before its read deadline (D = %v)", el, testD)
+		}
+	case <-time.After(time.Until(began.Add(testD + time.Second))):
+		t.Fatalf("the connection is still open 1 s after its read deadline, the write's time + D: the deadline was cleared")
 	}
 }

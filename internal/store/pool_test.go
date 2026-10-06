@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"slices"
 	"sync"
@@ -143,6 +144,67 @@ func TestFewestInFlightCountsReplies(t *testing.T) {
 	slices.Sort(counts)
 	if !slices.Equal(counts, []int{1, 8}) {
 		t.Errorf("EVALSHA writes per call connection = %v, want [1 8]: call 1 alone on one, the 8 others on the other", counts)
+	}
+}
+
+// TestFewestInFlightTieGoesToFirstReady: among ready connections with equally few commands in
+// flight, a call takes the one that became ready first (plan choice: pick keeps the ready
+// order among ties, so a call never passes over an idle connection for a later one). With 3
+// call connections and every reply held back, calls 1, 2 and 3 go to the first, second and
+// third ready connection, and call 4, with one in flight on each, to the first again.
+func TestFewestInFlightTieGoesToFirstReady(t *testing.T) {
+	e := newEnv(t)
+	release := make(chan struct{})
+	sc := e.script("acquire", blockUntil(t.Context(), release)) // no reply until release
+	var mu sync.Mutex
+	var order []*tapConn // the connection of each EVALSHA write, in order
+	var taps tapList
+	e.start(withConns(3, 1), withDeadline(2*time.Second), withTap(&taps, func(c *tapConn, p []byte) (bool, int, error) {
+		if bytes.Contains(p, []byte("EVALSHA")) {
+			mu.Lock()
+			order = append(order, c)
+			mu.Unlock()
+		}
+		return false, 0, nil
+	}))
+	e.warm(3, 1)
+	set := e.a.sets[Call]
+	set.mu.Lock()
+	ready := make([]net.Conn, len(set.ready)) // in the order they became ready
+	for i, pc := range set.ready {
+		ready[i] = pc.conn
+	}
+	set.mu.Unlock()
+	written := func() []int { // each write's connection, as its place in ready
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]int, len(order))
+		for i, c := range order {
+			out[i] = slices.Index(ready, net.Conn(c))
+		}
+		return out
+	}
+
+	var wg sync.WaitGroup
+	results := make([]Response, 4)
+	for i := range results {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = e.a.Call(t.Context(), acquireReq(sc, i+1))
+		}()
+		waitFor(t, fmt.Sprintf("call %d written", i+1), time.Second, func() bool { return len(written()) == i+1 })
+	}
+	got := written()
+	close(release)
+	wg.Wait()
+	if want := []int{0, 1, 2, 0}; !slices.Equal(got, want) {
+		t.Errorf("calls 1–4 went to ready connections %v, want %v: the first of the least loaded each time", got, want)
+	}
+	for i, r := range results {
+		if r.Outcome != OK || r.Reply.Elems[4].Int != int64(i+1) {
+			t.Errorf("call %d = %v, want ok with its own reply", i+1, r.Outcome)
+		}
 	}
 }
 

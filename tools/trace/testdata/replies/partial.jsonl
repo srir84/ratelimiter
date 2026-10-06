@@ -1,0 +1,20 @@
+{"script":"hold","code":40,"reason":""}
+{"script":"hold","code":41,"reason":"epoch_changed"}
+{"script":"hold","code":41,"reason":"epoch_gone"}
+{"script":"admin_status","code":40,"reason":""}
+{"script":"admin_status","code":41,"reason":"epoch_record_missing"}
+{"script":"admin_status","code":41,"reason":"epoch_record_malformed"}
+{"script":"admin_status","code":41,"reason":"epoch_changed"}
+{"script":"read_epoch","code":0,"reason":""}
+{"script":"read_epoch","code":22,"reason":"epoch_record_missing"}
+{"script":"read_epoch","code":22,"reason":"epoch_record_malformed"}
+{"script":"read_epoch","code":22,"reason":"hwm_missing"}
+{"script":"read_epoch","code":22,"reason":"integrity_hold"}
+{"script":"read_epoch","code":"22","reason":"hwm_malformed"}
+{"script":"read_epoch","code":22}
+{"script":"read_epoch","code":22,"reason":"hwm_malformed","t_us":0}
+{"script":"read_epoch","code":22,"reason":"hwm_malformed"} {}
+not json
+
+{"script":"read_epoch","code":122,"reason":"hwm_malformed"}
+{"script":"","code":22,"reason":"hwm_malformed"}

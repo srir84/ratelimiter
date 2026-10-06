@@ -21,6 +21,9 @@ commands:
   testglobals                 no writes to package-level variables in test code (§C7)
   oracle                      expected values never come from internal/core (§C7)
   procs                       kill and report recorded child processes still alive (§C7)
+  replies [--upto <id>]       every reply literal of internal/scripts/*.lua is in the reply table and
+                              every reason of the table in DESIGN; with --upto from S4 on, every row
+                              is observed in .out/replies-l2.jsonl (§C3 reply-code closure)
   targets --upto <id>         make targets of the slices up to <id>
   slices --upto <id> [--plan IMPLEMENTATION_PLAN.md] [--results .out]
                               every ID and plan-named test up to <id> exists and passed
@@ -75,6 +78,8 @@ func checkByName(name string) (checkFunc, bool) {
 		return checkOracle, true
 	case "procs":
 		return checkProcs, true
+	case "replies":
+		return checkReplies, true
 	case "slices":
 		return checkSlices, true
 	}

@@ -1,0 +1,16 @@
+{"script":"hold","code":40,"reason":""}
+{"script":"hold","code":41,"reason":"epoch_changed"}
+{"script":"admin_status","code":40,"reason":""}
+{"script":"admin_status","code":41,"reason":"epoch_record_missing"}
+{"script":"admin_status","code":41,"reason":"epoch_record_malformed"}
+{"script":"admin_status","code":41,"reason":"epoch_changed"}
+{"script":"admin_status","code":41,"reason":"shared_key_malformed"}
+{"script":"admin_status","code":41,"reason":"epoch_changed"}
+{"script":"read_epoch","code":0,"reason":""}
+{"script":"read_epoch","code":22,"reason":"epoch_record_missing"}
+{"script":"read_epoch","code":22,"reason":"epoch_record_malformed"}
+{"script":"read_epoch","code":22,"reason":"hwm_missing"}
+{"script":"read_epoch","code":22,"reason":"hwm_malformed"}
+{"script":"read_epoch","code":22,"reason":"integrity_hold"}
+{"script":"acquire","code":99,"reason":"not_a_row"}
+{"script":"audit_fixture","code":7,"reason":"anything"}

@@ -190,6 +190,57 @@ func acquireReq(sc scripts.Script, g int) Request {
 	return Request{Kind: Call, Script: sc, Args: []string{strconv.Itoa(g)}}
 }
 
+// goDone runs f on a goroutine of its own and returns a channel that is closed when f
+// returns. Nothing catches a panic in f, and a panic never closes the channel: it crashes the
+// test binary, which DESIGN §C9 never counts as a kill.
+func goDone(f func()) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		f()
+		close(done)
+	}()
+	return done
+}
+
+// waitDone waits up to d for done (goDone). It reports false, failing t with Errorf, when the
+// function is still running after d: a defect that hangs then ends the test by assertion,
+// leaving the function's goroutine behind, instead of timing out the test binary. Once it
+// reports true, what the function wrote is safe to read.
+func waitDone(t *testing.T, what string, d time.Duration, done <-chan struct{}) bool {
+	t.Helper()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		t.Errorf("%s still running %v later", what, d)
+		return false
+	}
+}
+
+// within runs f on its own goroutine and waits up to d for it to return (goDone, waitDone).
+func within(t *testing.T, what string, d time.Duration, f func()) bool {
+	t.Helper()
+	return waitDone(t, what, d, goDone(f))
+}
+
+// mustWithin is within, ending the test at a failure.
+func mustWithin(t *testing.T, what string, d time.Duration, f func()) {
+	t.Helper()
+	if !within(t, what, d, f) {
+		t.FailNow()
+	}
+}
+
+// startBounded builds an adapter with o on the test's lifetime, like env.start, but its
+// cleanup closes it within 2 s (within): a Close that hangs fails the test instead of the test
+// binary's timeout.
+func startBounded(t *testing.T, o Options) *StoreAdapter {
+	t.Helper()
+	a := New(t.Context(), o)
+	t.Cleanup(func() { within(t, "Close", 2*time.Second, a.Close) })
+	return a
+}
+
 // waitFor polls cond every millisecond and fails the test if it does not hold within d.
 func waitFor(t *testing.T, what string, d time.Duration, cond func() bool) {
 	t.Helper()
@@ -222,6 +273,9 @@ type tapConn struct {
 	closed    atomic.Bool
 	// failDeadline, while set, makes the next SetWriteDeadline fail; deadlineFailed records it.
 	failDeadline, deadlineFailed atomic.Bool
+	// failReadDeadline, while set, makes the next SetReadDeadline fail; readDeadlineFailed
+	// records it.
+	failReadDeadline, readDeadlineFailed atomic.Bool
 }
 
 func (tc *tapConn) SetWriteDeadline(t time.Time) error {
@@ -230,6 +284,14 @@ func (tc *tapConn) SetWriteDeadline(t time.Time) error {
 		return injectedError{}
 	}
 	return tc.Conn.SetWriteDeadline(t)
+}
+
+func (tc *tapConn) SetReadDeadline(t time.Time) error {
+	if tc.failReadDeadline.CompareAndSwap(true, false) {
+		tc.readDeadlineFailed.Store(true)
+		return injectedError{}
+	}
+	return tc.Conn.SetReadDeadline(t)
 }
 
 func (tc *tapConn) Write(p []byte) (int, error) {

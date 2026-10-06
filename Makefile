@@ -12,6 +12,7 @@ GOLANGCI ?= bin/tools/golangci-lint
 STYLUA ?= stylua
 PYTHON ?= python3
 TRACE ?= bin/trace
+MUTATE ?= bin/mutate
 
 # Sub-makes run through SUBMAKE, never a literal $(MAKE): make runs any recipe line
 # that names $(MAKE) even under -n, so `make -n slice-check` would run bin/trace procs.
@@ -26,6 +27,11 @@ PY_PKGS := $(wildcard refmodel report)
 .PHONY: bin/trace
 bin/trace:
 	$(GO) build -o bin/trace ./tools/trace
+
+# Always rebuilt, with $(GO), whatever MUTATE names. A prerequisite of mutate and slice-check.
+.PHONY: bin/mutate
+bin/mutate:
+	$(GO) build -o bin/mutate ./tools/mutate
 
 .PHONY: setup
 setup:
@@ -79,6 +85,29 @@ test-store-quick: bin/trace
 		-skip 'TestC2_Row09_Throughput|TestC2_Row13_Curve|TestC2_Row14_NoWrites|TestC2_FsyncFloor|TestC2_ScanUnlink200k' \
 		./internal/testutil/...
 
+# L2 script tests (DESIGN §C3; IMPLEMENTATION_PLAN S4 step 12): the plain run, then the
+# script discipline run, where scriptrun.Run calls every script instrumented
+# (RL_SCRIPT_AUDIT=1, read only in internal/testutil/scriptrun). Every L2 test file carries
+# //go:build scripttest, so make test-unit starts no store. Both runs append the replies they
+# observe to a fresh .out/replies-l2.jsonl, so bin/trace replies reads only this target's
+# (never an earlier run's, or a mutant's).
+.PHONY: test-scripts
+test-scripts: bin/trace
+	rm -f .out/replies-l2.jsonl
+	$(TRACE) gotest -o .out/test-scripts.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
+	RL_SCRIPT_AUDIT=1 $(TRACE) gotest -o .out/test-scripts-audit.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
+
+# Mutation testing (DESIGN §C9; IMPLEMENTATION_PLAN S4 step 17): the curated planted bugs whose
+# files exist, or, when SWEEP lists files, the operator sweep over them (make mutate
+# SWEEP="internal/scripts/acquire.lua …"; survivors and untried mutants go to .out/mutants.txt).
+.PHONY: mutate
+mutate: bin/mutate
+ifeq ($(strip $(SWEEP)),)
+	$(MUTATE) --curated
+else
+	$(MUTATE) --sweep $(SWEEP)
+endif
+
 # The pinned store's durability source lines (DESIGN §A3.0, §C8). Needs the network, so
 # it is not part of slice-check; run it when the pinned version changes.
 .PHONY: verify-store-source
@@ -104,12 +133,14 @@ endif
 endif
 
 # make slice-check S=<id>: leftover children of an earlier run (before .out/ goes), a
-# fresh .out/, check, each test target of the slices up to S followed by procs, then
-# every ID and plan-named test up to S. Stops at the first failure. The target list
-# goes into a shell variable first: bash ignores a failing $(...) in a for word list,
-# even under -e.
+# fresh .out/, check, each test target of the slices up to S followed by procs; then the
+# reply-code closure, the curated mutants whose files exist (so a later slice that weakens
+# an earlier test fails) and procs (IMPLEMENTATION_PLAN S4 step 17); then every ID and
+# plan-named test up to S. Stops at the first failure. replies runs before --curated, so
+# mutant runs never count for the reply closure or for slices. The target list goes into a
+# shell variable first: bash ignores a failing $(...) in a for word list, even under -e.
 .PHONY: slice-check
-slice-check: bin/trace
+slice-check: bin/trace bin/mutate
 	@test -n "$(S)" || { echo "slice-check: S is required, e.g. make slice-check S=S0" >&2; exit 2; }
 	$(TRACE) procs
 	rm -rf .out && mkdir .out
@@ -120,4 +151,7 @@ slice-check: bin/trace
 		$(SUBMAKE) "$$t"; \
 		$(TRACE) procs; \
 	done
+	$(TRACE) replies --upto $(S)
+	$(MUTATE) --curated
+	$(TRACE) procs
 	$(TRACE) slices --upto $(S)

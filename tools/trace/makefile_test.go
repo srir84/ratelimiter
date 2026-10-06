@@ -14,16 +14,19 @@ import (
 )
 
 // makeStub stands in for each tool variable of the Makefile. Saved under the variable's
-// name (GO, TRACE, ...), it appends "<NAME> <args>" to the file $STUB_LOG, answers
-// "targets" with two real make targets, and exits 42 when $STUB_FAIL, a call prefix of
-// whole words, matches the call: on the $STUB_NTH-th matching call, or on every one when
-// STUB_NTH is 0. The rule comes from the environment, which make passes to every recipe
-// and sub-make, so the stubs are written once: macOS checks each new executable on its
-// first run, which costs more than the run itself.
+// name (GO, TRACE, ...), it appends "<NAME> <args>" to the file $STUB_LOG (and, as a
+// "TRACE gotest" call, to $STUB_REPLIES when that is set, as the L2 tests append the
+// replies they observe to .out/replies-l2.jsonl), answers "targets" with two real make
+// targets, and exits 42 when $STUB_FAIL, a call prefix of whole words, matches the call:
+// on the $STUB_NTH-th matching call, or on every one when STUB_NTH is 0. The rule comes
+// from the environment, which make passes to every recipe and sub-make, so the stubs are
+// written once: macOS checks each new executable on its first run, which costs more than
+// the run itself.
 const makeStub = `#!/bin/bash
 set -eu
 call="${0##*/}${*:+ $*}"
 printf '%s\n' "$call" >>"$STUB_LOG"
+case $call in "TRACE gotest "*) [ -z "${STUB_REPLIES:-}" ] || printf '%s\n' "$call" >>"$STUB_REPLIES" ;; esac
 case $call in "TRACE targets "*) echo "test-unit build" ;; esac
 case $call in "$STUB_FAIL" | "$STUB_FAIL "*) ;; *) exit 0 ;; esac
 seen=0
@@ -34,7 +37,7 @@ if [ "$STUB_NTH" = 0 ] || [ "$seen" = "$STUB_NTH" ]; then exit 42; fi
 `
 
 // makeTools are the Makefile's tool variables, each replaced by a stub.
-func makeTools() []string { return []string{"GO", "GOLANGCI", "STYLUA", "PYTHON", "TRACE"} }
+func makeTools() []string { return []string{"GO", "GOLANGCI", "STYLUA", "PYTHON", "TRACE", "MUTATE"} }
 
 // makeMain is the Go file of a scratch tree's command packages.
 const makeMain = "package main\n\nfunc main() {}\n"
@@ -78,6 +81,12 @@ type makeRun struct {
 // which matching call fails (0: every one).
 func runMake(t *testing.T, stubs, root, fail string, n int, args ...string) makeRun {
 	t.Helper()
+	return runMakeEnv(t, nil, stubs, root, fail, n, args...)
+}
+
+// runMakeEnv is runMake with env added to make's environment (STUB_REPLIES).
+func runMakeEnv(t *testing.T, env []string, stubs, root, fail string, n int, args ...string) makeRun {
+	t.Helper()
 	vars := make([]string, 0, len(makeTools()))
 	for _, tool := range makeTools() {
 		vars = append(vars, tool+"="+filepath.Join(stubs, tool))
@@ -89,8 +98,9 @@ func runMake(t *testing.T, stubs, root, fail string, n int, args ...string) make
 	cmd.Dir = root
 	// An outer make (slice-check running make test-unit) exports its flags, its level and
 	// its command-line variables, S among them; none of them may reach this make.
-	cmd.Env = append(os.Environ(), "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=", "MAKEFILES=", "S=",
+	cmd.Env = append(os.Environ(), "MAKEFLAGS=", "MFLAGS=", "MAKELEVEL=", "MAKEFILES=", "S=", "SWEEP=", "STUB_REPLIES=",
 		"STUB_LOG="+log, "STUB_FAIL="+fail, "STUB_NTH="+strconv.Itoa(n))
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.CombinedOutput()
 	r := makeRun{out: string(out)}
 	var exitErr *exec.ExitError
@@ -136,17 +146,24 @@ func upToCall(t *testing.T, calls []string, prefix string, n int) []string {
 // (DESIGN §C9). With every stub exiting 0, every target passes; each stub in turn exiting
 // 42 fails every target that ran it, stopping right at that call, and so does each single
 // call of a target's all-pass log failing alone (any recipe line); slice-check runs procs,
-// check, each target followed by procs, then slices, in that order, and stops at the
-// first failing step (slices failing fails it too); build builds only the packages that
-// hold Go files. So it catches both traps of IMPLEMENTATION_PLAN S0's Watch out: a
+// check, each target followed by procs, then replies, the curated mutants and procs
+// (IMPLEMENTATION_PLAN S4 step 17), then slices, in that order, and stops at the first
+// failing step (a replies or --curated stub exiting 42 fails it before slices, and slices
+// failing fails it too); mutate runs the curated mutants, or the sweep over SWEEP;
+// test-scripts removes .out/replies-l2.jsonl before its two runs, so the file holds only
+// what they append (plan S4 Watch out: no earlier run's or mutant's replies count for
+// bin/trace replies); build builds only the packages that hold Go files. So it catches both traps of IMPLEMENTATION_PLAN S0's Watch out: a
 // SHELL without -eu -o pipefail (macOS's make 3.81 ignores .SHELLFLAGS) and a target list
 // read in the for word list. make runs in a temp tree holding only a copy of the Makefile,
 // never in the live tree: slice-check deletes .out/, which the outer make test-unit is
 // writing.
 func TestMakefile_FailurePropagates(t *testing.T) {
-	const buildTrace = "GO build -o bin/trace ./tools/trace" // the bin/trace rule, whatever TRACE names
+	const (
+		buildTrace  = "GO build -o bin/trace ./tools/trace"   // the bin/trace rule, whatever TRACE names
+		buildMutate = "GO build -o bin/mutate ./tools/mutate" // the bin/mutate rule, whatever MUTATE names
+	)
 	stubs := makeStubs(t)
-	runs := [][]string{{"check"}, {"test-unit"}, {"fmt"}, {"build"}, {"slice-check", "S=S0"}}
+	runs := [][]string{{"check"}, {"test-unit"}, {"test-scripts"}, {"fmt"}, {"build"}, {"mutate"}, {"slice-check", "S=S0"}}
 	name := func(args []string) string { return "make " + strings.Join(args, " ") }
 	list := func(calls []string) string { return "\n  " + strings.Join(calls, "\n  ") }
 	ranTool := func(calls []string, tool string) bool {
@@ -176,22 +193,84 @@ func TestMakefile_FailurePropagates(t *testing.T) {
 			}
 		}
 	}
+	// Every tool but MUTATE runs in make check; MUTATE runs in make mutate (and slice-check).
 	for _, tool := range makeTools() {
-		if !ranTool(pass["check"], tool) {
-			t.Errorf("make check never ran the %s stub, so its failure goes untested:%s", tool, list(pass["check"]))
+		target := "check"
+		if tool == "MUTATE" {
+			target = "mutate"
+		}
+		if !ranTool(pass[target], tool) {
+			t.Errorf("make %s never ran the %s stub, so its failure goes untested:%s", target, tool, list(pass[target]))
 		}
 	}
+	if want := []string{buildMutate, "MUTATE --curated"}; !slices.Equal(pass["mutate"], want) {
+		t.Errorf("make mutate made the calls%s\nwant the bin/mutate build, then the curated mutants:%s", list(pass["mutate"]), list(want))
+	}
 	want := slices.Concat(
-		[]string{buildTrace, "TRACE procs"},
+		[]string{buildTrace, buildMutate, "TRACE procs"},
 		pass["check"],
 		[]string{"TRACE targets --upto S0"},
 		pass["test-unit"], []string{"TRACE procs"},
 		pass["build"], []string{"TRACE procs"},
+		[]string{"TRACE replies --upto S0", "MUTATE --curated", "TRACE procs"},
 		[]string{"TRACE slices --upto S0"},
 	)
 	if got := pass["slice-check"]; !slices.Equal(got, want) {
-		t.Fatalf("make slice-check S=S0 made the calls%s\nwant procs, check, each target followed by procs, then slices:%s", list(got), list(want))
+		t.Fatalf("make slice-check S=S0 made the calls%s\nwant procs, check, each target followed by procs, replies, the curated mutants and procs, then slices:%s", list(got), list(want))
 	}
+
+	// bin/trace and bin/mutate are .PHONY: with both files already in the tree (stale builds),
+	// make mutate and make slice-check still build them, making the same calls as before.
+	t.Run("bin/trace and bin/mutate always rebuild", func(t *testing.T) {
+		t.Parallel()
+		for _, args := range [][]string{{"mutate"}, {"slice-check", "S=S0"}} {
+			root := makeTree(t)
+			writeTestFile(t, root, "bin/trace", "a stale build\n")
+			writeTestFile(t, root, "bin/mutate", "a stale build\n")
+			r := runMake(t, stubs, root, "", 0, args...)
+			if r.code != 0 || !slices.Equal(r.calls, pass[args[0]]) {
+				t.Errorf("%s with bin/trace and bin/mutate present: exit %d after calls:%s\nwant exit 0 after the same calls as without them, the builds included:%s\n%s",
+					name(args), r.code, list(r.calls), list(pass[args[0]]), r.out)
+			}
+		}
+	})
+
+	// make test-scripts starts from a fresh .out/replies-l2.jsonl: a stale line (an earlier
+	// run's, or a mutant's) is gone before its first run, and both runs' lines are kept, the
+	// TRACE gotest stub appending its call there as the L2 tests append their replies.
+	t.Run("test-scripts starts a fresh replies file", func(t *testing.T) {
+		t.Parallel()
+		root := makeTree(t)
+		writeTestFile(t, root, ".out/replies-l2.jsonl", `{"script":"acquire","code":25,"reason":"integrity_hold"}`+"\n")
+		replies := filepath.Join(root, ".out", "replies-l2.jsonl")
+		r := runMakeEnv(t, []string{"STUB_REPLIES=" + replies}, stubs, root, "", 0, "test-scripts")
+		var gotests []string
+		for _, c := range r.calls {
+			if callMatches(c, "TRACE gotest") {
+				gotests = append(gotests, c)
+			}
+		}
+		data, err := os.ReadFile(replies)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		if want := strings.Join(gotests, "\n") + "\n"; r.code != 0 || len(gotests) != 2 || string(data) != want {
+			t.Errorf("make test-scripts over a stale .out/replies-l2.jsonl: exit %d after calls:%s\nleft it holding:\n%s\nwant exit 0 after two TRACE gotest runs, the file holding only their lines:\n%s\n%s",
+				r.code, list(r.calls), data, want, r.out)
+		}
+	})
+
+	// make mutate SWEEP=… runs the sweep over those files instead, and fails with it.
+	t.Run("mutate with SWEEP", func(t *testing.T) {
+		t.Parallel()
+		sweep := []string{buildMutate, "MUTATE --sweep a.lua b.go"}
+		if r := runMake(t, stubs, makeTree(t), "", 0, "mutate", "SWEEP=a.lua b.go"); r.code != 0 || !slices.Equal(r.calls, sweep) {
+			t.Errorf("make mutate SWEEP=\"a.lua b.go\": exit %d after calls:%s\nwant exit 0 after:%s\n%s", r.code, list(r.calls), list(sweep), r.out)
+		}
+		if r := runMake(t, stubs, makeTree(t), "MUTATE", 0, "mutate", "SWEEP=a.lua b.go"); r.code == 0 || !slices.Equal(r.calls, sweep) {
+			t.Errorf("make mutate SWEEP=… with MUTATE exiting 42: exit %d after calls:%s\nwant a failure right after:%s\n%s", r.code, list(r.calls), list(sweep), r.out)
+		}
+	})
 
 	// Each stub in turn exits 42: every target that ran it fails, and stops at that call.
 	// Every run below has its own tree and call log, so they run in parallel.
@@ -246,6 +325,9 @@ func TestMakefile_FailurePropagates(t *testing.T) {
 		{"targets", "TRACE targets", 0},
 		{"first target", "TRACE gotest", 0},
 		{"procs after the first target", "TRACE procs", 2},
+		{"replies", "TRACE replies", 0},
+		{"curated mutants", "MUTATE --curated", 0},
+		{"procs after the curated mutants", "TRACE procs", 4},
 		{"slices", "TRACE slices", 0},
 	} {
 		t.Run("slice-check stops at "+c.step, func(t *testing.T) {
