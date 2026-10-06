@@ -68,6 +68,16 @@ func curatedEntries() []curatedEntry {
 			From: "b = binary.BigEndian.AppendUint64(b, r.S)", // the MAC input omits s (RCP-1)
 			To:   "",
 		},
+		{
+			ID: "PB15", File: "internal/core/acquire.go", Tests: []string{"TestFailureModeTable"},
+			From: "resp := l.adapter.Call(ctx, req)", // Acquire sends again after OutcomeUnknown (API-12)
+			To:   "resp := l.adapter.Call(ctx, req); if resp.Outcome == store.OutcomeUnknown { resp = l.adapter.Call(ctx, req) }",
+		},
+		{
+			ID: "PB17", File: "refmodel/replay.py", Tests: []string{"refmodel/tests/test_replay.py::test_detects_each_field"},
+			From: `checks.append(("u", expected.u, actual["u"]))`, // Replay stops comparing units (BUD-12)
+			To:   `checks.append(("u", actual["u"], actual["u"]))`,
+		},
 	}
 }
 

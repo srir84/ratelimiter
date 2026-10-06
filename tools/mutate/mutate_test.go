@@ -99,6 +99,30 @@ func checkTreeUnchanged(t *testing.T, root string, before map[string]string) {
 	}
 }
 
+// TestMutate_PythonTempSymlink: pytest names a test by its resolved path, so under a temp
+// parent reached through a symlink (macOS's $TMPDIR: /var is /private/var) the Python baseline
+// still finds its named test passing, the mutant is killed by it, and no copy is left behind.
+func TestMutate_PythonTempSymlink(t *testing.T) {
+	cfg := fixtureModule(t)
+	link := filepath.Join(filepath.Dir(cfg.tmpDir), "scratch-link")
+	if err := os.Symlink(cfg.tmpDir, link); err != nil {
+		t.Fatal(err)
+	}
+	cfg.tmpDir = link
+	idx := &testIndex{root: cfg.root}
+	if err := idx.load(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	e := curatedEntry{ID: "L1", File: "pkg/calc.py", Tests: []string{"pkg/calc_check.py::test_add"}, From: "return a + b", To: "return a - b"}
+	res, err := runCurated(t.Context(), cfg, idx, e)
+	if err != nil || res.verdict != killed || !slices.Contains(res.by, "pkg/calc_check.py::test_add") {
+		t.Errorf("Python mutant under a symlinked temp parent: %s (by %v, why %q), %v; want killed by pkg/calc_check.py::test_add", res.verdict, res.by, res.why, err)
+	}
+	if left, _ := os.ReadDir(link); len(left) > 0 {
+		t.Errorf("temp directories left behind in %s: %v", link, left)
+	}
+}
+
 // TestMutate_Kill (plan S4 step 16; DESIGN §C9), on the fixture module: only an assertion
 // failure in a named test kills a mutant (Go, embedded Lua, Python's rewritten assert and
 // pytest.fail; a prefix name; build tags read from the test's file; named tests spread over two

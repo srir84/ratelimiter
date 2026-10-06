@@ -11,7 +11,7 @@ import (
 const usageText = `usage: trace <command> [flags]
 
 commands:
-  check                       boundary, ids, acl, lua, suppress, tags, testglobals and oracle
+  check                       boundary, ids, acl, lua, suppress, tags, testglobals, oracle and api
   boundary                    product packages never reach the harness (DESIGN §A1)
   ids [--list] [--complete]   SPEC §10 and HARNESS §8 test IDs and their test functions (§C7)
   acl                         ACL template and the scripts' inner commands (§A2)
@@ -20,6 +20,8 @@ commands:
   tags                        rltest build lines (AGENTS.md §2)
   testglobals                 no writes to package-level variables in test code (§C7)
   oracle                      expected values never come from internal/core (§C7)
+  api [--complete]            the exports of limiter and limitertest match DESIGN §A5.2, §A5.11, §A5.12
+                              and the plan; with --complete every §A5.2 item must exist (§C7)
   procs                       kill and report recorded child processes still alive (§C7)
   replies [--upto <id>]       every reply literal of internal/scripts/*.lua is in the reply table and
                               every reason of the table in DESIGN; with --upto from S4 on, every row
@@ -55,7 +57,7 @@ type checkFunc func(ctx context.Context, e *env, args []string) (report, error)
 
 // checkNames lists what `trace check` runs, in order. It never checks completeness (§C7).
 func checkNames() []string {
-	return []string{"boundary", "ids", "acl", "lua", "suppress", "tags", "testglobals", "oracle"}
+	return []string{"boundary", "ids", "acl", "lua", "suppress", "tags", "testglobals", "oracle", "api"}
 }
 
 func checkByName(name string) (checkFunc, bool) {
@@ -76,6 +78,8 @@ func checkByName(name string) (checkFunc, bool) {
 		return checkTestGlobals, true
 	case "oracle":
 		return checkOracle, true
+	case "api":
+		return checkAPI, true
 	case "procs":
 		return checkProcs, true
 	case "replies":

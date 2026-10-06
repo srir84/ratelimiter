@@ -143,7 +143,8 @@ func upToCall(t *testing.T, calls []string, prefix string, n int) []string {
 }
 
 // TestMakefile_FailurePropagates runs the Makefile with a stub for every tool variable
-// (DESIGN §C9). With every stub exiting 0, every target passes; each stub in turn exiting
+// (DESIGN §C9). With every stub exiting 0, every target passes, each test-* target building
+// bin/trace first (its prerequisite, IMPLEMENTATION_PLAN S0 step 7); each stub in turn exiting
 // 42 fails every target that ran it, stopping right at that call, and so does each single
 // call of a target's all-pass log failing alone (any recipe line); slice-check runs procs,
 // check, each target followed by procs, then replies, the curated mutants and procs
@@ -163,7 +164,7 @@ func TestMakefile_FailurePropagates(t *testing.T) {
 		buildMutate = "GO build -o bin/mutate ./tools/mutate" // the bin/mutate rule, whatever MUTATE names
 	)
 	stubs := makeStubs(t)
-	runs := [][]string{{"check"}, {"test-unit"}, {"test-scripts"}, {"fmt"}, {"build"}, {"mutate"}, {"slice-check", "S=S0"}}
+	runs := [][]string{{"check"}, {"test-unit"}, {"test-scripts"}, {"test-integration"}, {"test-py"}, {"fmt"}, {"build"}, {"mutate"}, {"slice-check", "S=S0"}}
 	name := func(args []string) string { return "make " + strings.Join(args, " ") }
 	list := func(calls []string) string { return "\n  " + strings.Join(calls, "\n  ") }
 	ranTool := func(calls []string, tool string) bool {
@@ -191,6 +192,16 @@ func TestMakefile_FailurePropagates(t *testing.T) {
 			if fi, err := os.Stat(filepath.Join(root, ".out")); err != nil || !fi.IsDir() || staleKept(t, root) {
 				t.Errorf("%s did not replace .out/ with an empty directory (stat: %v)", name(args), err)
 			}
+		}
+	}
+	// bin/trace is a prerequisite of every test-* target (IMPLEMENTATION_PLAN S0 step 7,
+	// "including the ones later slices add"): each one's first call builds it.
+	for _, args := range runs {
+		if !strings.HasPrefix(args[0], "test-") {
+			continue
+		}
+		if calls := pass[args[0]]; calls[0] != buildTrace {
+			t.Errorf("%s made the calls%s\nwant the bin/trace build first: bin/trace is a prerequisite of every test-* target", name(args), list(calls))
 		}
 	}
 	// Every tool but MUTATE runs in make check; MUTATE runs in make mutate (and slice-check).

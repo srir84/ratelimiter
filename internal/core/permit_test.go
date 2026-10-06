@@ -3,6 +3,10 @@ package core
 import (
 	"sync"
 	"testing"
+	"time"
+
+	"ratelimiter/internal/metrics"
+	"ratelimiter/internal/receipt"
 )
 
 func allStates() []permitState {
@@ -191,5 +195,83 @@ func TestPermitTransitionPairsRace(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// gaugeValue returns the value of the series of the named family with the given label value
+// in a snapshot.
+func gaugeValue(t *testing.T, snap metrics.MetricsSnapshot, name, label string) float64 {
+	t.Helper()
+	for _, f := range snap.Families {
+		if f.Name != name {
+			continue
+		}
+		for _, s := range f.Series {
+			if s.LabelValue == label {
+				return s.Value
+			}
+		}
+	}
+	t.Fatalf("no series %s{%q}", name, label)
+	return 0
+}
+
+// TestPermitDoneOnce (L1): 100 concurrent Done() calls on one OPEN permit free its slots
+// exactly once. Two reservations are held, so a second free would show as 0 slots in use;
+// each round also checks DONE, the gauges, and that later calls stay no-ops.
+func TestPermitDoneOnce(t *testing.T) {
+	const rounds, callers = 50, 100
+	for round := range rounds {
+		reg := metrics.NewRegistry()
+		sl := newSlots(2, 2, reg)
+		for i := range 2 {
+			if !sl.tryAcquire() {
+				t.Fatalf("cannot reserve slot pair %d of 2", i+1)
+			}
+		}
+		if sl.tryAcquire() {
+			t.Fatal("a third reservation of 2 slots succeeded")
+		}
+		p := newPermit(sl, receipt.Receipt{}, "d1_test", time.Now())
+		if id := p.DeductionID(); id != "d1_test" {
+			t.Fatalf("round %d: an OPEN permit's DeductionID = %q, want d1_test", round, id)
+		}
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				p.Done()
+			}()
+		}
+		close(start)
+		wg.Wait()
+		if r, f := sl.inUse(); r != 1 || f != 1 {
+			t.Fatalf("round %d: after %d concurrent Done(): %d receipt and %d refund slots in use, want 1 and 1", round, callers, r, f)
+		}
+		if s := p.life.load(); s != stateDone {
+			t.Fatalf("round %d: permit state %v, want DONE", round, s)
+		}
+		snap := reg.Snapshot()
+		if r, f := gaugeValue(t, snap, "rl_slots_in_use", "receipt"), gaugeValue(t, snap, "rl_slots_in_use", "refund"); r != 1 || f != 1 {
+			t.Fatalf("round %d: rl_slots_in_use = %v receipt, %v refund; want 1, 1", round, r, f)
+		}
+		p.Done()
+		if r, f := sl.inUse(); r != 1 || f != 1 {
+			t.Fatalf("round %d: a later Done() freed slots: %d and %d in use, want 1 and 1", round, r, f)
+		}
+	}
+	// A degraded permit and a nil one hold nothing: Done is a no-op, DeductionID is "".
+	d := newDegradedPermit()
+	if st := d.life.load(); st != stateDegraded || d.slots != nil {
+		t.Fatalf("a new degraded permit: state %v, slots held %v; want DEGRADED, no slots", st, d.slots != nil)
+	}
+	d.Done()
+	var nilPermit *Permit
+	nilPermit.Done()
+	if d.life.load() != stateDegraded || d.DeductionID() != "" || nilPermit.DeductionID() != "" {
+		t.Fatalf("degraded permit: state %v, DeductionID %q; nil permit DeductionID %q", d.life.load(), d.DeductionID(), nilPermit.DeductionID())
 	}
 }

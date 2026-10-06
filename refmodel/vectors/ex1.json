@@ -1,0 +1,22 @@
+{
+  "policy": {},
+  "arithmetic": "20 \u00d7 10^9 units initially; each allow costs 10^9: 20 allowed, then 80 limited with ceil(10^9/10)=100000000 ns.",
+  "steps": [
+    {
+      "clock_ns": 0,
+      "repeat": 20,
+      "expected": {
+        "result": "allowed"
+      }
+    },
+    {
+      "clock_ns": 0,
+      "repeat": 80,
+      "expected": {
+        "result": "limited",
+        "u": 0,
+        "retry_after_ns": 100000000
+      }
+    }
+  ]
+}

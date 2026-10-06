@@ -147,6 +147,11 @@ type Options struct {
 	Metrics *metrics.Registry
 	// Rand draws the reconnect jitter from [0, 1); nil means math/rand/v2's Float64.
 	Rand func() float64
+	// Start, when not nil, holds every connection slot back until it is closed: no dial
+	// begins before, and a slot whose lifetime ends first ends without dialing. internal/core
+	// passes one while a test's store wrapper runs, so a limiter whose wrapper returns no
+	// adapter opens no connection (plan S5 step 2). nil, as in production, dials at once.
+	Start <-chan struct{}
 }
 
 // StoreAdapter is the production Adapter: a pipelined connection set per Kind.
@@ -158,6 +163,7 @@ type StoreAdapter struct {
 	obs              func(string, int)
 	metrics          *metrics.Registry
 	rand             func() float64
+	start            <-chan struct{} // Options.Start: nil, or closed when the slots may dial
 
 	life      context.Context // the owner's lifetime context; connection goroutines run on it
 	stop      context.CancelFunc
@@ -167,7 +173,8 @@ type StoreAdapter struct {
 }
 
 // New starts an adapter: every connection slot (StoreConns call, RefundConns refund and one
-// maintenance) begins dialing at once (plan choice). ctx is the owner's lifetime context
+// maintenance) begins dialing at once (plan choice), or once Options.Start is closed when it
+// is set. ctx is the owner's lifetime context
 // (internal/core's, or t.Context() in tests); when it ends the connections close and stop
 // redialing. Close stops them and waits.
 func New(ctx context.Context, o Options) *StoreAdapter {
@@ -182,6 +189,7 @@ func New(ctx context.Context, o Options) *StoreAdapter {
 		obs:     o.SendObserver,
 		metrics: o.Metrics,
 		rand:    o.Rand,
+		start:   o.Start,
 		life:    life,
 		stop:    stop,
 	}

@@ -139,7 +139,9 @@ func TestWalk_Symlinks(t *testing.T) {
 	// an underscore directory hides only .py and .lua files from trace, so the checks
 	// that read those report it, and the checks of .go files pass it over as go ./... does.
 	for _, name := range checkNames() {
-		if name == "acl" { // reads deploy/ and internal/scripts/ only, never walks
+		// acl reads deploy/ and internal/scripts/ only, and api the docs and the packages that
+		// limiter and limitertest import: neither walks the tree.
+		if name == "acl" || name == "api" {
 			continue
 		}
 		_, _, stderr := runIn(t, root, name)

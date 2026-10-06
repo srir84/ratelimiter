@@ -195,7 +195,14 @@ func pytest(ctx context.Context, cfg config, pkg string, m *mutant, names []stri
 			err = errors.Join(err, fmt.Errorf("removing the Python copy: %w", rerr))
 		}
 	}()
-	tree, pluginDir := filepath.Join(tmp, "tree"), filepath.Join(tmp, "plugin")
+	// pytest names a test by its file's path relative to --rootdir after resolving symlinks, so
+	// under a temp parent behind a symlink (macOS's $TMPDIR: /var is /private/var) every node id
+	// would lose its file ("::test_x") and match no name: work under the resolved path.
+	real, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		return pyResult{}, fmt.Errorf("resolving the Python copy: %w", err)
+	}
+	tree, pluginDir := filepath.Join(real, "tree"), filepath.Join(real, "plugin")
 	if err := copyPyTree(ctx, filepath.Join(cfg.root, pkg), filepath.Join(tree, pkg)); err != nil {
 		return pyResult{}, err
 	}

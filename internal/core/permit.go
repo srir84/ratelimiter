@@ -3,6 +3,9 @@ package core
 import (
 	"strconv"
 	"sync/atomic"
+	"time"
+
+	"ratelimiter/internal/receipt"
 )
 
 // permitState is a permit's lifecycle state (§A5.5, SPEC API-1h). DONE, FINAL and DEGRADED
@@ -141,7 +144,49 @@ func transitions(from permitState, ev permitEvent) (transition, bool) {
 	return transition{}, false
 }
 
-// lifecycle holds a permit's state; S5's Permit is built on it.
+// Permit is what an allowed or degraded Acquire returns (DESIGN §A5.5, SPEC API-1h). An
+// allowed permit holds the signed receipt and one slot of each kind until its first finish;
+// a degraded one holds neither, and every call on it is a no-op. Release and the retention
+// timer arrive in S6.
+type Permit struct {
+	life    *lifecycle
+	slots   *slots          // nil for a degraded permit
+	receipt receipt.Receipt // the signed receipt; zero for a degraded permit
+	id      string          // deduction_id; "" for a degraded permit
+	sentAt  time.Time       // monotonic instant just before the acquire was sent: the retention timer's start (S6)
+}
+
+// newPermit returns an OPEN permit that holds one reservation of sl.
+func newPermit(sl *slots, rc receipt.Receipt, id string, sentAt time.Time) *Permit {
+	return &Permit{life: newLifecycle(stateOpen), slots: sl, receipt: rc, id: id, sentAt: sentAt}
+}
+
+// newDegradedPermit returns a DEGRADED permit: no receipt, no slots, no deduction_id (API-5).
+func newDegradedPermit() *Permit {
+	return &Permit{life: newLifecycle(stateDegraded)}
+}
+
+// Done is the host's finish on success or an unknown outcome (API-1c): OPEN → DONE keeps the
+// charge and frees both slots. In every other state, and on a nil permit, it is a no-op; the
+// compare-and-swap lets only one caller free the slots.
+func (p *Permit) Done() {
+	if p == nil {
+		return
+	}
+	if t, ok := p.life.fire(evDone); ok && t.freeSlots {
+		p.slots.release()
+	}
+}
+
+// DeductionID returns the permit's deduction_id (§A5.9): "" for a degraded or nil permit.
+func (p *Permit) DeductionID() string {
+	if p == nil {
+		return ""
+	}
+	return p.id
+}
+
+// lifecycle holds a permit's state; Permit is built on it.
 type lifecycle struct {
 	state atomic.Int32
 }

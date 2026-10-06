@@ -1,0 +1,82 @@
+{
+  "policy": {
+    "rate_tokens": 3,
+    "rate_period_ns": 10000,
+    "capacity": 1,
+    "max_tracked_buckets": 1,
+    "receipt_lifetime_ns": 10000
+  },
+  "arithmetic": "10000-10000=0; at 3000 ns refill=9000, ceil(1000/3)=334. Limited stores nothing: regression to 2000 gives 6000, ceil(4000/3)=1334. At 4000 refill caps 12000 at 10000, deduction leaves 0. Hwm=4000 holds regressed clock.",
+  "steps": [
+    {
+      "clock_ns": 0,
+      "expected": {
+        "result": "allowed",
+        "u": 0,
+        "g": 1,
+        "s": 1
+      }
+    },
+    {
+      "clock_ns": 3000,
+      "expected": {
+        "result": "limited",
+        "u": 9000,
+        "retry_after_ns": 334
+      }
+    },
+    {
+      "clock_ns": 2000,
+      "expected": {
+        "result": "limited",
+        "u": 6000,
+        "retry_after_ns": 1334
+      }
+    },
+    {
+      "clock_ns": 4000,
+      "expected": {
+        "result": "allowed",
+        "u": 0,
+        "s": 2
+      }
+    },
+    {
+      "clock_ns": 1000,
+      "expected": {
+        "result": "limited",
+        "decision_ns": 4000,
+        "u": 0,
+        "retry_after_ns": 3334
+      }
+    },
+    {
+      "clock_ns": 9000,
+      "key": "b",
+      "expected": {
+        "result": "capacity_error",
+        "decision_ns": 9000
+      }
+    },
+    {
+      "clock_ns": 4000,
+      "expected": {
+        "result": "limited",
+        "decision_ns": 4000
+      }
+    },
+    {
+      "clock_ns": 0,
+      "key": "",
+      "expected": {
+        "result": "validation_error"
+      }
+    },
+    {
+      "clock_ns": -1,
+      "expected": {
+        "result": "clock_error"
+      }
+    }
+  ]
+}

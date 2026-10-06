@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// TestCheck: trace check runs boundary, ids, acl, lua, suppress, tags, testglobals and
-// oracle, in that order, and goes on after a failing one. It fails on an orphan test-ID
+// TestCheck: trace check runs boundary, ids, acl, lua, suppress, tags, testglobals, oracle
+// and api, in that order, and goes on after a failing one. It fails on an orphan test-ID
 // function but never checks completeness: IDs with no function pass (§C7).
 func TestCheck(t *testing.T) {
-	checks := []string{"boundary", "ids", "acl", "lua", "suppress", "tags", "testglobals", "oracle"}
+	checks := []string{"boundary", "ids", "acl", "lua", "suppress", "tags", "testglobals", "oracle", "api"}
 	// Each check prints one summary line, ids even when it fails.
 	summaries := func(t *testing.T, stdout string) {
 		t.Helper()

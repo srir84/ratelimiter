@@ -194,11 +194,19 @@ func reconnectBackoff(n int, r float64) time.Duration {
 	return time.Duration(float64(base) * (0.5 + 0.5*r))
 }
 
-// runSlot keeps one connection of set (DESIGN §A5.4): it dials and authenticates, makes the
-// connection ready, waits for it to close, and redials, with backoff after a failed dial or
-// a lost connection, until the adapter's lifetime ends. It owns the connection's reader.
+// runSlot keeps one connection of set (DESIGN §A5.4): once Options.Start allows, it dials and
+// authenticates, makes the connection ready, waits for it to close, and redials, with backoff
+// after a failed dial or a lost connection, until the adapter's lifetime ends. It owns the
+// connection's reader.
 func (a *StoreAdapter) runSlot(set *connSet) {
 	defer a.wg.Done()
+	if a.start != nil { // Options.Start: no dial before it is closed
+		select {
+		case <-a.start:
+		case <-a.life.Done():
+			return
+		}
+	}
 	failures := 0
 	for {
 		pc, err := a.dial(set)

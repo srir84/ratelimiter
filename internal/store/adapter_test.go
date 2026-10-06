@@ -1059,3 +1059,31 @@ func TestCloseFailsInFlight(t *testing.T) {
 	}
 	e.a.Close() // a second Close is harmless
 }
+
+// TestStartHoldsDials: with Options.Start set, no slot dials until it is closed, and then
+// every slot connects; when the lifetime ends first (Close), the slots end without dialing
+// and Close returns at once (plan S5 step 2: core holds the dials while a test's store
+// wrapper runs, so a wrapper that returns no adapter leaves no connection).
+func TestStartHoldsDials(t *testing.T) {
+	e := newEnv(t)
+	start := make(chan struct{})
+	e.start(func(o *Options) { o.Start = start })
+	time.Sleep(100 * time.Millisecond) // far longer than 11 dials to 127.0.0.1 take
+	if n := e.srv.Accepted(); n != 0 {
+		t.Fatalf("the store accepted %d connections before Start was closed, want 0", n)
+	}
+	close(start)
+	e.warm(8, 2) // every slot connects
+
+	held := newEnv(t)
+	held.start(func(o *Options) { o.Start = make(chan struct{}) })
+	done := goDone(held.a.Close)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for slots that never dialed")
+	}
+	if n := held.srv.Accepted(); n != 0 {
+		t.Fatalf("the store accepted %d connections from an adapter closed before Start, want 0", n)
+	}
+}

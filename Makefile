@@ -19,8 +19,10 @@ MUTATE ?= bin/mutate
 # Command-line variables (the tool stubs, S) still reach sub-makes through MAKEFLAGS.
 SUBMAKE = $(MAKE)
 
-# The Python packages that exist so far; the Python tools get only these paths.
+# The Python packages that exist so far: pytest gets only these paths; the linters,
+# formatter and type checker also get the root conftest.py (IMPLEMENTATION_PLAN S5 step 17).
 PY_PKGS := $(wildcard refmodel report)
+PY_PATHS := $(wildcard refmodel report conftest.py)
 
 # Always rebuilt, with $(GO), whatever TRACE names. A prerequisite of check,
 # slice-check and every test-* target.
@@ -47,10 +49,10 @@ check: bin/trace
 	$(GOLANGCI) run --build-tags conformance ./...
 	$(GOLANGCI) run --build-tags scripttest ./...
 	$(STYLUA) --check .
-ifneq ($(PY_PKGS),)
-	$(PYTHON) -m ruff check --ignore-noqa $(PY_PKGS)
-	$(PYTHON) -m ruff format --check $(PY_PKGS)
-	$(PYTHON) -m mypy $(PY_PKGS)
+ifneq ($(PY_PATHS),)
+	$(PYTHON) -m ruff check --ignore-noqa $(PY_PATHS)
+	$(PYTHON) -m ruff format --check $(PY_PATHS)
+	$(PYTHON) -m mypy $(PY_PATHS)
 endif
 	$(TRACE) check
 
@@ -58,8 +60,8 @@ endif
 fmt:
 	$(GOLANGCI) fmt
 	$(STYLUA) .
-ifneq ($(PY_PKGS),)
-	$(PYTHON) -m ruff format $(PY_PKGS)
+ifneq ($(PY_PATHS),)
+	$(PYTHON) -m ruff format $(PY_PATHS)
 endif
 
 # A second pass at GOMAXPROCS 1 and 4 over the packages without timing windows (DESIGN
@@ -96,6 +98,18 @@ test-scripts: bin/trace
 	rm -f .out/replies-l2.jsonl
 	$(TRACE) gotest -o .out/test-scripts.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
 	RL_SCRIPT_AUDIT=1 $(TRACE) gotest -o .out/test-scripts-audit.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
+
+# L3 library integration through the direct driver (DESIGN §C1, §C4; IMPLEMENTATION_PLAN S5
+# step 13): every package under -tags rltest, with -race.
+.PHONY: test-integration
+test-integration: bin/trace
+	$(TRACE) gotest -o .out/test-integration.json -- -tags rltest -race -count=1 -timeout 30m ./limiter/... ./limitertest/... ./internal/core/... ./harness/fixtures/... ./harness/driver/... ./harness/spectest/...
+
+# The Python tests (DESIGN §C1; IMPLEMENTATION_PLAN S5 step 13), shuffled by the root
+# conftest.py; run_evidence tests need a finished run and stay out (make test-report).
+.PHONY: test-py
+test-py: bin/trace
+	$(PYTHON) -m pytest $(PY_PKGS) -m 'not run_evidence' --junitxml=.out/test-py.xml
 
 # Mutation testing (DESIGN §C9; IMPLEMENTATION_PLAN S4 step 17): the curated planted bugs whose
 # files exist, or, when SWEEP lists files, the operator sweep over them (make mutate
