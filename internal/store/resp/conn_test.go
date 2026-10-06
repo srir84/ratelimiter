@@ -1,0 +1,217 @@
+package resp_test
+
+import (
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"net"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"ratelimiter/internal/store/resp"
+	"ratelimiter/internal/testutil/fakeresp"
+)
+
+// newPassword returns a fresh store password: 32 random bytes in hex.
+func newPassword(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("reading random bytes: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// cmdLen is the length of args as a RESP array of bulk strings, counted by hand.
+func cmdLen(args ...string) int {
+	n := len("*") + len(strconv.Itoa(len(args))) + len("\r\n")
+	for _, a := range args {
+		n += len("$") + len(strconv.Itoa(len(a))) + len("\r\n") + len(a) + len("\r\n")
+	}
+	return n
+}
+
+func dialServer(t *testing.T, srv *fakeresp.Server) net.Conn {
+	t.Helper()
+	c, err := (&net.Dialer{}).DialContext(t.Context(), "tcp", srv.Addr())
+	if err != nil {
+		t.Fatalf("dialing the fake store: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+// writeFailConn fails every write, writing nothing.
+type writeFailConn struct{ net.Conn }
+
+func (writeFailConn) Write([]byte) (int, error) { return 0, errors.New("write refused (test)") }
+
+// deadlineConn fails every SetDeadline after the first.
+type deadlineConn struct {
+	net.Conn
+	calls int
+}
+
+func (c *deadlineConn) SetDeadline(t time.Time) error {
+	c.calls++
+	if c.calls > 1 {
+		return errors.New("deadline refused (test)")
+	}
+	return c.Conn.SetDeadline(t)
+}
+
+func TestHandshake(t *testing.T) {
+	pw := newPassword(t)
+	srv := fakeresp.Start(t, "rl_lib", pw)
+
+	t.Run("accepted", func(t *testing.T) {
+		c := dialServer(t, srv)
+		var seen []int
+		err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(5*time.Second), func(cmd string, n int) {
+			if cmd != "AUTH" {
+				t.Errorf("observer heard %q, want AUTH", cmd)
+			}
+			seen = append(seen, n)
+		})
+		if err != nil {
+			t.Fatalf("Handshake: %v", err)
+		}
+		auths := 0
+		for _, cmd := range srv.Commands() {
+			if fakeresp.Label(cmd.Args) != "AUTH" {
+				continue
+			}
+			auths++
+			// Compared, never printed: the password stays out of test output.
+			if !slices.Equal(cmd.Args, []string{"AUTH", "rl_lib", pw}) {
+				t.Errorf("the server saw %s, want AUTH rl_lib <password>", cmd)
+			}
+		}
+		if auths != 1 {
+			t.Errorf("the server saw %d AUTH commands, want 1", auths)
+		}
+		if want := []int{cmdLen("AUTH", "rl_lib", pw)}; !slices.Equal(seen, want) {
+			t.Errorf("observer bytes = %v, want %v", seen, want)
+		}
+		// The connection is usable at once: nothing was left unread.
+		if _, err := c.Write(resp.AppendCommand(nil, "PING")); err != nil {
+			t.Fatalf("writing PING: %v", err)
+		}
+		if err := c.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			t.Fatalf("setting a read deadline: %v", err)
+		}
+		if v, err := resp.NewReader(c).ReadValue(); err != nil || v.Kind != resp.Simple || v.Str != "PONG" {
+			t.Errorf("PING after the handshake = %s, %v; want +PONG", v, err)
+		}
+	})
+
+	t.Run("wrong password", func(t *testing.T) {
+		c := dialServer(t, srv)
+		wrong := newPassword(t)
+		err := resp.Handshake(c, "rl_lib", wrong, time.Now().Add(5*time.Second), nil)
+		if err == nil {
+			t.Fatal("Handshake with a wrong password succeeded")
+		}
+		if !strings.Contains(err.Error(), "WRONGPASS") {
+			t.Errorf("Handshake error does not name the WRONGPASS reply")
+		}
+		if strings.Contains(err.Error(), wrong) || strings.Contains(err.Error(), pw) {
+			t.Errorf("Handshake error contains a password")
+		}
+	})
+
+	t.Run("refusal echoes the password", func(t *testing.T) {
+		echo := fakeresp.Start(t, "rl_lib", pw)
+		// The refusal repeats the password twice, first at its start, where Value.String's
+		// 64-byte clip would keep all of it.
+		echo.ReplyError("AUTH", pw+" is not accepted: WRONGPASS for "+pw, 1)
+		c := dialServer(t, echo)
+		err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(5*time.Second), nil)
+		if err == nil {
+			t.Fatal("Handshake refused by the store succeeded")
+		}
+		// Compared, never printed: no 8-byte piece of the password is in the error.
+		msg := err.Error()
+		for i := 0; i+8 <= len(pw); i++ {
+			if strings.Contains(msg, pw[i:i+8]) {
+				t.Fatal("Handshake error contains the password, or part of it")
+			}
+		}
+		if !strings.Contains(msg, "is not accepted: WRONGPASS for") {
+			t.Errorf("Handshake error lost the rest of the store's refusal")
+		}
+	})
+
+	t.Run("closed connection", func(t *testing.T) {
+		c := dialServer(t, srv)
+		if err := c.Close(); err != nil {
+			t.Fatalf("closing: %v", err)
+		}
+		if err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(time.Second), nil); err == nil {
+			t.Error("Handshake on a closed connection succeeded")
+		}
+	})
+
+	t.Run("write fails", func(t *testing.T) {
+		c := writeFailConn{Conn: dialServer(t, srv)}
+		var seen []int
+		err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(time.Second), func(_ string, n int) { seen = append(seen, n) })
+		if err == nil {
+			t.Error("Handshake whose AUTH write failed succeeded")
+		}
+		if !slices.Equal(seen, []int{0}) {
+			t.Errorf("observer bytes = %v, want [0]", seen)
+		}
+	})
+
+	t.Run("data after the reply", func(t *testing.T) {
+		c, peer := net.Pipe()
+		t.Cleanup(func() { _ = c.Close(); _ = peer.Close() })
+		done := make(chan struct{})
+		go func() { // a peer that answers AUTH and then sends more
+			defer close(done)
+			if _, err := resp.NewReader(peer).ReadValue(); err == nil {
+				_, _ = peer.Write([]byte("+OK\r\n:1\r\n"))
+			}
+		}()
+		err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(5*time.Second), nil)
+		<-done
+		var pe *resp.ProtocolError
+		if !errors.As(err, &pe) {
+			t.Errorf("Handshake error = %v, want a *resp.ProtocolError", err)
+		}
+	})
+
+	t.Run("deadline not cleared", func(t *testing.T) {
+		c := &deadlineConn{Conn: dialServer(t, srv)}
+		if err := resp.Handshake(c, "rl_lib", pw, time.Now().Add(5*time.Second), nil); err == nil {
+			t.Error("Handshake that could not clear its deadline succeeded")
+		}
+	})
+
+	t.Run("no reply", func(t *testing.T) {
+		hang := fakeresp.Start(t, "rl_lib", pw)
+		hang.HangAuth()
+		c := dialServer(t, hang)
+		start := time.Now()
+		done := make(chan error, 1)
+		go func() { done <- resp.Handshake(c, "rl_lib", pw, start.Add(200*time.Millisecond), nil) }()
+		var err error
+		select {
+		case err = <-done:
+		case <-time.After(2 * time.Second): // a Handshake that ignores its deadline fails here, not by timeout
+			_ = c.Close() // ends the Handshake
+			<-done
+			t.Fatal("Handshake still waiting 2 s after its 200 ms deadline")
+		}
+		if err == nil {
+			t.Fatal("Handshake without a reply succeeded")
+		}
+		if el := time.Since(start); el < 200*time.Millisecond || el > 2*time.Second {
+			t.Errorf("Handshake gave up after %v, want its 200 ms deadline", el)
+		}
+	})
+}
