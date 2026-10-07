@@ -6,6 +6,7 @@ package core
 
 import (
 	"strconv"
+	"time"
 
 	"ratelimiter/internal/metrics"
 	"ratelimiter/internal/settings"
@@ -163,7 +164,8 @@ type Diag struct {
 }
 
 // RefundEvent is the one final event of a released permit's refund (API-1d), which the
-// refund listener receives (S6).
+// refund listener receives. ReleaseMonoNs and FinalMonoNs are ns since the limiter was built,
+// on the monotonic clock (plan choice).
 type RefundEvent struct {
 	DeductionID                string
 	Result                     RefundResult     // Applied, AlreadyApplied, ReceiptInvalid, ReceiptExpired, Unresolved
@@ -187,7 +189,7 @@ type Health struct {
 	EpochID       string   `json:"epoch_id"`       // the epoch joined last; "" before the first join
 	ClockSource   string   `json:"clock_source"`   // "store" or "controlled"
 	Instance      Instance `json:"instance"`       // the per-instance settings
-	ListenerDrops uint64   `json:"listener_drops"` // refund events dropped by the listener queue (S6)
+	ListenerDrops uint64   `json:"listener_drops"` // refund events dropped by the listener queue
 	StoreError    string   `json:"store_error"`    // the last store error; "" once an epoch read succeeds (plan choice)
 	Fixtures      bool     `json:"fixtures"`       // true only for limiters built through NewWithHooks
 }
@@ -200,14 +202,19 @@ type CleanupReport struct {
 	Diag                                 Diag
 }
 
-// Option configures New (DESIGN §A5.2): WithRefundListener arrives in S6.
+// Option configures New (DESIGN §A5.2): WithRefundListener.
 type Option func(*options)
 
-// options are what Options set; S6 adds the refund listener.
-type options struct{}
+// options are what Options set.
+type options struct {
+	listener func(RefundEvent) // the refund listener; nil for none
+}
 
-// CloseOption configures Close (DESIGN §A5.2): WithDrainTimeout arrives in S6.
+// CloseOption configures Close (DESIGN §A5.2): WithDrainTimeout.
 type CloseOption func(*closeOptions)
 
-// closeOptions are what CloseOptions set; S6 adds the drain timeout.
-type closeOptions struct{}
+// closeOptions are what CloseOptions set: the drain timeout, DrainTimeoutNs unless a
+// WithDrainTimeout overrides it.
+type closeOptions struct {
+	drain time.Duration
+}

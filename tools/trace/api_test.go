@@ -35,18 +35,18 @@ func apiRun(t *testing.T, root string, args ...string) report {
 	return r
 }
 
-// TestAPI (DESIGN §C7, §C9; plan S5 step 15): the base fixture, staged like S5, passes and
-// names its missing §A5.2 items; under --complete each missing item fails, and so does the
-// interim Close(). Each must-fail fixture fails with exactly its problem, also through the
-// command line (exit 1), one per rule: an extra export in limiter or limitertest; an
+// TestAPI (DESIGN §C7, §C9; plan S5 step 15, S6 step 7): the base fixture, staged like S5 but
+// with §A5.2's Close(opts ...CloseOption), passes and names its missing §A5.2 items; under
+// --complete each missing item fails. Each must-fail fixture fails with exactly its problem,
+// also through the command line (exit 1), one per rule: an extra export in limiter or limitertest; an
 // exported field, method or interface method no doc names (Health.Zork, Diag.Zork(), a
 // method of the limitertest Adapter interface); names found in the docs only outside the
 // allowed sections (a §A5.2 bullet, elsewhere in DESIGN, DESIGN after §A5.12, the plan
 // outside every Build item, a slice's bullet after its Build item); a wrong field type; an extra field that is a doc word; an alias with a different
 // method set (an extra method that is a doc word, a changed method signature); a changed
 // function signature; a listed type, struct or function declared as another kind; a Close
-// signature other than the staged func(); and limiter or limitertest not type-checking in
-// its build. Without limiter/ the check passes.
+// signature other than §A5.2's, S5's staged func() included, since S6 emptied the interim list;
+// and limiter or limitertest not type-checking in its build. Without limiter/ the check passes.
 func TestAPI(t *testing.T) {
 	root := apiFixture(t)
 	r := apiRun(t, root)
@@ -65,7 +65,6 @@ func TestAPI(t *testing.T) {
 
 	r = apiRun(t, root, "--complete")
 	wantComplete := []string{
-		"internal/core/limiter.go:21: limiter.Limiter.Close: signature func(), the DESIGN §A5.2 listing has func(...CloseOption)",
 		"limiter: §A5.2 item func WithRefundListener is missing (--complete)",
 		"limiter: §A5.2 item method Limiter.RunCleanupPass is missing (--complete)",
 		"limiter: §A5.2 item method Permit.Release is missing (--complete)",
@@ -102,6 +101,7 @@ func TestAPI(t *testing.T) {
 		{overlay: "kindstruct", want: "limiter/limiter.go:13: limiter.Result: §A5.2 declares a struct, this is int"},
 		{overlay: "kindfunc", want: "limiter/limiter.go:31: limiter.DefaultPolicy: §A5.2 declares a function, this is a variable"},
 		{overlay: "interimclose", want: "internal/core/limiter.go:21: limiter.Limiter.Close: signature func(bool), the DESIGN §A5.2 listing has func(...CloseOption)"},
+		{overlay: "s5close", want: "internal/core/limiter.go:21: limiter.Limiter.Close: signature func(), the DESIGN §A5.2 listing has func(...CloseOption)"},
 		{overlay: "broken", want: "limiter: does not load (untagged build): type-checking ratelimiter/limiter: ", prefix: true},
 		{overlay: "brokentest", want: "limitertest: does not load (rltest build): type-checking ratelimiter/limitertest: ", prefix: true},
 	} {

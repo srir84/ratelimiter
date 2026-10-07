@@ -21,8 +21,13 @@ import (
 // The lifecycle tests build limiters through newLimiter with a hookSet, so they run in the
 // untagged build too. Their order in this file matters to bin/mutate --sweep, which runs
 // without -shuffle and with -failfast: TestNewSignerWrapper builds no limiter, so a
-// newSigner mutant fails it before a limiter without a signer wrapper reaches newSigner, and
-// TestCloseStopsWatchThenAdapter fails a shutdown mutant before any later Close.
+// newSigner mutant fails it before a limiter without a signer wrapper reaches newSigner;
+// TestCloseRefundsAndListener, the first limiter with a refund listener and a refund pending
+// at Close, fails a mutant of Close's drain or listener stop, or of Health's ListenerDrops,
+// before TestCloseStopsWatchThenAdapter's limiter without a listener, or its settings_invalid
+// instance, can crash on it; and TestCloseStopsWatchThenAdapter fails a shutdown mutant that
+// TestCloseRefundsAndListener misses before any later Close. effects_test.go's tests, which
+// build no limiter, run before all of them (file name order).
 
 // lifecycleWait bounds every wait of the lifecycle tests.
 const lifecycleWait = 5 * time.Second
@@ -195,6 +200,78 @@ func TestNewSignerWrapper(t *testing.T) {
 	}
 }
 
+// TestCloseRefundsAndListener (plan S6 step 7; SPEC API-1d, API-1e; DESIGN §A5.2, §A5.11):
+// Close on a running instance with a refund listener and one refund pending that cannot end
+// (the instance never joins an epoch, so each attempt sends nothing and is retried) returns no
+// earlier than its 100 ms drain timeout and within 5 s, the refund ended unresolved (closed),
+// and the listener's dispatcher stopped: once it has returned, the refund's event is delivered
+// or, the drain deadline having passed, dropped and counted. A release() after Close ends
+// unresolved (closed), and its event is dropped and counted, never delivered; Health's
+// ListenerDrops is the listener's count, and every slot is free.
+func TestCloseRefundsAndListener(t *testing.T) {
+	p, in := lifecycleSettings()
+	in.DrainTimeoutNs = 100_000_000
+	sink := &eventSink{}
+	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{WithRefundListener(sink.listen)})
+	t.Cleanup(func() { l.Close() })
+	if err != nil {
+		t.Fatalf("newLimiter: %v", err)
+	}
+	// Two allowed permits as Acquire makes them: a signed receipt and one slot of each kind.
+	permit := func(s uint64) *Permit {
+		t.Helper()
+		rc, err := l.signer.Sign(receipt.New([16]byte{1}, "aw", 1, s, 1_760_000_000_000_000, 60_000_000))
+		if err != nil || !l.slots.tryAcquire() {
+			t.Fatalf("permit %d: signing error %v, or no free slot", s, err)
+		}
+		return newPermit(l.slots, l.refunds, rc, receipt.DeductionID(rc), time.Now())
+	}
+	pending, late := permit(1), permit(2)
+	pending.Release()
+
+	start := time.Now()
+	closeWithin(t, l, lifecycleWait)
+	if d := time.Since(start); d < 100*time.Millisecond {
+		t.Fatalf("Close returned after %v with a refund pending, before its 100 ms drain timeout", d)
+	}
+	if st := pending.life.load(); st != stateFinal {
+		t.Fatalf("the pending refund's permit is %v after Close, want FINAL: the drain's end ends it unresolved (closed)", st)
+	}
+	select {
+	case <-l.lis.exited:
+	case <-time.After(lifecycleWait):
+		t.Fatalf("the listener's dispatcher had not returned %v after Close", lifecycleWait)
+	}
+	evs, drops := sink.untimed(t), l.lis.drops.Load()
+	if uint64(len(evs))+drops != 1 {
+		t.Fatalf("%d event(s) delivered and %d dropped, want 1 in all: the drain's end emits one", len(evs), drops)
+	}
+	if want := (RefundEvent{DeductionID: pending.DeductionID(), Result: Unresolved, Reason: UnresolvedClosed}); len(evs) == 1 && evs[0] != want {
+		t.Fatalf("event %+v, want %+v (0 attempts: nothing was sent)", evs[0], want)
+	}
+	if h := l.Health(); h.ListenerDrops != drops {
+		t.Fatalf("Health().ListenerDrops %d, want the listener's %d", h.ListenerDrops, drops)
+	}
+
+	late.Release()
+	if st := late.life.load(); st != stateFinal {
+		t.Fatalf("a release() after Close left the permit %v, want FINAL (unresolved, closed)", st)
+	}
+	if n, d := len(sink.untimed(t)), l.lis.drops.Load(); n != len(evs) || d != drops+1 {
+		t.Fatalf("after a release() after Close: %d event(s) delivered and %d dropped, want %d and %d: its event is dropped and counted, never delivered",
+			n, d, len(evs), drops+1)
+	}
+	if h := l.Health(); h.ListenerDrops != drops+1 {
+		t.Fatalf("Health().ListenerDrops %d after the dropped event, want %d", h.ListenerDrops, drops+1)
+	}
+	if u := gaugeValue(t, l.Metrics(), "rl_refund_results_total", "unresolved"); u != 2 {
+		t.Fatalf("rl_refund_results_total{unresolved} %v, want 2", u)
+	}
+	if rs, fs := l.slots.inUse(); rs != 0 || fs != 0 {
+		t.Fatalf("slots in use %d and %d after both permits ended, want 0 and 0", rs, fs)
+	}
+}
+
 // TestCloseStopsWatchThenAdapter: Close on a running instance ends the lifetime context,
 // waits for the epoch watch, then closes the store adapter once, and returns within 5 s;
 // Health then reports not_ready (closing), and a second Close returns and closes nothing
@@ -204,7 +281,7 @@ func TestCloseStopsWatchThenAdapter(t *testing.T) {
 	p, in := lifecycleSettings()
 	a := newStubAdapter()
 	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: a.wrap}, nil)
-	t.Cleanup(l.Close)
+	t.Cleanup(func() { l.Close() })
 	if err != nil {
 		t.Fatalf("newLimiter: %v", err)
 	}
@@ -227,7 +304,7 @@ func TestCloseStopsWatchThenAdapter(t *testing.T) {
 
 	in.MarginNs = 59_000_000 // RCP-8: 59 ms × 10^6 < 60 s × 1,000 ppm
 	inv, err := New(p, in, StoreOptions{})
-	t.Cleanup(inv.Close)
+	t.Cleanup(func() { inv.Close() })
 	if err == nil {
 		t.Fatal("settings that fail RCP-8 were accepted")
 	}
@@ -245,13 +322,13 @@ func TestNewAppliesOptions(t *testing.T) {
 	var applied []string
 	opt := func(name string) Option { return func(*options) { applied = append(applied, name) } }
 	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{opt("a")})
-	t.Cleanup(l.Close)
+	t.Cleanup(func() { l.Close() })
 	if err != nil || !slices.Equal(applied, []string{"a"}) {
 		t.Fatalf("one Option: err %v, applied %q; want no error, [a]", err, applied)
 	}
 	applied = nil
 	l2, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{nil, opt("b"), nil, opt("c"), nil})
-	t.Cleanup(l2.Close)
+	t.Cleanup(func() { l2.Close() })
 	if err != nil || !slices.Equal(applied, []string{"b", "c"}) {
 		t.Fatalf("Options with nil ones between: err %v, applied %q; want no error, [b c]", err, applied)
 	}

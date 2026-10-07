@@ -145,36 +145,124 @@ func transitions(from permitState, ev permitEvent) (transition, bool) {
 }
 
 // Permit is what an allowed or degraded Acquire returns (DESIGN §A5.5, SPEC API-1h). An
-// allowed permit holds the signed receipt and one slot of each kind until its first finish;
-// a degraded one holds neither, and every call on it is a no-op. Release and the retention
-// timer arrive in S6.
+// allowed permit holds the signed receipt and one slot of each kind until its slots are freed
+// by the transition that ends them; a degraded one holds neither, and every call on it is a
+// no-op. Every event goes through the compare-and-swap loop of lifecycle.fire, and only the
+// caller whose swap won performs the transition's effects (apply), so the slots are freed once
+// and at most one final event is emitted.
 type Permit struct {
 	life    *lifecycle
 	slots   *slots          // nil for a degraded permit
+	r       *refunds        // the instance's refund machinery; nil for a degraded permit
 	receipt receipt.Receipt // the signed receipt; zero for a degraded permit
 	id      string          // deduction_id; "" for a degraded permit
-	sentAt  time.Time       // monotonic instant just before the acquire was sent: the retention timer's start (S6)
+	sentAt  time.Time       // monotonic instant just before the acquire was sent: the retention timer's start
+
+	releaseMono atomic.Int64 // ns since the limiter was built at the first release() call; 0 before
+	attempts    atomic.Int64 // refund commands sent so far (API-1d)
+
+	// Guarded by r.mu.
+	retention *time.Timer // the armed retention timer; nil once stopped or fired
+	backoff   *time.Timer // the armed backoff timer of a refund waiting to retry
+	index     int         // position in r's ready queue; -1 when not queued
+	seq       uint64      // order of equal release times in the ready queue
+	retries   int         // n of the next backoff (§A5.6)
 }
 
-// newPermit returns an OPEN permit that holds one reservation of sl.
-func newPermit(sl *slots, rc receipt.Receipt, id string, sentAt time.Time) *Permit {
-	return &Permit{life: newLifecycle(stateOpen), slots: sl, receipt: rc, id: id, sentAt: sentAt}
+// newPermit returns an OPEN permit that holds one reservation of sl, and arms its retention
+// timer through r (§A5.5, REF-4a). r is nil only in tests of Done alone.
+func newPermit(sl *slots, r *refunds, rc receipt.Receipt, id string, sentAt time.Time) *Permit {
+	p := &Permit{life: newLifecycle(stateOpen), slots: sl, r: r, receipt: rc, id: id, sentAt: sentAt, index: -1}
+	if r != nil {
+		r.armRetention(p)
+	}
+	return p
 }
 
 // newDegradedPermit returns a DEGRADED permit: no receipt, no slots, no deduction_id (API-5).
 func newDegradedPermit() *Permit {
-	return &Permit{life: newLifecycle(stateDegraded)}
+	return &Permit{life: newLifecycle(stateDegraded), index: -1}
 }
 
 // Done is the host's finish on success or an unknown outcome (API-1c): OPEN → DONE keeps the
-// charge and frees both slots. In every other state, and on a nil permit, it is a no-op; the
-// compare-and-swap lets only one caller free the slots.
+// charge and frees both slots; EXPIRED → DONE is silent. In every other state, and on a nil
+// permit, it is a no-op.
 func (p *Permit) Done() {
 	if p == nil {
 		return
 	}
-	if t, ok := p.life.fire(evDone); ok && t.freeSlots {
+	if t, ok := p.life.fire(evDone); ok {
+		p.apply(t, attemptResult{})
+	}
+}
+
+// Release is the host's finish on a confirmed failure (API-1b): it returns at once, and the
+// refund runs in the background (REF-4). OPEN → RELEASED queues the refund job; after Close
+// began, OPEN → FINAL emits unresolved (closed) and sends nothing; on an EXPIRED permit it
+// emits unresolved (expired) and sends nothing. In every other state, and on a nil or degraded
+// permit, it is a no-op.
+func (p *Permit) Release() {
+	if p == nil || p.r == nil {
+		return
+	}
+	p.release(p.r.closing.Load())
+}
+
+// release is Release with the closing state given: the first call records the release time.
+func (p *Permit) release(closing bool) {
+	p.releaseMono.CompareAndSwap(0, p.r.monoNs())
+	ev := evRelease
+	if closing {
+		ev = evReleaseClosing
+	}
+	if t, ok := p.life.fire(ev); ok {
+		p.apply(t, attemptResult{})
+	}
+}
+
+// expire is the retention timer's event (REF-4a): OPEN → EXPIRED frees both slots, RELEASED →
+// FINAL emits unresolved (retention). It does nothing once the timers were stopped.
+func (p *Permit) expire() {
+	if !p.r.timersRunning() {
+		return
+	}
+	if t, ok := p.life.fire(evRetention); ok {
+		p.apply(t, attemptResult{})
+	}
+}
+
+// finish is a refund worker's final result (RELEASED → FINAL): a loser drops it.
+func (p *Permit) finish(res attemptResult) {
+	if t, ok := p.life.fire(evFinalResult); ok {
+		p.apply(t, res)
+	}
+}
+
+// drainEnd is the end of Close's drain for a refund still pending: RELEASED → FINAL emits
+// unresolved (closed).
+func (p *Permit) drainEnd() {
+	if t, ok := p.life.fire(evDrainEnd); ok {
+		p.apply(t, attemptResult{})
+	}
+}
+
+// apply performs transition t's effects (§A5.5); only the caller whose compare-and-swap made
+// t calls it. A permit that leaves OPEN or RELEASED disarms its retention timer, and one that
+// leaves RELEASED leaves the pending set (with its queue entry and backoff timer) before its
+// slots are freed, so a freed slot is never counted twice by the queue; then the slots are
+// freed, then the event is emitted. res is the worker's final result for emitResult.
+func (p *Permit) apply(t transition, res attemptResult) {
+	if p.r != nil && t.to != stateReleased {
+		p.r.settle(p)
+	}
+	if t.freeSlots && p.slots != nil {
 		p.slots.release()
+	}
+	if t.enqueue && p.r != nil {
+		p.r.enqueue(p)
+	}
+	if t.emit != emitNone && p.r != nil {
+		p.r.emit(p, t.emit, res)
 	}
 }
 

@@ -622,7 +622,7 @@ func (s *testStore) runRow(t *testing.T, row fmRow, mode FailureMode) (norm, int
 	return n, calls(), r
 }
 
-// TestFailureModeTable (DESIGN §C4, plan S5): every adapter outcome (OK with each acquire
+// TestFailureModeTable (DESIGN §C4, plan S5; S6 adds the refund rows, refundRows): every adapter outcome (OK with each acquire
 // code 1, 2, 20–25 and an out-of-range and an in-range allowed reply; unavailable;
 // cancelled; outcome_unknown; capacity_error) and every local refusal, each in a Closed and an Open limiter (the fake
 // answers read_epoch with each limiter's own fingerprint). The normalized results are the
@@ -656,7 +656,7 @@ func TestFailureModeTable(t *testing.T) {
 		// Close or Kill begins while the acquire is in the adapter, which then answers
 		// unavailable (closed, nothing sent): the instance is closing, so not_ready in both
 		// modes (API-21, API-1e, API-8a).
-		{name: "unavailable during Close", resp: store.Response{Outcome: store.Unavailable}, stop: (*Limiter).Close, want: norm{kind: NotReady, reason: "closing", label: "not_ready"}},
+		{name: "unavailable during Close", resp: store.Response{Outcome: store.Unavailable}, stop: func(l *Limiter) { l.Close() }, want: norm{kind: NotReady, reason: "closing", label: "not_ready"}},
 		{name: "unavailable during Kill", resp: store.Response{Outcome: store.Unavailable}, stop: Kill, want: norm{kind: NotReady, reason: "closing", label: "not_ready"}},
 		{name: "cancelled", resp: store.Response{Outcome: store.Cancelled}, want: norm{kind: Cancelled, label: "cancelled"}},
 		{name: "outcome_unknown", resp: store.Response{Outcome: store.OutcomeUnknown, Sent: true, SentCommands: 1, StoreError: "ERR lost"}, raw: "ERR lost", want: norm{kind: OutcomeUnknown, label: "outcome_unknown"}},
@@ -711,6 +711,142 @@ func TestFailureModeTable(t *testing.T) {
 			}
 		})
 	}
+	t.Run("refund", func(t *testing.T) { s.refundRows(t) })
+}
+
+// refundRow is one refund row of TestFailureModeTable: the adapter's response to the first
+// refund attempt (the wire row: an out-of-range reply through the real adapter instead), the
+// one final event the listener gets, and the refund calls, 1 when the response is final and 2
+// when it is retried (the next attempt answers code 3).
+type refundRow struct {
+	name  string
+	resp  store.Response
+	wire  bool
+	want  RefundEvent
+	calls int
+	early bool // an epoch-wide reply (20, 22): the epoch watch reads once more at once (§A5.7)
+}
+
+// The budget times of a refund row's first reply and of the code 3 answering a retry.
+const (
+	refundFirstUs = tNow + 1_000
+	refundNextUs  = tNow + 2_000
+)
+
+// refundRows (plan S6 Tests (a)): each refund adapter outcome (OK with each §A4.9 refund code
+// 3, 4, 10, 11, 20–25 and an out-of-range reply; unavailable; cancelled; outcome_unknown;
+// capacity_error), in a Closed and an Open limiter, gives the same event (Result, Reason,
+// Attempts, CreditDecisionNs, DeductionID) and the same final-or-retry choice, each the row's
+// literal expectation, with both slots freed (API-21, API-23: the failure mode never applies to
+// refunds). The out-of-range row, E_APPLIED with credited_units = rate_period_ns + 1 through
+// the real adapter against fakeresp, is retried as outcome_unknown, never final. An error
+// reply's text becomes Health.StoreError, and only the epoch-wide codes 20 and 22 make the
+// epoch watch read again at once (§A5.7).
+func (s *testStore) refundRows(t *testing.T) {
+	retried := func(attempts int) RefundEvent {
+		return RefundEvent{Result: Applied, Attempts: attempts, CreditDecisionNs: refundNextUs * 1000}
+	}
+	rows := []refundRow{
+		{name: "code 3", resp: okResp(3, refundFirstUs, "", int64(1_000_000_000)),
+			want: RefundEvent{Result: Applied, Attempts: 1, CreditDecisionNs: refundFirstUs * 1000}, calls: 1},
+		{name: "code 4", resp: okResp(4, refundFirstUs, "", int64(tNow+500)),
+			want: RefundEvent{Result: AlreadyApplied, Attempts: 1, CreditDecisionNs: (tNow + 500) * 1000}, calls: 1},
+		{name: "code 10", resp: okResp(10, refundFirstUs, "generation_or_sequence"), want: RefundEvent{Result: ReceiptInvalid, Attempts: 1}, calls: 1},
+		{name: "code 11", resp: okResp(11, refundFirstUs, "expired"), want: RefundEvent{Result: ReceiptExpired, Attempts: 1}, calls: 1},
+		{name: "code 20", resp: okResp(20, 0, "epoch_or_fingerprint"), want: retried(2), calls: 2, early: true},
+		{name: "code 21", resp: okResp(21, 0, "clock"), want: retried(2), calls: 2},
+		{name: "code 22", resp: okResp(22, 0, "integrity_hold"), want: retried(2), calls: 2, early: true},
+		{name: "code 23", resp: okResp(23, refundFirstUs, "refund_bucket_missing"), want: retried(2), calls: 2},
+		{name: "code 24", resp: okResp(24, refundFirstUs, "key_markers"), want: retried(2), calls: 2},
+		{name: "code 25", resp: okResp(25, 0, "keys_mismatch"), want: retried(2), calls: 2},
+		{name: "out of range", wire: true, want: retried(2), calls: 2},
+		{name: "unavailable", resp: store.Response{Outcome: store.Unavailable}, want: retried(1), calls: 2},
+		{name: "cancelled", resp: store.Response{Outcome: store.Cancelled}, want: retried(1), calls: 2},
+		{name: "outcome_unknown", resp: store.Response{Outcome: store.OutcomeUnknown, Sent: true, SentCommands: 1, StoreError: "ERR lost"},
+			want: retried(2), calls: 2},
+		{name: "capacity_error", resp: store.Response{Outcome: store.CapacityError, Sent: true, SentCommands: 1, StoreError: "OOM command not allowed"},
+			want: retried(2), calls: 2},
+	}
+	// The receipt is the same in both modes (epochA, "aw", g 1, s 1), so is its deduction_id.
+	id := deductionID(t, epochA, "aw", 1, 1)
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			want := row.want
+			want.DeductionID = id
+			for _, mode := range []FailureMode{Closed, Open} {
+				ev, calls, storeErr := s.runRefundRow(t, row, mode)
+				ev.ReleaseMonoNs, ev.FinalMonoNs = 0, 0
+				if ev != want || calls != row.calls {
+					t.Errorf("%v: event %+v after %d refund call(s)\nwant  %+v after %d", mode, ev, calls, want, row.calls)
+				}
+				if storeErr != row.resp.StoreError {
+					t.Errorf("%v: Health.StoreError %q, want %q", mode, storeErr, row.resp.StoreError)
+				}
+			}
+		})
+	}
+}
+
+// runRefundRow runs one refund row in a fresh limiter of mode: one allowed acquire, released;
+// it returns the one final event, the refund calls the store got and Health.StoreError, and
+// checks that both slots were freed and that the epoch watch read again only after an
+// epoch-wide reply. Every row's refund is final before its cleanup Close, so the limiter
+// drains for only rowDrainNs.
+func (s *testStore) runRefundRow(t *testing.T, row refundRow, mode FailureMode) (RefundEvent, int, string) {
+	t.Helper()
+	const rowDrainNs = 100_000_000 // 100 ms
+	p := testPolicy(mode)
+	log := &eventLog{}
+	var l *Limiter
+	var calls func() int
+	var fake *fakeStore
+	if row.wire {
+		ts := newTestStore(t)
+		fp := fingerprint.Of(p)
+		arr := func(vs ...resp.Value) resp.Value { return resp.Value{Kind: resp.Array, Elems: vs} }
+		ts.srv.Load(scripts.ReadEpoch.Text)
+		ts.srv.Handle(scripts.ReadEpoch.SHA, func(_, _ []string) resp.Value {
+			return arr(intVal(0), intVal(0), strVal(""), strVal(epochA), strVal(fp), intVal(tNow), intVal(1),
+				intVal(tNow), intVal(0), intVal(0), intVal(0))
+		})
+		ts.srv.Load(scripts.Acquire.Text)
+		ts.srv.Handle(scripts.Acquire.SHA, func(_, _ []string) resp.Value {
+			return arr(intVal(1), intVal(tNow), strVal(""), intVal(19_000_000_000), intVal(1), intVal(1), intVal(tNow+lifeUs))
+		})
+		n := &atomic.Int32{}
+		ts.srv.Load(scripts.Refund.Text)
+		ts.srv.Handle(scripts.Refund.SHA, func(_, _ []string) resp.Value {
+			if n.Add(1) == 1 { // credited_units = rate_period_ns + 1: outside §A4.9's 0 … rate_period_ns
+				return arr(intVal(3), intVal(refundFirstUs), strVal(""), intVal(1_000_000_001))
+			}
+			return arr(intVal(3), intVal(refundNextUs), strVal(""), intVal(1_000_000_000))
+		})
+		in := refundInstance(p)
+		in.EpochRereadIntervalNs = wireInterval
+		in.DrainTimeoutNs = rowDrainNs
+		l = ts.ready(t, p, in, nil, Hooks{}, reasonReady, WithRefundListener(log.listen))
+		calls = func() int { return int(n.Load()) }
+	} else {
+		fake = newFake(joined(p), func(store.Request) store.Response { return allowedResp(1, 1) })
+		fake.setRefund(replies(row.resp, appliedAt(refundNextUs)))
+		in := refundInstance(p)
+		in.DrainTimeoutNs = rowDrainNs
+		l = s.ready(t, p, in, fake, Hooks{}, reasonReady, WithRefundListener(log.listen))
+		calls = func() int { return fake.count("refund") }
+	}
+	acquireOK(t, l).Release()
+	ev := waitEvents(t, log, 1)[0]
+	if got := slotsOf(l); got != (slotCounts{0, 0}) {
+		t.Errorf("%s (%v): slots in use %+v after the final event, want 0 and 0", row.name, mode, got)
+	}
+	if fake != nil { // the startup read, plus one early read after an epoch-wide reply
+		if row.early {
+			waitFor(t, "the early epoch read", func() bool { return fake.count("read_epoch") == 2 })
+		} else if n := fake.count("read_epoch"); n != 1 {
+			t.Errorf("%s (%v): %d epoch reads, want 1 (only the startup read)", row.name, mode, n)
+		}
+	}
+	return ev, calls(), l.Health().StoreError
 }
 
 // expectHealth fails the test unless l's health has reason (status ready only for "ready")
@@ -1056,7 +1192,7 @@ func TestNewNeverNil(t *testing.T) {
 		if ls[i] == nil {
 			t.Fatalf("%s: a nil limiter", c.name)
 		}
-		t.Cleanup(ls[i].Close)
+		t.Cleanup(func() { ls[i].Close() })
 		if err == nil || strings.Contains(err.Error(), s.pw) {
 			t.Fatalf("%s: err = %v, want an error without the password", c.name, err)
 		}

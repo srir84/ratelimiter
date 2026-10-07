@@ -236,3 +236,119 @@ func TestDesign_SeparateDeployments(t *testing.T) {
 	traffic([]*driver.Driver{b}, 60)
 	b.CheckRefModel(t)
 }
+
+// TestDesign_RefundInequality (DESIGN §A5.6, §C4; plan S6 Tests (a)): at the harness instance
+// values (N 1,152, 128 workers, D 2 s, backoff max 1 s), the startup check needs
+// 1 + 1 + (⌈1,152 / 128⌉ + 3) × 2 = 26 s ≤ refund_deadline. With refund_deadline 25 s, New
+// returns an error and the instance is permanently not ready (settings_invalid): Acquire is
+// not_ready and nothing is ever written to the store. A deployment whose policy has
+// refund_deadline 26 s joins and serves.
+func TestDesign_RefundInequality(t *testing.T) {
+	short := driver.DefaultPolicy()
+	short.RefundDeadlineNs = 25_000_000_000
+	d := driver.New(t, driver.Options{Policy: short})
+	in := d.Instance()
+	if in.MaxPendingRefunds != 1152 || in.RefundWorkers != 128 || in.DependencyDeadlineNs != 2_000_000_000 || in.RefundBackoffMaxNs != 1_000_000_000 {
+		t.Fatalf("instance settings %+v, want the harness values (N 1,152, 128 workers, D 2 s, backoff max 1 s)", in)
+	}
+	if _, err := d.AddInstance(driver.InstanceSpec{}); err == nil {
+		t.Error("New with refund_deadline 25 s: no error, want the §A5.6 inequality's")
+	}
+	if h := d.Limiter(0).Health(); h.Status != "not_ready" || h.Reason != "settings_invalid" {
+		t.Errorf("health %s (%s), want not_ready (settings_invalid)", h.Status, h.Reason)
+	}
+	if op := d.Acquire(0, "k"); op.Kind != limiter.NotReady {
+		t.Errorf("acquire: %v, want not_ready", op.Kind)
+	}
+	time.Sleep(interval(d)) // an epoch read would have come by now
+	if sent := d.Sent(0); len(sent) != 0 {
+		t.Errorf("the instance wrote %v, want nothing at all", sent)
+	}
+
+	enough := driver.DefaultPolicy()
+	enough.RefundDeadlineNs = 26_000_000_000
+	e := driver.New(t, driver.Options{Instances: 1, Policy: enough})
+	op := e.Acquire(0, "k")
+	if op.Kind != limiter.Allowed {
+		t.Fatalf("acquire with refund_deadline 26 s: %v (%+v), want allowed", op.Kind, op.Diag)
+	}
+	e.Done(op)
+}
+
+// mustEqualRuns compares two runs of the T-COR-1 workload op by op: kinds and results equal,
+// units scaled by k, retry_after_ns equal, and every time (decision, credit, expiry, clock)
+// shifted by deltaNs (expiry by deltaNs / 1000), except that a time of 0 (no credit time)
+// stays 0.
+func mustEqualRuns(t *testing.T, base, other []cor1Op, k, deltaNs int64) {
+	t.Helper()
+	if len(base) != len(other) {
+		t.Fatalf("%d ops against %d", len(base), len(other))
+	}
+	shift := func(v, by int64) int64 {
+		if v == 0 {
+			return 0
+		}
+		return v + by
+	}
+	bad := 0
+	for n, b := range base {
+		want := cor1Op{
+			kind: b.kind, result: b.result, units: b.units * k, retry: b.retry,
+			decision: shift(b.decision, deltaNs), expiryUs: shift(b.expiryUs, deltaNs/1000), clockNs: shift(b.clockNs, deltaNs),
+		}
+		if other[n] != want {
+			bad++
+			if bad <= 10 {
+				t.Errorf("op %d: %+v, want %+v (from %+v)", n, other[n], want, b)
+			}
+		}
+	}
+	if bad > 10 {
+		t.Errorf("… %d ops differ in all", bad)
+	}
+}
+
+// TestDesign_MetamorphicTimeShift (DESIGN §C4 metamorphic tests; plan S6 Tests (a)): for each
+// T-COR-1 policy, the workload of one seed runs twice, each on a fresh store and epoch; the
+// second has every controlled time and the epoch origin shifted by Δ = 4 × 10^15 µs (all
+// values stay below TBOUND = 2^53 − 2^43 µs). Kinds, units, credits and retry_after_ns are
+// equal; decision, credit and expiry times differ by exactly Δ; zero placeholders stay 0;
+// epoch and deduction IDs (crypto/rand) are not compared.
+func TestDesign_MetamorphicTimeShift(t *testing.T) {
+	const deltaUs int64 = 4_000_000_000_000_000
+	const tbound int64 = 1<<53 - 1<<43 // µs
+	for _, pc := range cor1Policies() {
+		t.Run(pc.name, func(t *testing.T) {
+			_, base := runCOR1(t, 11, pc.p, 0)
+			_, shifted := runCOR1(t, 11, pc.p, deltaUs*1000)
+			var top int64 // µs
+			for _, op := range shifted {
+				top = max(top, op.clockNs/1000, op.decision/1000, op.expiryUs)
+			}
+			if top >= tbound {
+				t.Fatalf("the shifted run reached %d µs, want every value below TBOUND %d µs", top, tbound)
+			}
+			mustEqualRuns(t, base, shifted, 1, deltaUs*1000)
+		})
+	}
+}
+
+// TestDesign_MetamorphicScale (DESIGN §C4 metamorphic tests; plan S6 Tests (a)): both T-COR-1
+// policies, then each with rate_tokens and rate_period_ns × 7 (a fresh store and epoch: the
+// fingerprint differs), within the §A3.1 bounds (7 · rate_tokens ≤ 2^31 − 1, 7 · cap_units <
+// 2^52): the same workload seed gives the same kinds and retry_after_ns, and units and credits
+// × 7; times are unchanged.
+func TestDesign_MetamorphicScale(t *testing.T) {
+	for _, pc := range cor1Policies() {
+		t.Run(pc.name, func(t *testing.T) {
+			scaled := pc.p
+			scaled.RateTokens, scaled.RatePeriodNs = 7*pc.p.RateTokens, 7*pc.p.RatePeriodNs
+			if scaled.RateTokens > 1<<31-1 || scaled.Capacity*scaled.RatePeriodNs >= 1<<52 {
+				t.Fatalf("scaled policy %+v outside the §A3.1 bounds", scaled)
+			}
+			_, base := runCOR1(t, 12, pc.p, 0)
+			_, big := runCOR1(t, 12, scaled, 0)
+			mustEqualRuns(t, base, big, 7, 0)
+		})
+	}
+}

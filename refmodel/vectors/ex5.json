@@ -1,0 +1,50 @@
+{
+  "arithmetic": "Empty = 20\u00d710^9 \u2212 20\u00d710^9 = 0. First refund adds 10^9; ten repeats add 0 because the marker exists. Balance = 10^9 \u2264 20\u00d710^9. One allow leaves 0; next retry = ceil(10^9\u00f710) = 100000000 ns.",
+  "steps": [
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "repeat": 20,
+      "expected": {
+        "result": "allowed"
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000,
+        "decision_ns": 0
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "repeat": 10,
+      "expected": {
+        "result": "already_applied",
+        "credited": 0,
+        "decision_ns": 0
+      }
+    },
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "expected": {
+        "result": "allowed",
+        "u": 0,
+        "s": 21
+      }
+    },
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "expected": {
+        "result": "limited",
+        "u": 0,
+        "retry_after_ns": 100000000
+      }
+    }
+  ]
+}

@@ -103,6 +103,25 @@ func replyTable() []replyScript {
 			},
 		},
 		{
+			script: "refund", // §A4.1 (keys_mismatch), §A4.2 (the prelude), §A4.4, §A3.3, §A4.9
+			codes: []replyCode{
+				{3, none}, // E_APPLIED
+				{4, none}, // E_ALREADY_APPLIED
+				{10, []string{"epoch", "generation_or_sequence"}}, // E_RECEIPT_INVALID: steps 4 and 7
+				{11, []string{"expired"}},                         // E_RECEIPT_EXPIRED: step 5
+				{20, []string{"epoch_or_fingerprint"}},
+				{21, []string{"clock"}},
+				{22, loadEpoch},
+				{23, slices.Concat([]string{"quarantined", "refund_bucket_missing"}, checkKey)},
+				{24, []string{"key_markers", "live_markers"}},
+				{25, []string{"keys_mismatch"}},
+			},
+			sources: []replySource{
+				{"why", []replyCode{{22, loadEpoch}}}, // load_epoch's reason, in the prelude's enter
+				{"b", []replyCode{{23, checkKey}}},    // quarantine(b): check_key's reason
+			},
+		},
+		{
 			script: "read_epoch", // §A4.9: state 0 = healthy, 22 = epoch-wide problem
 			codes:  []replyCode{{0, none}, {22, loadEpoch}},
 			sources: []replySource{

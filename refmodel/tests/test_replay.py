@@ -54,7 +54,7 @@ def run(path: Path, records: list[dict[str, object]]) -> int:
 
 def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path = tmp_path.joinpath("log.jsonl")
-    original = log()
+    original = [*log(), log()[0], {"type": "epoch", "epoch_id": "f", "origin_ns": 0}]
     assert run(path, original) == 0
     # Every numeric comparison, in both allowed and limited replies, ±1.
     for index in (3, 5, 7):
@@ -71,7 +71,7 @@ def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
                 assert f"actual {value + delta!r}" in output
         for field, value in (
             ("result", "limited" if index != 5 else "allowed"),
-            ("epoch_id", "other"),
+            ("epoch_id", "f"),
             ("deduction_id", "" if index != 5 else "extra"),
         ):
             records = copy.deepcopy(original)
@@ -97,7 +97,7 @@ def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     ):
         records = copy.deepcopy(original)
         records[index][field] = value
-        assert run(path, records) == 1, (index, field)
+        assert run(path, records) == (2 if field == "epoch_id" else 1), (index, field)
         assert "line " in capsys.readouterr().out
     for index in (3, 6):
         records = copy.deepcopy(original)
@@ -108,6 +108,7 @@ def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     records[4], records[5] = records[5], records[4]
     assert run(path, records) == 1
     assert "line 5:" in capsys.readouterr().out
+    check_refund_fields(tmp_path, capsys)
     test_capacity_policy_sensitivity(tmp_path, capsys)
     test_exit_zero_equivalences(tmp_path)
     # Error replies compare zero-valued numeric fields as well.
@@ -245,3 +246,143 @@ def test_epoch_reset_and_duplicate_deduction(tmp_path: Path) -> None:
     assert run(path, records + replacement) == 0
     records[4]["deduction_id"] = records[3]["deduction_id"]
     assert run(path, records) == 1
+
+
+def refund_log() -> list[dict[str, object]]:
+    # cap=2000; deductions at zero leave 0. Refund at 0 adds 1000.
+    # Subsequent acquire spends it, giving sequence 3 and balance 0.
+    return [
+        *log()[:5],
+        {"type": "release", "instance": "i", "deduction_id": "YQ:1:1"},
+        {
+            "type": "refund",
+            "deduction_id": "YQ:1:1",
+            "key_b64url": "YQ",
+            "g": 1,
+            "s": 1,
+            "expiry_us": 10,
+            "attempts": [{"code": "applied", "t_us": 0, "credited": 1000}],
+            "result": "applied",
+        },
+        acquire(0, 3),
+    ]
+
+
+def check_refund_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path.joinpath("refund.jsonl")
+    # cap=4000, two deductions leave 0; 3 us refill leaves 3000.
+    # Refund adds the remaining 1000; next deduction leaves 2000.
+    # s + 1 names the second deduction, so only the s comparison rejects it.
+    original = refund_log()
+    original[0].update(rate_tokens=1, rate_period_ns=2000)
+    original[3]["u"] = 2000
+    original[6]["attempts"] = [{"code": "applied", "t_us": 3, "credited": 1000}]
+    original[7] = acquire(2000, 3, 3000)
+    original.insert(6, {"type": "clock", "value_ns": 3000})
+    assert run(path, original) == 0
+    for field in ("g", "s", "expiry_us"):
+        for delta in (-1, 1):
+            records = copy.deepcopy(original)
+            value = records[7][field]
+            assert isinstance(value, int)
+            records[7][field] = value + delta
+            assert run(path, records) == 1, (field, delta)
+            assert "line 8:" in capsys.readouterr().out
+    for field in ("t_us", "credited"):
+        for delta in (-1, 1):
+            records = copy.deepcopy(original)
+            attempts = records[7]["attempts"]
+            assert isinstance(attempts, list)
+            value = attempts[0][field]
+            attempts[0][field] = value + delta
+            assert run(path, records) == 1
+            assert "line 8:" in capsys.readouterr().out
+    for field, value in (("key_b64url", "Yg"), ("result", "already_applied")):
+        records = copy.deepcopy(original)
+        records[7][field] = value
+        assert run(path, records) == (2 if field == "result" else 1)
+        assert "line 8:" in capsys.readouterr().out
+    records = copy.deepcopy(original)
+    attempts = records[7]["attempts"]
+    assert isinstance(attempts, list)
+    attempts[0]["code"] = "already_applied"
+    assert run(path, records) == 2
+    assert "line 8:" in capsys.readouterr().out
+    records = copy.deepcopy(original)
+    del records[7]
+    assert run(path, records) == 1
+    assert "line 8:" in capsys.readouterr().out
+
+
+def test_receipt_error_and_repeat(tmp_path: Path) -> None:
+    path = tmp_path.joinpath("log")
+    records = log()
+    records[3].update(result="receipt_error", deduction_id="", epoch_id="")
+    assert run(path, records) == 0
+    records = refund_log()
+    # B7/API-1d: one final record, with a lost reply and its confirming retry.
+    records[6]["result"] = "already_applied"
+    records[6]["attempts"] = [
+        {"code": "outcome_unknown", "t_us": 0, "credited": 0},
+        {"code": "already_applied", "t_us": 0, "credited": 0},
+    ]
+    assert run(path, records) == 0
+    assert main(["--mutant", "unknown", str(path)]) == 2
+    records = refund_log()
+    records[6]["attempts"] = [{"code": 3, "t_us": 0, "credited": 1000}]
+    assert run(path, records) == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "allow_strict",
+        "new_bucket_short",
+        "credit_uncapped",
+        "credit_before_refill",
+        "refill_uncapped",
+        "retry_floor",
+        "hwm_on_limited",
+        "expiry_strict",
+    ],
+)
+def test_mutants(tmp_path: Path, name: str) -> None:
+    path = tmp_path.joinpath("log")
+    records = log()
+    if name in {"credit_uncapped", "credit_before_refill"}:
+        records = [
+            *log()[:4],
+            {"type": "release", "instance": "i", "deduction_id": "YQ:1:1"},
+            {"type": "clock", "value_ns": 1000},
+            dict(refund_log()[6], attempts=[{"code": "applied", "t_us": 1, "credited": 0}]),
+        ]
+    elif name == "refill_uncapped":
+        records = [*log()[:4], {"type": "clock", "value_ns": 10000}, acquire(1000, 2, 10000)]
+    elif name == "expiry_strict":
+        records = [
+            *log()[:4],
+            {"type": "release", "instance": "i", "deduction_id": "YQ:1:1"},
+            {"type": "clock", "value_ns": 10000},
+            dict(
+                refund_log()[6],
+                result="receipt_expired",
+                attempts=[{"code": "receipt_expired", "t_us": 10, "credited": 0}],
+            ),
+        ]
+    elif name == "hwm_on_limited":
+        # Larger token period: at 1000 ns refill gives 3000 < 10000.
+        # Limited must not store 1000; at regressed zero the units are still zero.
+        records = [*log()[:2]]
+        records[0]["rate_period_ns"] = 10000
+        records.extend(
+            [
+                acquire(10000, 1),
+                acquire(0, 2),
+                {"type": "clock", "value_ns": 1000},
+                dict(acquire(3000, 0, 1000), retry_after_ns=2334),
+                {"type": "clock", "value_ns": 0},
+                dict(acquire(0, 0), retry_after_ns=3334),
+            ]
+        )
+    assert run(path, records) == 0
+    assert main(["--mutant", name, str(path)]) == 1

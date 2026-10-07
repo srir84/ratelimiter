@@ -1,0 +1,31 @@
+{
+  "arithmetic": "20 deductions: 20\u00d710^9 \u2212 20\u00d710^9 = 0. No elapsed time, so refill = 0. Refund adds min(10^9, 20\u00d710^9 \u2212 0) = 10^9. One deduction leaves 0.",
+  "steps": [
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "repeat": 20,
+      "expected": {
+        "result": "allowed"
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000,
+        "decision_ns": 0
+      }
+    },
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "expected": {
+        "result": "allowed",
+        "u": 0,
+        "s": 21
+      }
+    }
+  ]
+}

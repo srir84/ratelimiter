@@ -172,6 +172,34 @@ func TestClassifyErrorReplies(t *testing.T) {
 	}
 }
 
+// TestNotReadyReply (DESIGN §A5.4 not-ready replies; SPEC API-22): exactly the error replies
+// whose first space-delimited word is LOADING or BUSY are not-ready refusals; a longer word
+// (BUSYKEY), a lowercase one, the other classified words and an empty text are not.
+func TestNotReadyReply(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"LOADING Valkey is loading the dataset in memory", true},
+		{"BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.", true},
+		{"LOADING", true},
+		{"BUSY", true},
+		{"BUSYKEY Target key name already exists.", false},
+		{"LOADINGS the dataset", false},
+		{"loading the dataset in memory", false},
+		{"busy running a script", false},
+		{" BUSY leading space", false},
+		{"NOSCRIPT No matching script. Please use EVAL.", false},
+		{"OOM command not allowed when used memory > 'maxmemory'.", false},
+		{"ERR something", false},
+		{"", false},
+	} {
+		if got := NotReadyReply(tc.text); got != tc.want {
+			t.Errorf("NotReadyReply(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
 func TestReloadThenLostReply(t *testing.T) {
 	e := newEnv(t)
 	sc := scripts.New("acquire", "-- reload, then the resend's reply is lost")

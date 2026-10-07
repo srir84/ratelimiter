@@ -49,6 +49,26 @@ func curatedEntries() []curatedEntry {
 			To:   "",
 		},
 		{
+			ID: "PB5", File: "internal/scripts/refund.lua", Tests: []string{"TestRefundScript_*"},
+			From: "if t >= expiry_us then return finish(E_RECEIPT_EXPIRED, 'expired') end -- step 5", // a refund at exactly expiry is accepted (RCP-6, API-16)
+			To:   "if t > expiry_us then return finish(E_RECEIPT_EXPIRED, 'expired') end -- step 5",
+		},
+		{
+			ID: "PB6", File: "internal/scripts/refund.lua", Tests: []string{"TestRefundScript_*"},
+			From: "local credited = math.min(cap_units, u + rate_period_ns) - u -- may be 0", // uncapped credit (BUD-13)
+			To:   "local credited = rate_period_ns",
+		},
+		{
+			ID: "PB7", File: "internal/scripts/refund.lua", Tests: []string{"TestRefundScript_*"},
+			From: "if mval then return finish(E_ALREADY_APPLIED, '', mval.credit) end -- step 8 (check_key verified its mi entry)", // double credit (REF-3, EX-5)
+			To:   "",
+		},
+		{
+			ID: "PB8", File: "internal/scripts/refund.lua", Tests: []string{"TestRefundScript_*"},
+			From: "redis.call('ZADD', K.ix, 'LT', expiry_us, enc)", // the ix score only rises (STA-5)
+			To:   "redis.call('ZADD', K.ix, 'GT', expiry_us, enc)",
+		},
+		{
 			ID: "PB11", File: "internal/store/classify.go", Tests: []string{"TestClassifyErrorReplies"},
 			From: "return Unavailable, false", // LOADING/BUSY → outcome_unknown (API-22)
 			To:   "return OutcomeUnknown, false",
@@ -72,6 +92,11 @@ func curatedEntries() []curatedEntry {
 			ID: "PB15", File: "internal/core/acquire.go", Tests: []string{"TestFailureModeTable"},
 			From: "resp := l.adapter.Call(ctx, req)", // Acquire sends again after OutcomeUnknown (API-12)
 			To:   "resp := l.adapter.Call(ctx, req); if resp.Outcome == store.OutcomeUnknown { resp = l.adapter.Call(ctx, req) }",
+		},
+		{
+			ID: "PB16", File: "refmodel/check_bud11.py", Tests: []string{"refmodel/tests/test_check_bud11.py"},
+			From: "if window_units > cap:", // the window comparison loosened by one: one allow over passes (BUD-11)
+			To:   "if window_units > cap + 1:",
 		},
 		{
 			ID: "PB17", File: "refmodel/replay.py", Tests: []string{"refmodel/tests/test_replay.py::test_detects_each_field"},

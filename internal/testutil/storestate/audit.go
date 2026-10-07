@@ -1,6 +1,7 @@
 package storestate
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -412,42 +413,68 @@ func (a *auditor) counters(e epoch, ixCard, buckets int, names []string, parsed 
 	}
 }
 
+// canaryForm is one text form of a canary: its name and the text searched for.
+type canaryForm struct{ name, text string }
+
+// canaryForms returns the forms of the canary rule for c (DESIGN §C4): raw, hex in lower and
+// upper case, base64 in the standard and URL alphabets, padded and not, and, since inside a
+// longer base64 value the canary may start at any byte offset and have more bytes after it,
+// for each offset mod 3 the part of its encoding that depends on neither. Nil for an empty c.
+func canaryForms(c []byte) []canaryForm {
+	if len(c) == 0 {
+		return nil
+	}
+	h := hex.EncodeToString(c)
+	forms := []canaryForm{
+		{"raw", string(c)},
+		{"hex", h},
+		{"upper-case hex", strings.ToUpper(h)},
+		{"base64", base64.StdEncoding.EncodeToString(c)},
+		{"unpadded base64", base64.RawStdEncoding.EncodeToString(c)},
+		{"base64url", base64.URLEncoding.EncodeToString(c)},
+		{"unpadded base64url", base64.RawURLEncoding.EncodeToString(c)},
+	}
+	for _, alphabet := range []struct {
+		name string
+		enc  *base64.Encoding
+	}{{"base64", base64.RawStdEncoding}, {"base64url", base64.RawURLEncoding}} {
+		for k := range 3 {
+			if core := base64Core(alphabet.enc, c, k); core != "" {
+				forms = append(forms, canaryForm{fmt.Sprintf("%s at byte offset %d mod 3", alphabet.name, k), core})
+			}
+		}
+	}
+	return forms
+}
+
+// FindCanaries applies the canary rule of Audit to data, the bytes of a file (the driver
+// searches the store's AOF files with it, DESIGN §C4; plan S6 step 13): for each canary
+// found, in any form, one message naming the canary's index and the first form found. It
+// never includes the canary itself. An empty canary is skipped.
+func FindCanaries(data []byte, canaries [][]byte) []string {
+	var out []string
+	for i, c := range canaries {
+		for _, f := range canaryForms(c) {
+			if bytes.Contains(data, []byte(f.text)) {
+				out = append(out, fmt.Sprintf("canary %d (%s)", i, f.name))
+				break
+			}
+		}
+	}
+	return out
+}
+
 // canaries applies the canary rule to every key name, field, member, score and value.
 func (a *auditor) canaries(names []string) {
-	type form struct{ name, text string }
 	type canary struct {
 		index int
-		forms []form
+		forms []canaryForm
 	}
 	var cs []canary
 	for i, c := range a.c.Canaries {
-		if len(c) == 0 {
-			continue
+		if forms := canaryForms(c); len(forms) > 0 {
+			cs = append(cs, canary{index: i, forms: forms})
 		}
-		h := hex.EncodeToString(c)
-		forms := []form{
-			{"raw", string(c)},
-			{"hex", h},
-			{"upper-case hex", strings.ToUpper(h)},
-			{"base64", base64.StdEncoding.EncodeToString(c)},
-			{"unpadded base64", base64.RawStdEncoding.EncodeToString(c)},
-			{"base64url", base64.URLEncoding.EncodeToString(c)},
-			{"unpadded base64url", base64.RawURLEncoding.EncodeToString(c)},
-		}
-		// Inside a longer base64 value the canary may start at any byte offset and have
-		// more bytes after it: for each offset mod 3, also search for the part of its
-		// encoding that depends on neither.
-		for _, alphabet := range []struct {
-			name string
-			enc  *base64.Encoding
-		}{{"base64", base64.RawStdEncoding}, {"base64url", base64.RawURLEncoding}} {
-			for k := range 3 {
-				if core := base64Core(alphabet.enc, c, k); core != "" {
-					forms = append(forms, form{fmt.Sprintf("%s at byte offset %d mod 3", alphabet.name, k), core})
-				}
-			}
-		}
-		cs = append(cs, canary{index: i, forms: forms})
 	}
 	if len(cs) == 0 {
 		return

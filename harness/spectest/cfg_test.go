@@ -209,7 +209,7 @@ func TestT_CFG_3(t *testing.T) {
 	if pl == nil || perr == nil {
 		t.Fatalf("c: limiter.New with the controlled clock: %v, %v; want a limiter and an error", pl, perr)
 	}
-	t.Cleanup(pl.Close)
+	t.Cleanup(func() { pl.Close() })
 
 	time.Sleep(3 * interval(d))
 	for n, c := range cases {

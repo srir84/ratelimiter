@@ -232,7 +232,7 @@ func TestPermitDoneOnce(t *testing.T) {
 		if sl.tryAcquire() {
 			t.Fatal("a third reservation of 2 slots succeeded")
 		}
-		p := newPermit(sl, receipt.Receipt{}, "d1_test", time.Now())
+		p := newPermit(sl, nil, receipt.Receipt{}, "d1_test", time.Now())
 		if id := p.DeductionID(); id != "d1_test" {
 			t.Fatalf("round %d: an OPEN permit's DeductionID = %q, want d1_test", round, id)
 		}

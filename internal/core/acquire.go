@@ -162,7 +162,7 @@ func (l *Limiter) allowed(enc string, st *epochState, sentAt time.Time, resp sto
 	if err != nil {
 		return Result{Kind: ReceiptError, Diag: Diag{Reason: reasonSigningFailed}}
 	}
-	p := newPermit(l.slots, rc, receipt.DeductionID(rc), sentAt)
+	p := newPermit(l.slots, l.refunds, rc, receipt.DeductionID(rc), sentAt)
 	return Result{Kind: Allowed, DecisionNs: DecisionNs(resp.Reply.TUs), Permit: p}
 }
 

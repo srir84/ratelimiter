@@ -109,8 +109,21 @@ def test_epoch_resets_clock_and_ids(tmp_path: Path) -> None:
     assert run(tmp_path.joinpath("log"), records) == 0
     records[-1]["deduction_id"] = records[3]["deduction_id"]
     assert run(tmp_path.joinpath("log"), records) == 1
-    # Pending policy invalidates the preceding model.
-    assert run(tmp_path.joinpath("log"), [*log(), log()[0], acquire(1000, 4, 1000)]) == 2
+    # A pending policy leaves the preceding model current (DECISIONS A1).
+    assert (
+        run(
+            tmp_path.joinpath("log"),
+            [
+                *log(),
+                log()[0],
+                acquire(0, 4, 1000),
+                {"type": "epoch", "epoch_id": "f", "origin_ns": 0},
+            ],
+        )
+        == 0
+    )
+    # A policy still requires a following epoch.
+    assert run(tmp_path.joinpath("log"), [*log(), log()[0], acquire(0, 4, 1000)]) == 2
 
 
 @pytest.mark.parametrize(

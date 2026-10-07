@@ -59,13 +59,14 @@ func (l *Limiter) readiness() readiness {
 func (l *Limiter) Health() Health {
 	rd := l.readiness()
 	h := Health{
-		Status:      statusNotReady,
-		Reason:      rd.health,
-		EpochID:     rd.st.id,
-		ClockSource: l.p.ClockSource.String(),
-		Instance:    l.in,
-		StoreError:  l.storeError(),
-		Fixtures:    l.fixtures,
+		Status:        statusNotReady,
+		Reason:        rd.health,
+		EpochID:       rd.st.id,
+		ClockSource:   l.p.ClockSource.String(),
+		Instance:      l.in,
+		ListenerDrops: l.listenerDrops(),
+		StoreError:    l.storeError(),
+		Fixtures:      l.fixtures,
 	}
 	if rd.ready {
 		h.Status = statusReady

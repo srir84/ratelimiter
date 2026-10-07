@@ -33,9 +33,12 @@ type Limiter struct {
 	signer     receipt.Signer
 	adapter    store.Adapter
 	watch      *epochWatch
+	refunds    *refunds  // the refund machinery (refund.go); nil when settings_invalid
+	lis        *listener // the refund listener (listener.go); nil without one
 
-	epoch   atomic.Pointer[epochState] // the watch's latest snapshot
-	closing atomic.Bool                // Close or Kill began
+	epoch        atomic.Pointer[epochState] // the watch's latest snapshot
+	closing      atomic.Bool                // Close or Kill began
+	closeStarted atomic.Bool                // Close or Kill ran: a later Close returns at once
 
 	storeMu  sync.Mutex
 	storeErr string // Health.StoreError
@@ -53,11 +56,13 @@ func New(p Policy, in Instance, st StoreOptions, opts ...Option) (*Limiter, erro
 
 // newLimiter builds a limiter for New and NewWithHooks (DESIGN §A5.2): it validates the
 // settings (CFG-4, §A3.1, RCP-8, §A5.6), generates the signing key from crypto/rand or the
-// hook reader (RCP-4), computes the fingerprint (§A5.9), starts the store adapter (§A5.4) and
-// the epoch watch (§A5.7). Any failure gives a non-nil limiter that is permanently not ready
+// hook reader (RCP-4), computes the fingerprint (§A5.9), starts the store adapter (§A5.4), the
+// refund listener's dispatcher (§A5.11), the refund workers (§A5.6) and the epoch watch
+// (§A5.7). Any failure gives a non-nil limiter that is permanently not ready
 // (settings_invalid) and opens no connection, plus the error for the host to log. The error
 // names the failed rule, never a setting's value or the store password.
 func newLimiter(p Policy, in Instance, st StoreOptions, h hookSet, opts []Option) (*Limiter, error) {
+	born := time.Now() // the origin of the refund events' monotonic times (plan S6 step 6)
 	var o options
 	for _, opt := range opts {
 		if opt != nil {
@@ -120,6 +125,22 @@ func newLimiter(p Policy, in Instance, st StoreOptions, h hookSet, opts []Option
 	}
 	l.adapter, l.stop = ad, stop
 	l.watch = newEpochWatch(l, time.Duration(in.EpochRereadIntervalNs))
+	if o.listener != nil {
+		l.lis = newListener(o.listener, in.ListenerQueueSize, reg)
+		l.lis.start()
+	}
+	l.refunds = newRefunds(refundsConfig{
+		capacity:       in.MaxPendingRefunds,
+		lifetime:       time.Duration(p.ReceiptLifetimeNs),
+		backoffInitial: time.Duration(in.RefundBackoffInitialNs),
+		backoffMax:     time.Duration(in.RefundBackoffMaxNs),
+		born:           born,
+		closing:        &l.closing,
+		reg:            reg,
+		lis:            l.lis,
+		attempt:        l.refundAttempt,
+	}, life)
+	l.refunds.startWorkers(in.RefundWorkers)
 	l.wg.Add(1)
 	go func() {
 		defer l.wg.Done()
@@ -144,15 +165,9 @@ func newSigner(keyReader io.Reader, wrap func(receipt.Signer) receipt.Signer) (r
 	return s, nil
 }
 
-// Close stops the instance (plan choice for S5; S6 adds the drain): from now on Acquire
-// returns not_ready and Health reports closing; the epoch watch stops and every connection
-// closes. It returns once the watch and the connection goroutines have ended, and is safe to
-// call more than once.
-func (l *Limiter) Close() { l.shutdown() }
-
 // shutdown marks the instance closing, ends the lifetime context, waits for the watch and
 // closes the adapter, which fails the calls in flight and waits for its goroutines. Close
-// and Kill share it; S6 puts the drain in front of it for Close only.
+// (close.go) runs it after the drain, Kill at once.
 func (l *Limiter) shutdown() {
 	l.closing.Store(true)
 	l.closeOnce.Do(func() {

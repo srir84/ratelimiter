@@ -16,7 +16,7 @@ import (
 	"ratelimiter/internal/store/resp"
 )
 
-// TestCloseAndKill: Close (S5: no drain yet) and Kill each stop the epoch watch and close
+// TestCloseAndKill: Close (nothing pending to drain) and Kill each stop the epoch watch and close
 // every connection before they return, Kill within 100 ms; afterwards Acquire returns
 // not_ready and Health reports closing, and a second call returns at once (DESIGN §A5.12,
 // plan S5 steps 3 and 8).
@@ -137,9 +137,9 @@ func TestCloseDuringSend(t *testing.T) {
 		mode FailureMode
 		stop func(*Limiter)
 	}{
-		{"Open, Close", Open, (*Limiter).Close},
+		{"Open, Close", Open, func(l *Limiter) { l.Close() }},
 		{"Open, Kill", Open, Kill},
-		{"Closed, Close", Closed, (*Limiter).Close},
+		{"Closed, Close", Closed, func(l *Limiter) { l.Close() }},
 		{"Closed, Kill", Closed, Kill},
 	} {
 		t.Run(c.name, func(t *testing.T) {

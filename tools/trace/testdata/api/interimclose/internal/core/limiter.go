@@ -18,7 +18,7 @@ func New(p Policy, in Instance, st StoreOptions, opts ...Option) (*Limiter, erro
 
 func (l *Limiter) Acquire(ctx context.Context, key string) Result { return Result{} }
 
-func (l *Limiter) Close(force bool) { l.closed = force } // want: the interim list stages only func()
+func (l *Limiter) Close(force bool) { l.closed = force } // want: §A5.2 has func(...CloseOption), and the interim list is empty
 
 func (l *Limiter) Health() Health { return Health{} }
 

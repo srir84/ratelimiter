@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"ratelimiter/internal/scripts"
 	"ratelimiter/internal/store"
 	"ratelimiter/internal/store/resp"
 )
@@ -44,8 +45,10 @@ const (
 // Fault is one armed store fault (plan choice).
 type Fault struct {
 	Mode Mode
-	// Match is the script name (Request.Script.Name, e.g. "acquire") or, for Do, the command
-	// (its first argument, e.g. "SCAN"), compared case-insensitively; "" matches every call.
+	// Match is the script name (Request.Script.Name: "acquire", "refund", …) or, for Do, the
+	// command (its first argument, e.g. "SCAN"), compared case-insensitively; "" matches every
+	// call. Every mode takes every match: match "refund" puts the fault on the refund calls
+	// alone (plan S6 step 10).
 	Match string
 	// Count is how many matching calls the fault applies to; 0 is every matching call while
 	// it is armed.
@@ -74,14 +77,16 @@ type barrier struct {
 }
 
 // StoreWrapper stands between the limiter and its store adapter (DESIGN §A5.12, §B6) and
-// applies the armed faults. It also counts the responses that came back with NoScript set,
-// as the store adapter reported them, for the driver's allowed-commands check (§C4). One
+// applies the armed faults. It also counts, as the store adapter reported them, the responses
+// that came back with NoScript set, for the driver's allowed-commands check, and the refund
+// responses the store refused with LOADING or BUSY, for its refund-sends check (§C4). One
 // wrapper serves one limiter; it is safe for concurrent use.
 type StoreWrapper struct {
 	mu       sync.Mutex
 	faults   []*armed
 	barriers map[string]*barrier
 	noScript int
+	notReady int // refund responses refused with LOADING or BUSY
 }
 
 // NewStoreWrapper returns a wrapper with no fault armed.
@@ -160,6 +165,18 @@ func (w *StoreWrapper) NoScripts() int {
 	return w.noScript
 }
 
+// NotReadyRefunds returns how many refund responses the store refused with LOADING or BUSY:
+// written, so the send observer heard bytes, but refused before running, so not sent and not
+// an attempt under API-1d (DESIGN §A5.4, §C4). A response counts when the error reply in its
+// StoreError is one by the adapter's first-word rule (store.NotReadyReply), whatever its
+// outcome: unavailable for the first EVALSHA, outcome_unknown for the resend after a NOSCRIPT
+// reload.
+func (w *StoreWrapper) NotReadyRefunds() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.notReady
+}
+
 func newBarrier() *barrier {
 	return &barrier{reached: make(chan struct{}), release: make(chan struct{})}
 }
@@ -208,20 +225,21 @@ func (w *StoreWrapper) take(name string) *Fault {
 	return nil
 }
 
-// saw counts the NoScript responses among rs.
-func (w *StoreWrapper) saw(rs ...store.Response) {
-	n := 0
-	for _, r := range rs {
-		if r.NoScript {
-			n++
-		}
-	}
-	if n == 0 {
+// saw counts r, the inner adapter's response to a call of script: NoScript set, and a refund
+// refused with LOADING or BUSY.
+func (w *StoreWrapper) saw(script string, r store.Response) {
+	notReady := script == scripts.Refund.Name && store.NotReadyReply(r.StoreError)
+	if !r.NoScript && !notReady {
 		return
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.noScript += n
+	if r.NoScript {
+		w.noScript++
+	}
+	if notReady {
+		w.notReady++
+	}
 }
 
 // arrive marks the barrier name reached and returns its release channel.
@@ -309,7 +327,7 @@ func (a *wrapped) Call(ctx context.Context, req store.Request) store.Response {
 		return store.Response{Outcome: store.Unavailable}
 	}
 	r := a.next.Call(ctx, req)
-	a.w.saw(r)
+	a.w.saw(req.Script.Name, r)
 	a.after(ctx, f)
 	if f != nil && f.Mode == DropReply {
 		return dropped(r)
@@ -348,11 +366,11 @@ func (a *wrapped) CallBatch(ctx context.Context, reqs []store.Request) []store.R
 		for j, i := range together {
 			batch[j] = reqs[i]
 		}
-		a.place(out, together, a.next.CallBatch(ctx, batch))
+		a.place(reqs, out, together, a.next.CallBatch(ctx, batch))
 	}
 	for _, i := range alone {
 		a.wait(ctx, faults[i])
-		a.place(out, []int{i}, a.next.CallBatch(ctx, reqs[i:i+1]))
+		a.place(reqs, out, []int{i}, a.next.CallBatch(ctx, reqs[i:i+1]))
 	}
 	for i, f := range faults {
 		a.after(ctx, f)
@@ -363,12 +381,12 @@ func (a *wrapped) CallBatch(ctx context.Context, reqs []store.Request) []store.R
 	return out
 }
 
-// place counts the NoScript responses of an inner CallBatch and stores them at the indexes of
-// the requests it sent: the inner adapter returns one response per request, in order.
-func (a *wrapped) place(out []store.Response, idx []int, rs []store.Response) {
-	a.w.saw(rs...)
+// place counts the responses of an inner CallBatch (saw) and stores them at the indexes of
+// the requests of reqs it sent: the inner adapter returns one response per request, in order.
+func (a *wrapped) place(reqs []store.Request, out []store.Response, idx []int, rs []store.Response) {
 	for j, r := range rs {
 		if j < len(idx) {
+			a.w.saw(reqs[idx[j]].Script.Name, r)
 			out[idx[j]] = r
 		}
 	}

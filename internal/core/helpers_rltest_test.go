@@ -101,6 +101,7 @@ type fakeStore struct {
 	epoch   store.Response
 	hold    store.Response
 	acquire func(store.Request) store.Response
+	refund  func(store.Request) store.Response // unavailable (nothing sent) when nil
 	reqs    []store.Request
 }
 
@@ -133,10 +134,16 @@ func (f *fakeStore) setAcquire(fn func(store.Request) store.Response) {
 	f.acquire = fn
 }
 
+func (f *fakeStore) setRefund(fn func(store.Request) store.Response) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.refund = fn
+}
+
 func (f *fakeStore) Call(_ context.Context, req store.Request) store.Response {
 	f.mu.Lock()
 	f.reqs = append(f.reqs, req)
-	ep, hd, acq := f.epoch, f.hold, f.acquire
+	ep, hd, acq, ref := f.epoch, f.hold, f.acquire, f.refund
 	f.mu.Unlock()
 	switch req.Script.Name {
 	case "read_epoch":
@@ -146,6 +153,11 @@ func (f *fakeStore) Call(_ context.Context, req store.Request) store.Response {
 			return store.Response{Outcome: store.Unavailable}
 		}
 		return acq(req)
+	case "refund":
+		if ref == nil {
+			return store.Response{Outcome: store.Unavailable}
+		}
+		return ref(req)
 	case "hold":
 		return hd
 	}
@@ -205,25 +217,26 @@ func (s *testStore) options() StoreOptions {
 	return StoreOptions{Addr: s.srv.Addr(), User: "rl_lib", Password: s.pw}
 }
 
-// limiter builds a limiter through NewWithHooks with fake as its store (when not nil) and
-// the hooks h; t's cleanup closes it.
-func (s *testStore) limiter(t *testing.T, p Policy, in Instance, fake *fakeStore, h Hooks) (*Limiter, error) {
+// limiter builds a limiter through NewWithHooks with fake as its store (when not nil), the
+// hooks h and the options opts; t's cleanup closes it.
+func (s *testStore) limiter(t *testing.T, p Policy, in Instance, fake *fakeStore, h Hooks, opts ...Option) (*Limiter, error) {
 	t.Helper()
 	if fake != nil {
 		h.StoreWrapper = fake.wrap
 	}
-	l, err := NewWithHooks(p, in, s.options(), h)
+	l, err := NewWithHooks(p, in, s.options(), h, opts...)
 	if l == nil {
 		t.Fatal("NewWithHooks returned a nil limiter")
 	}
-	t.Cleanup(l.Close)
+	t.Cleanup(func() { l.Close() })
 	return l, err
 }
 
-// ready builds a valid limiter on fake and waits until its health reason is reason.
-func (s *testStore) ready(t *testing.T, p Policy, in Instance, fake *fakeStore, h Hooks, reason string) *Limiter {
+// ready builds a valid limiter on fake with the options opts and waits until its health
+// reason is reason.
+func (s *testStore) ready(t *testing.T, p Policy, in Instance, fake *fakeStore, h Hooks, reason string, opts ...Option) *Limiter {
 	t.Helper()
-	l, err := s.limiter(t, p, in, fake, h)
+	l, err := s.limiter(t, p, in, fake, h, opts...)
 	if err != nil {
 		t.Fatalf("NewWithHooks: %v", err)
 	}

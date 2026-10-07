@@ -27,3 +27,13 @@ func classifyErrorReply(script, text string) (out Outcome, reload bool) {
 	}
 	return OutcomeUnknown, false
 }
+
+// NotReadyReply reports whether text, a store error reply, refused its command before it ran:
+// LOADING or BUSY by classifyErrorReply's first-word rule (the one rule maps exactly those two
+// words to unavailable, for every script). Test wrappers count those refusals with it whatever
+// outcome the call ended with: after a NOSCRIPT reload, a resend refused so ends
+// outcome_unknown with the reply kept in StoreError.
+func NotReadyReply(text string) bool {
+	out, _ := classifyErrorReply("", text)
+	return out == Unavailable
+}

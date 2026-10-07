@@ -18,6 +18,7 @@ import (
 	"ratelimiter/internal/scripts"
 	"ratelimiter/internal/settings"
 	"ratelimiter/internal/store"
+	"ratelimiter/internal/store/resp"
 	"ratelimiter/internal/testutil/storeproc"
 	"ratelimiter/limiter"
 )
@@ -601,5 +602,283 @@ func TestSignerUnusable(t *testing.T) {
 	}
 	if op.Permit != nil {
 		op.Permit.Done()
+	}
+}
+
+// refundReq is a refund call (DESIGN §A4.1) under an epoch the store does not have: on a store
+// without an epoch it gets {22, 0, 'epoch_record_missing'} and writes nothing.
+func refundReq(t *testing.T) store.Request {
+	t.Helper()
+	enc, err := keys.Encode("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = "0123456789abcdef0123456789abcdef"
+	return store.Request{
+		Kind: store.Refund, Script: scripts.Refund,
+		Keys: []string{
+			keys.EpochKey, keys.CtlTimeKey, keys.IndexKey(id), keys.QuarantineKey(id),
+			keys.BucketKey(id, enc), keys.MarkerIndexKey(id, enc),
+		},
+		Args:            []string{id, "fp", enc, id, "1", "1", "2000000", "20000000000", "1000000000", "10", "1000", "1000", "0", "0"},
+		ReceiptExpiryUs: 2_000_000,
+	}
+}
+
+// refundOK reports whether r is the reply refundReq gets on a store without an epoch.
+func refundOK(r store.Response) bool {
+	return r.Outcome == store.OK && r.Reply.Code == 22 && r.Reply.Reason == "epoch_record_missing"
+}
+
+// TestRefundMatch (plan S6 step 10; DESIGN §B6 FLT-1 b, FLT-4, Barriers): each store fault
+// mode takes match "refund" and then acts on refund calls (sent on the refund connections) and
+// on nothing else: refuse sends nothing (unavailable); drop_reply sends and loses the reply
+// (outcome_unknown); delay holds the send for its wait; a before_send barrier holds it until
+// Release. A refund fault leaves read_epoch alone and an acquire fault leaves refunds alone.
+func TestRefundMatch(t *testing.T) {
+	e := newWrapEnv(t)
+	req := refundReq(t)
+	if r := e.a.Call(t.Context(), req); !refundOK(r) {
+		t.Fatalf("unfaulted refund: outcome %v, reply %d %q, want ok 22 epoch_record_missing", r.Outcome, r.Reply.Code, r.Reply.Reason)
+	}
+
+	e.arm(t, fixtures.Fault{Mode: fixtures.Refuse, Match: "acquire"})
+	n := e.sent.len()
+	if r := e.a.Call(t.Context(), req); !refundOK(r) {
+		t.Errorf("refund with acquire refused: outcome %v, want ok", r.Outcome)
+	}
+	if !written(e.sent.since(n), "refund") {
+		t.Errorf("refund with acquire refused wrote %v, want refund bytes", e.sent.since(n))
+	}
+	e.w.Disarm()
+
+	e.arm(t, fixtures.Fault{Mode: fixtures.Refuse, Match: "refund", Count: 1})
+	n = e.sent.len()
+	if r := e.a.Call(t.Context(), readEpoch()); r.Outcome != store.OK {
+		t.Errorf("read_epoch with refund refused: outcome %v, want ok", r.Outcome)
+	}
+	if r := e.a.Call(t.Context(), req); r.Outcome != store.Unavailable || r.Sent || r.SentCommands != 0 {
+		t.Errorf("refused refund: outcome %v, sent %v (%d), want unavailable, nothing sent", r.Outcome, r.Sent, r.SentCommands)
+	}
+	if written(e.sent.since(n), "refund") {
+		t.Errorf("a refused refund wrote %v, want 0 refund bytes", e.sent.since(n))
+	}
+
+	e.arm(t, fixtures.Fault{Mode: fixtures.DropReply, Match: "refund", Count: 1})
+	n = e.sent.len()
+	if r := e.a.Call(t.Context(), req); r.Outcome != store.OutcomeUnknown || !r.Sent || r.SentCommands != 1 {
+		t.Errorf("dropped refund reply: outcome %v, sent %v (%d), want outcome_unknown, 1 sent", r.Outcome, r.Sent, r.SentCommands)
+	}
+	if !written(e.sent.since(n), "refund") {
+		t.Errorf("a dropped-reply refund wrote %v, want refund bytes", e.sent.since(n))
+	}
+	if r := e.a.Call(t.Context(), req); !refundOK(r) {
+		t.Errorf("the refund after the dropped reply: outcome %v, want ok", r.Outcome)
+	}
+
+	const wait = 150 * time.Millisecond
+	e.arm(t, fixtures.Fault{Mode: fixtures.Delay, Match: "refund", Count: 1, Delay: wait})
+	n = e.sent.len()
+	start := time.Now()
+	if r := e.a.Call(t.Context(), req); !refundOK(r) {
+		t.Errorf("delayed refund: outcome %v, want ok", r.Outcome)
+	}
+	if at := first(e.sent.since(n), "refund"); at.IsZero() || at.Sub(start) < wait {
+		t.Errorf("delayed refund written %v after the call began, want at least %v", at.Sub(start), wait)
+	}
+
+	e.arm(t, fixtures.Fault{Mode: fixtures.Barrier, Match: "refund", Count: 1, At: fixtures.BeforeSend, Name: "refund-held"})
+	n = e.sent.len()
+	ch := make(chan store.Response, 1)
+	go func() { ch <- e.a.Call(t.Context(), req) }()
+	select {
+	case <-e.w.Reached("refund-held"):
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refund did not reach the barrier within 5s")
+	}
+	select {
+	case r := <-ch:
+		t.Fatalf("the held refund returned %v before Release", r.Outcome)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if written(e.sent.since(n), "refund") {
+		t.Errorf("a refund held before its send wrote %v, want 0 refund bytes", e.sent.since(n))
+	}
+	e.w.Release("refund-held")
+	select {
+	case r := <-ch:
+		if !refundOK(r) {
+			t.Errorf("the released refund: outcome %v, want ok", r.Outcome)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the released refund did not return within 5s")
+	}
+}
+
+// stubAdapter is a store adapter that answers every script call with resp's response.
+type stubAdapter struct {
+	resp func(store.Request) store.Response
+}
+
+func (s stubAdapter) Call(_ context.Context, req store.Request) store.Response { return s.resp(req) }
+
+func (s stubAdapter) CallBatch(_ context.Context, reqs []store.Request) []store.Response {
+	out := make([]store.Response, len(reqs))
+	for i, r := range reqs {
+		out[i] = s.resp(r)
+	}
+	return out
+}
+
+func (stubAdapter) Do(context.Context, store.Kind, ...string) (resp.Value, store.Response) {
+	return resp.Value{}, store.Response{Outcome: store.Unavailable}
+}
+
+func (stubAdapter) ReadyConns(store.Kind) int { return 1 }
+
+func (stubAdapter) Close() {}
+
+// TestNotReadyRefunds (DESIGN §A5.4, §C4; plan S6 step 13): the wrapper counts the refund
+// responses the store refused with LOADING or BUSY (unavailable with the error reply kept), by
+// Call and by CallBatch, and nothing else: a refund unavailable with nothing sent, an acquire
+// refused with BUSY, and a refund answered with an error reply that is not LOADING or BUSY
+// (outcome_unknown).
+func TestNotReadyRefunds(t *testing.T) {
+	answers := map[string]store.Response{
+		"refund-loading": {Outcome: store.Unavailable, StoreError: "LOADING Valkey is loading the dataset in memory"},
+		"refund-busy":    {Outcome: store.Unavailable, StoreError: "BUSY Valkey is busy running a script"},
+		"refund-unsent":  {Outcome: store.Unavailable},
+		"refund-error":   {Outcome: store.OutcomeUnknown, Sent: true, SentCommands: 1, StoreError: "ERR something"},
+		"acquire-busy":   {Outcome: store.Unavailable, StoreError: "BUSY Valkey is busy running a script"},
+	}
+	w := fixtures.NewStoreWrapper()
+	a := w.Wrap(stubAdapter{resp: func(r store.Request) store.Response { return answers[r.Args[0]] }})
+	req := func(script scripts.Script, answer string) store.Request {
+		return store.Request{Kind: store.Refund, Script: script, Args: []string{answer}}
+	}
+	if got := w.NotReadyRefunds(); got != 0 {
+		t.Fatalf("NotReadyRefunds before any call = %d, want 0", got)
+	}
+	for _, name := range []string{"refund-unsent", "refund-error"} {
+		a.Call(t.Context(), req(scripts.Refund, name))
+	}
+	a.Call(t.Context(), req(scripts.Acquire, "acquire-busy"))
+	if got := w.NotReadyRefunds(); got != 0 {
+		t.Errorf("NotReadyRefunds after no LOADING or BUSY refund = %d, want 0", got)
+	}
+	a.Call(t.Context(), req(scripts.Refund, "refund-loading"))
+	if got := w.NotReadyRefunds(); got != 1 {
+		t.Errorf("NotReadyRefunds after a LOADING refund = %d, want 1", got)
+	}
+	a.CallBatch(t.Context(), []store.Request{
+		req(scripts.Refund, "refund-busy"), req(scripts.Acquire, "acquire-busy"), req(scripts.Refund, "refund-unsent"),
+	})
+	if got := w.NotReadyRefunds(); got != 2 {
+		t.Errorf("NotReadyRefunds after a batch with one BUSY refund = %d, want 2", got)
+	}
+	if got := w.NoScripts(); got != 0 {
+		t.Errorf("NoScripts = %d, want 0: no response had NoScript", got)
+	}
+}
+
+// TestNotReadyRefundsAfterReload (DESIGN §A5.4, §C4; plan S6 step 13): a refund whose resend
+// after a NOSCRIPT reload the store refused with LOADING or BUSY comes back outcome_unknown,
+// SentCommands 1, with the error reply in StoreError (the adapter's NOSCRIPT path), while the
+// send observer heard two refund writes; the wrapper counts it as not ready, by Call and by
+// CallBatch. The same response with BUSYKEY, or with the NOSCRIPT reply itself, does not count.
+func TestNotReadyRefundsAfterReload(t *testing.T) {
+	reloaded := func(storeErr string) store.Response {
+		return store.Response{Outcome: store.OutcomeUnknown, Sent: true, SentCommands: 1, NoScript: true, StoreError: storeErr}
+	}
+	answers := map[string]store.Response{
+		"busy":     reloaded("BUSY Valkey is busy running a script"),
+		"loading":  reloaded("LOADING Valkey is loading the dataset in memory"),
+		"busykey":  reloaded("BUSYKEY Target key name already exists."),
+		"noscript": reloaded("NOSCRIPT No matching script. Please use EVAL."),
+	}
+	w := fixtures.NewStoreWrapper()
+	a := w.Wrap(stubAdapter{resp: func(r store.Request) store.Response { return answers[r.Args[0]] }})
+	req := func(answer string) store.Request {
+		return store.Request{Kind: store.Refund, Script: scripts.Refund, Args: []string{answer}}
+	}
+	a.Call(t.Context(), req("busykey"))
+	a.Call(t.Context(), req("noscript"))
+	if got := w.NotReadyRefunds(); got != 0 {
+		t.Errorf("NotReadyRefunds after BUSYKEY and NOSCRIPT replies = %d, want 0", got)
+	}
+	a.Call(t.Context(), req("busy"))
+	if got := w.NotReadyRefunds(); got != 1 {
+		t.Errorf("NotReadyRefunds after a resend refused with BUSY = %d, want 1", got)
+	}
+	a.CallBatch(t.Context(), []store.Request{req("loading"), req("busykey")})
+	if got := w.NotReadyRefunds(); got != 2 {
+		t.Errorf("NotReadyRefunds after a batch with one resend refused with LOADING = %d, want 2", got)
+	}
+	if got := w.NoScripts(); got != 5 {
+		t.Errorf("NoScripts = %d, want 5: every response had NoScript", got)
+	}
+}
+
+// TestSignerCorruptField (DESIGN §A5.9, §B6 FLT-10 corrupt; plan S6 step 10): with
+// CorruptField armed for any of the 7 authenticated fields, a correctly signed receipt no
+// longer verifies (the alteration happens after signing, on the receipt Verify gets), while
+// signing is unaffected; Disarm restores verification. A corrupt fault with an unknown or empty
+// field, or a field on another mode, is refused; Count bounds the Verify calls it answers.
+func TestSignerCorruptField(t *testing.T) {
+	inner, err := receipt.NewHMACSigner(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := fixtures.NewSignerWrapper()
+	s := w.Wrap(inner)
+	var id [16]byte
+	id[3] = 7
+	signed, err := s.Sign(receipt.New(id, "enc-of-k", 3, 9, 1_760_000_000_000_000, 6_000_000))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Verify(signed) {
+		t.Fatal("no fault armed: the signed receipt does not verify")
+	}
+	fields := fixtures.ReceiptFields()
+	if len(fields) != 7 {
+		t.Fatalf("ReceiptFields() = %q, want the 7 fields of §A5.9", fields)
+	}
+	for _, f := range fields {
+		if err := w.CorruptField(f); err != nil {
+			t.Fatalf("CorruptField(%q): %v", f, err)
+		}
+		for k := range 2 {
+			if s.Verify(signed) {
+				t.Errorf("%s corrupted, Verify call %d: true, want false", f, k+1)
+			}
+		}
+		again, err := s.Sign(receipt.New(id, "enc-of-k", 3, 9, 1_760_000_000_000_000, 6_000_000))
+		if err != nil || again.MAC != signed.MAC {
+			t.Errorf("%s corrupted: Sign changed (err %v): the fault acts on Verify only", f, err)
+		}
+		w.Disarm()
+		if !s.Verify(signed) {
+			t.Errorf("%s: after Disarm the receipt does not verify", f)
+		}
+	}
+	for _, bad := range []fixtures.SignerFault{
+		{Mode: fixtures.SignCorrupt, Field: "mac"},
+		{Mode: fixtures.SignCorrupt},
+		{Mode: fixtures.SignFail, Field: fixtures.FieldG},
+		{Mode: fixtures.SignCorrupt, Field: fixtures.FieldG, Count: -1},
+	} {
+		if err := w.Arm(bad); err == nil {
+			t.Errorf("Arm(%+v) = nil, want an error", bad)
+		}
+	}
+	if err := w.Arm(fixtures.SignerFault{Mode: fixtures.SignCorrupt, Field: fixtures.FieldS, Count: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if s.Verify(signed) {
+		t.Error("corrupt fault with Count 1, first Verify: true, want false")
+	}
+	if !s.Verify(signed) {
+		t.Error("corrupt fault with Count 1, second Verify: false, want true (the fault was used up)")
 	}
 }

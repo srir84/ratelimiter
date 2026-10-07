@@ -609,3 +609,54 @@ func TestAuditDetectsEachViolation(t *testing.T) {
 		})
 	}
 }
+
+// TestFindCanaries (DESIGN §C4; plan S6 step 13): FindCanaries applies Audit's canary rule
+// to a file's bytes, as the driver does to the store's AOF files: each form is found inside
+// surrounding RESP text (a must-fail fixture per form, with its name in the message), a
+// canary absent in every form gives nothing, two canaries are reported by index, an empty
+// canary is skipped, and no message holds the canary.
+func TestFindCanaries(t *testing.T) {
+	canary := append([]byte{0xfb, 0xff, 0xbf}, "file-canary-0123456789abcdefg"...) // 32 bytes: base64 is padded
+	other := []byte("file-canary-1-fedcba9876543210!!")
+	hexLow := hex.EncodeToString(canary)
+	inFile := func(s string) []byte {
+		return []byte("*3\r\n$4\r\nHSET\r\n$" + strconv.Itoa(len(s)) + "\r\n" + s + "\r\n")
+	}
+	embedded := func(enc *base64.Encoding, pre, post []byte) []byte {
+		return inFile(enc.EncodeToString(slices.Concat(pre, canary, post)))
+	}
+	pre1, pre2, post := []byte{0x01}, []byte{0x01, 0x02}, []byte{0xff, 0xee}
+	cases := []struct {
+		name string
+		data []byte
+		want []string
+	}{
+		{"absent", inFile("rl:e:0123:k:YQ"), nil},
+		{"raw", inFile(string(canary)), []string{"canary 0 (raw)"}},
+		{"hex", inFile(hexLow), []string{"canary 0 (hex)"}},
+		{"upper-case hex", inFile(strings.ToUpper(hexLow)), []string{"canary 0 (upper-case hex)"}},
+		{"base64", inFile(base64.StdEncoding.EncodeToString(canary)), []string{"canary 0 (base64)"}},
+		{"unpadded base64", inFile(base64.RawStdEncoding.EncodeToString(canary)), []string{"canary 0 (unpadded base64)"}},
+		{"base64url", inFile(base64.URLEncoding.EncodeToString(canary)), []string{"canary 0 (base64url)"}},
+		{"unpadded base64url", inFile(base64.RawURLEncoding.EncodeToString(canary)), []string{"canary 0 (unpadded base64url)"}},
+		{"1 byte into base64", embedded(base64.StdEncoding, pre1, nil), []string{"canary 0 (base64 at byte offset 1 mod 3)"}},
+		{"2 bytes into base64 with bytes after", embedded(base64.StdEncoding, pre2, post), []string{"canary 0 (base64 at byte offset 2 mod 3)"}},
+		{"start of base64url with bytes after", embedded(base64.RawURLEncoding, nil, post), []string{"canary 0 (base64url at byte offset 0 mod 3)"}},
+		{"second canary only", inFile(hex.EncodeToString(other)), []string{"canary 1 (hex)"}},
+		{"both canaries", slices.Concat(inFile(string(other)), inFile(hexLow)), []string{"canary 0 (hex)", "canary 1 (raw)"}},
+	}
+	for _, c := range cases {
+		got := storestate.FindCanaries(c.data, [][]byte{canary, other})
+		if !slices.Equal(got, c.want) {
+			t.Errorf("%s: FindCanaries = %q, want %q", c.name, got, c.want)
+		}
+		for _, m := range got {
+			if strings.Contains(m, string(canary)) || strings.Contains(m, hexLow) || strings.Contains(m, string(other)) {
+				t.Errorf("%s: message %q holds a canary", c.name, m)
+			}
+		}
+	}
+	if got := storestate.FindCanaries(inFile("anything"), [][]byte{{}, canary}); got != nil {
+		t.Errorf("an empty canary and an absent one: FindCanaries = %q, want none", got)
+	}
+}

@@ -1,13 +1,16 @@
 //go:build rltest
 
 // Package driver is the direct library driver (DESIGN §C4; HARNESS §9.4; IMPLEMENTATION_PLAN
-// S5 steps 10, 11 and 16): one fast-profile store per driver, its controlled time and epoch,
-// and N limiter instances built through limitertest, each with its own store wrapper, signer
-// wrapper and send observer. It logs every acquire and clock step for the reference model
-// (CheckRefModel), reads the store as the ACL users the plan names (StartEpoch, ReadEpoch,
-// Status and Inspect as rl_admin; the clock and Fixture as rl_fixture; Dump and the audit as
-// rl_lib; Info as rl_ops), and at teardown, once every instance is closed or killed and while
-// the store still runs, checks the commands each instance sent and audits the store.
+// S5 steps 10, 11 and 16, S6 steps 10 and 13): one fast-profile store per driver, its
+// controlled time and epoch, and N limiter instances built through limitertest, each with its
+// own store wrapper, signer wrapper, send observer, refund listener and signing-key canary. It
+// logs every acquire, permit finish, final refund event and clock step for the reference model
+// (CheckRefModel), captures every refund attempt, reads the store as the ACL users the plan
+// names (StartEpoch, ReadEpoch, Status and Inspect as rl_admin; the clock and Fixture as
+// rl_fixture; Dump and the audit as rl_lib; Info as rl_ops), and at teardown, once every
+// instance is closed or killed and while the store still runs, checks the commands and refund
+// attempts each instance sent, audits the store and its AOF files, and checks BUD-11 on the op
+// log.
 //
 // The methods that read the store or build instances fail the test through the driver's
 // testing.TB, so call them from the test's goroutine; Acquire and the accessors may run on
@@ -15,8 +18,10 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -84,9 +89,15 @@ type InstanceSpec struct {
 	Policy   *limiter.Policy       // nil: the driver's policy
 	Instance *limiter.Instance     // nil: the driver's instance settings
 	Store    *limiter.StoreOptions // nil: the driver's store as rl_lib
-	// KeyReader returns the signing-key source of one build; nil: crypto/rand. Every build
-	// (New, AddInstance, Restart) calls it once, so a restarted instance gets a fresh reader.
+	// KeyReader returns the signing-key source of one build; nil: the instance's canary (plan
+	// S6 step 13: SHA-256 of the test name and the instance index), which the teardown audit
+	// looks for in the store. Every build (New, AddInstance, Restart) calls it once, so a
+	// restarted instance gets a fresh reader.
 	KeyReader func() io.Reader
+	// Listener, when set, hears every final refund event after the driver's own listener has
+	// recorded it (limiter.WithRefundListener takes one listener, and the driver's comes
+	// last, so a listener passed in Options would be replaced).
+	Listener func(limiter.RefundEvent)
 	// Options go to limitertest.New before the driver's own. Hook options compose with the
 	// driver's (limitertest): a store or signer wrapper given here sits inside the driver's,
 	// nearer the store, and an observer given here hears every send too, so the driver's
@@ -167,8 +178,13 @@ type Driver struct {
 	insts    []*instance      // the current instance of each index
 	all      []*instance      // every instance ever built, for teardown
 	oplog    [][]byte         // op-log lines, without their newline
+	logged   int              // acquire, release and done records in the op log
 	policies []limiter.Policy // every policy an epoch was started with
 	damaged  []string         // keys written through Fixture
+	wiped    bool             // a FLUSHALL or FLUSHDB went through Fixture
+	permits  map[string]*permitRec
+	attempts map[string][]RefundAttempt // by deduction_id
+	canaries map[int][]byte             // each index's signing-key canary, when the driver chose it
 }
 
 // instance is one limiter the driver built, with its wrappers and send records.
@@ -179,8 +195,9 @@ type instance struct {
 	sw    *fixtures.StoreWrapper
 	sg    *fixtures.SignerWrapper
 
-	mu   sync.Mutex
-	sent []Send
+	mu     sync.Mutex
+	sent   []Send
+	events []limiter.RefundEvent // the final refund events its driver listener received
 }
 
 func (in *instance) observe(cmd string, n int) {
@@ -215,7 +232,10 @@ func New(t testing.TB, o Options) *Driver {
 	if start == 0 {
 		start = DefaultStartNs
 	}
-	d := &Driver{t: t, policy: p, inst: in}
+	d := &Driver{
+		t: t, policy: p, inst: in,
+		permits: map[string]*permitRec{}, attempts: map[string][]RefundAttempt{}, canaries: map[int][]byte{},
+	}
 	d.st = storeproc.Start(t, storeproc.Options{Profile: storeproc.Fast})
 	t.Cleanup(d.cleanup)
 	var err error
@@ -281,8 +301,11 @@ func (d *Driver) AddInstance(spec InstanceSpec) (int, error) {
 	return i, err
 }
 
-// build makes instance i from spec, with a fresh store wrapper (behind which the driver
-// records each acquire's response), signer wrapper and send observer.
+// build makes instance i from spec, with a fresh store wrapper (in front of which the driver
+// records each acquire's response and each refund attempt, and behind which each refund's
+// response before the faults), signer wrapper, send observer, refund listener (last, so it is
+// the one the limiter keeps) and, unless spec has a key reader, the index's canary as the
+// signing key.
 func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
 	p := d.policyOf(spec)
 	in := d.inst
@@ -297,13 +320,20 @@ func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
 	opts := slices.Concat(spec.Options, []limitertest.Option{
 		limitertest.WithControlledClock(),
 		limitertest.WithStoreWrapper(func(a limitertest.Adapter) limitertest.Adapter {
-			return recorder{Adapter: inst.sw.Wrap(a)}
+			return recorder{Adapter: inst.sw.Wrap(inner{Adapter: a}), d: d, inst: inst}
 		}),
 		limitertest.WithSignerWrapper(inst.sg.Wrap),
 		limitertest.WithSendObserver(inst.observe),
+		limitertest.With(limiter.WithRefundListener(d.listen(inst))),
 	})
 	if spec.KeyReader != nil {
 		opts = append(opts, limitertest.WithKeyReader(spec.KeyReader()))
+	} else {
+		c := canaryOf(d.t.Name(), i)
+		d.mu.Lock()
+		d.canaries[i] = c
+		d.mu.Unlock()
+		opts = append(opts, limitertest.WithKeyReader(bytes.NewReader(c)))
 	}
 	l, err := limitertest.New(p, in, so, opts...)
 	inst.l = l
@@ -444,12 +474,27 @@ func (c *capture) get() (store.Response, bool) {
 	return c.r, c.seen
 }
 
-// recorder sits in front of an instance's store wrapper and hands each acquire response to
+// canaryOf is the signing-key canary of instance index i in the test named name (plan S6 step
+// 13): the 32 bytes of SHA-256(name ‖ 0x00 ‖ i in decimal), distinct per index.
+func canaryOf(name string, i int) []byte {
+	sum := sha256.Sum256([]byte(name + "\x00" + strconv.Itoa(i)))
+	return sum[:]
+}
+
+// recorder sits in front of an instance's store wrapper: it hands each acquire response to
 // the capture in the call's context (the limiter passes the host's context to the adapter,
-// §A5.4), so concurrent acquires each get their own reply.
-type recorder struct{ store.Adapter }
+// §A5.4), so concurrent acquires each get their own reply, and records each refund attempt
+// (refund).
+type recorder struct {
+	store.Adapter
+	d    *Driver
+	inst *instance
+}
 
 func (r recorder) Call(ctx context.Context, req store.Request) store.Response {
+	if isRefund(req) {
+		return r.refund(ctx, req)
+	}
 	res := r.Adapter.Call(ctx, req)
 	if c, ok := ctx.Value(captureKey{}).(*capture); ok && req.Script.Name == scripts.Acquire.Name {
 		c.set(res)
@@ -487,7 +532,7 @@ func (d *Driver) acquire(ctx context.Context, i int, key, tag string) Op {
 			op.Reply, op.Replied = res.Reply, true
 		}
 	}
-	d.logAcquire(op, tag)
+	d.logAcquire(in, op, tag)
 	return op
 }
 
@@ -779,6 +824,7 @@ func (d *Driver) Fixture() *Fixture {
 // Do declares the keys the command writes, then sends it.
 func (f *Fixture) Do(args ...string) (storeproc.Reply, error) {
 	f.d.declare(writtenKeys(args))
+	f.d.noteWipe(args)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.c.Do(args...)
@@ -788,6 +834,7 @@ func (f *Fixture) Do(args ...string) (storeproc.Reply, error) {
 func (f *Fixture) Pipeline(cmds [][]string) ([]storeproc.Reply, error) {
 	for _, c := range cmds {
 		f.d.declare(writtenKeys(c))
+		f.d.noteWipe(c)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -802,6 +849,19 @@ func (d *Driver) declare(ks []string) {
 		if k != keys.CtlTimeKey && !slices.Contains(d.damaged, k) {
 			d.damaged = append(d.damaged, k)
 		}
+	}
+}
+
+// noteWipe records a FLUSHALL or FLUSHDB sent through Fixture: it leaves no key to declare,
+// but the test, like one that declared damage, is exempt from the teardown BUD-11 check.
+func (d *Driver) noteWipe(args []string) {
+	if len(args) == 0 {
+		return
+	}
+	if c := strings.ToUpper(args[0]); c == "FLUSHALL" || c == "FLUSHDB" {
+		d.mu.Lock()
+		d.wiped = true
+		d.mu.Unlock()
 	}
 }
 

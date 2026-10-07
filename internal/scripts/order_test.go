@@ -21,6 +21,7 @@ const pairNow = hwm0 + 50_000
 type orderBreaker struct {
 	name    string
 	absent  bool // needs the target key absent: the request then targets encC
+	last    bool // applied after the other breaker of a pair (TestRefundCheckOrderPairs): its state is written last
 	apply   func(e *env, enc string, req *store.Request)
 	damaged func(enc string) []string
 	want    func(enc string) []any

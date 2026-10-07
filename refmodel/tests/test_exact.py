@@ -1,9 +1,12 @@
 import ast
 from pathlib import Path
 
+import pytest
 
-def test_model_uses_integers_only() -> None:
-    tree = ast.parse(Path(__file__).parents[1].joinpath("model.py").read_text())
+
+@pytest.mark.parametrize("module", ["model.py", "check_bud11.py"])
+def test_model_uses_integers_only(module: str) -> None:
+    tree = ast.parse(Path(__file__).parents[1].joinpath(module).read_text())
     operator_names = {"operator"}
     forbidden_names = {"float"}
     for node in ast.walk(tree):

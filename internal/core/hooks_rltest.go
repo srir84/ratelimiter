@@ -33,13 +33,24 @@ func NewWithHooks(p Policy, in Instance, st StoreOptions, h Hooks, opts ...Optio
 	}, opts)
 }
 
-// Kill stops l at once, as a process kill would (DESIGN §A5.12): the goroutines stop and
-// every connection closes, with no drain; refunds still pending are lost (S6). Afterwards
-// Acquire returns not_ready and Health reports closing (plan choice).
+// Kill stops l at once, as a process kill would (DESIGN §A5.12): the listener dispatcher
+// stops first, so no event is delivered after it begins; then the refund workers and every
+// backoff and retention timer stop, and the epoch watch and every connection, with no drain.
+// Refunds still pending are lost and emit nothing. Afterwards Acquire returns not_ready, Health
+// reports closing, and Close returns at once (plan choice).
 func Kill(l *Limiter) {
-	if l != nil {
-		l.shutdown()
+	if l == nil {
+		return
 	}
+	l.closeStarted.Store(true)
+	l.closing.Store(true)
+	if l.lis != nil {
+		l.lis.stop()
+	}
+	if l.refunds != nil {
+		l.refunds.stop()
+	}
+	l.shutdown()
 }
 
 // PermitEpoch returns the epoch_id of an allowed permit's receipt in lowercase hex, and ""

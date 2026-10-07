@@ -20,10 +20,11 @@ import (
 )
 
 // apiInterim lists the §A5.2 methods whose staged signature passes until a later slice
-// completes them (plan S5 step 15): S5's Close() takes no options yet, and S6 step 7 empties
-// the list. --complete ignores it.
+// completes them (plan S5 step 15). S5 staged Close() without options there, and S6 step 7
+// emptied the list, so every listed method must now have its §A5.2 signature. --complete
+// ignores it.
 func apiInterim() map[string]string {
-	return map[string]string{"Limiter.Close": "func()"}
+	return map[string]string{}
 }
 
 // apiDocs is what the docs allow (DESIGN §A5.2, §A5.11, §A5.12, §C7): the normalized words

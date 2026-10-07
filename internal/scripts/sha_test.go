@@ -18,7 +18,7 @@ import (
 //go:embed *.lua
 var luaFiles embed.FS
 
-// TestScriptSHA1 (plan S4, L2): for all 6 scripts, SCRIPT LOAD as the script's §A2 user
+// TestScriptSHA1 (plan S4, L2; S6 adds refund): for all 7 scripts, SCRIPT LOAD as the script's §A2 user
 // returns Script.SHA, the SHA-1 of the assembled text (§A4.1); the text is the file's first
 // line, "\n", prelude.lua and the rest of the file (plan S4 step 3); the header line is the
 // one §A4.8 rule 1 gives the script; ByName finds each script and nothing else.
@@ -35,6 +35,7 @@ func TestScriptSHA1(t *testing.T) {
 		user         string
 	}{
 		{scripts.Acquire, "acquire", "#!lua", "rl_lib"},
+		{scripts.Refund, "refund", "#!lua", "rl_lib"},
 		{scripts.Hold, "hold", "#!lua flags=allow-oom", "rl_lib"},
 		{scripts.ReadEpoch, "read_epoch", "#!lua flags=no-writes", "rl_lib"},
 		{scripts.ReadEpoch, "read_epoch", "#!lua flags=no-writes", "rl_admin"},
@@ -69,7 +70,7 @@ func TestScriptSHA1(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"prelude", "refund", "due_entries", "cleanup_entry", "reclaim", "admin_restore", "admin_clear", ""} {
+	for _, name := range []string{"prelude", "due_entries", "cleanup_entry", "reclaim", "admin_restore", "admin_clear", ""} {
 		if s, ok := scripts.ByName(name); ok {
 			t.Errorf("ByName(%q) = %s, want no script", name, s.Name)
 		}

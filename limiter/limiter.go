@@ -4,11 +4,14 @@
 // this package holds only thin wrappers.
 //
 // A host builds an instance with New from DefaultPolicy and DefaultInstance, overwriting the
-// required fields, calls Acquire for each protected operation, finishes each permit, reads
-// Health and Metrics, and calls Close on shutdown.
+// required fields, calls Acquire for each protected operation, finishes each permit (Done, or
+// Release on a confirmed failure, whose refund runs in the background), reads Health and
+// Metrics, and calls Close on shutdown, which drains the pending refunds.
 package limiter
 
 import (
+	"time"
+
 	"ratelimiter/internal/core"
 	"ratelimiter/internal/settings"
 )
@@ -81,6 +84,17 @@ func DefaultPolicy() Policy { return settings.DefaultPolicy() }
 // p.RefundDeadlineNs + p.OutageToleranceNs; the required fields MaxReleaseDelayNs, MarginNs,
 // MaxHeldReceipts and MaxPendingRefunds are left 0.
 func DefaultInstance(p Policy) Instance { return settings.DefaultInstance(p) }
+
+// WithRefundListener has f receive each released permit's one final refund event (SPEC
+// API-1d): Applied, AlreadyApplied, ReceiptInvalid, ReceiptExpired or Unresolved (Closed,
+// Retention, Expired). Events reach f through a bounded queue and one goroutine; f may block or
+// panic without affecting the limiter, an event that finds the queue full is dropped and
+// counted (Health.ListenerDrops), and f must never call back into the limiter (HOST-8).
+func WithRefundListener(f func(RefundEvent)) Option { return core.WithRefundListener(f) }
+
+// WithDrainTimeout makes Close drain pending refunds for d instead of the instance's
+// DrainTimeoutNs (SPEC API-1e).
+func WithDrainTimeout(d time.Duration) CloseOption { return core.WithDrainTimeout(d) }
 
 // New builds an instance (production construction, DESIGN §A5.2). It never returns nil:
 // invalid settings, ClockSource = Controlled (CMP-9) or a failed signing-key generation give

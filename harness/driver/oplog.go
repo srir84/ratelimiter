@@ -5,8 +5,9 @@ package driver
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,11 +33,28 @@ import (
 //     deduction_id, epoch_id}: u … expiry_us from the reply (0 where the reply has none);
 //     decision_ns is the result's DecisionNs, or the reply's t × 1000 for a capacity_error or
 //     a receipt_error, whose results carry none; for an allowed result deduction_id =
-//     Permit.DeductionID() and epoch_id = limitertest.PermitEpoch, else ''.
+//     Permit.DeductionID() and epoch_id = limitertest.PermitEpoch, else '';
+//   - release {instance, deduction_id} and done {deduction_id} (S6 step 10): a permit finish
+//     through the driver (Release, Done), logged before the call; a permit released with its
+//     own Release gets its release record when its final event arrives, before the refund
+//     record; release's instance is the acquire record's; a degraded permit's deduction_id is
+//     '';
+//   - refund {deduction_id, key_b64url, g, s, expiry_us, attempts: [{code, t_us, credited}],
+//     result} (S6 step 10): one per final event the driver's listener receives, written when
+//     it arrives; key_b64url, g, s and expiry_us are the acquire record's; attempts are the
+//     captured refund calls in order (RefundAttempt's Code, TUs and Credited: the §A4.9 code
+//     or the outcome's name, the reply's t, and credited units or credit_us), and result the
+//     event's result. A call still in flight when the limiter finalized the permit
+//     (unresolved by the retention timer) is {"outcome_unknown", 0, 0} if it sent a command,
+//     added to the written record when it returns later (orchestrator decision, S6 task 2);
+//     so is every call with a final code (3, 4, 10, 11) in the record of an unresolved
+//     event: the event counted it, but the retention timer took the permit before that reply
+//     could end it (orchestrator decision, S6 review round 1).
 //
 // Ops are logged in completion order, so only tests that issue ops one at a time use the
-// bridge. Writes through Fixture, rl:ctl:time included, are not logged: a test that makes them
-// does not use the bridge.
+// bridge; check_bud11 (teardown) sorts by budget time and takes concurrent logs too. Writes
+// through Fixture, rl:ctl:time included, are not logged: a test that makes them does not use
+// the bridge.
 
 type policyRecord struct {
 	Type              string `json:"type"`
@@ -73,6 +91,36 @@ type acquireRecord struct {
 	EpochID      string `json:"epoch_id"`
 }
 
+type releaseRecord struct {
+	Type        string `json:"type"`
+	Instance    string `json:"instance"`
+	DeductionID string `json:"deduction_id"`
+}
+
+type doneRecord struct {
+	Type        string `json:"type"`
+	DeductionID string `json:"deduction_id"`
+}
+
+type refundRecord struct {
+	Type        string          `json:"type"`
+	DeductionID string          `json:"deduction_id"`
+	KeyB64URL   string          `json:"key_b64url"`
+	G           int64           `json:"g"`
+	S           int64           `json:"s"`
+	ExpiryUs    int64           `json:"expiry_us"`
+	Attempts    []attemptRecord `json:"attempts"` // never nil: an empty list is []
+	Result      string          `json:"result"`
+}
+
+// attemptRecord is one refund attempt in a refund record: code is an int (a §A4.9 code) or a
+// string (an outcome's name).
+type attemptRecord struct {
+	Code     any   `json:"code"`
+	TUs      int64 `json:"t_us"`
+	Credited int64 `json:"credited"`
+}
+
 func policyRecordOf(p limiter.Policy) policyRecord {
 	return policyRecord{
 		Type: "policy", RateTokens: p.RateTokens, RatePeriodNs: p.RatePeriodNs, Capacity: p.Capacity,
@@ -92,7 +140,7 @@ func acquireRecordOf(op Op, tag string) acquireRecord {
 		instance += " request_id=" + tag
 	}
 	rec := acquireRecord{
-		Type: "acquire", Instance: instance, KeyB64URL: base64.RawURLEncoding.EncodeToString([]byte(op.Key)),
+		Type: "acquire", Instance: instance, KeyB64URL: keyB64URL(op.Key),
 		Result: op.Kind.String(), DecisionNs: op.DecisionNs, RetryAfterNs: op.RetryAfterNs,
 	}
 	if op.Replied {
@@ -116,11 +164,14 @@ func acquireRecordOf(op Op, tag string) acquireRecord {
 	return rec
 }
 
-// logAcquire appends op's acquire record.
-func (d *Driver) logAcquire(op Op, tag string) {
+// logAcquire appends op's acquire record, made on instance in, and tracks its permit.
+func (d *Driver) logAcquire(in *instance, op Op, tag string) {
+	rec := acquireRecordOf(op, tag)
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.appendLocked(acquireRecordOf(op, tag))
+	d.logged++
+	d.trackLocked(in, rec)
+	d.appendLocked(rec)
 }
 
 // logClock appends a clock record; the clock calls it after each write.
@@ -153,43 +204,80 @@ func (d *Driver) OpLog() []string {
 	return out
 }
 
-// CheckRefModel is the Go ↔ Python bridge (DESIGN §C4): it writes the op log to
-// <t.TempDir()>/oplog.jsonl and runs python3 -m refmodel.replay on it from the repo root (the
-// directory holding go.mod). Exit 0 passes; a non-zero exit, or no python3 on PATH, fails t
-// with t.Fatalf, never a skip.
-func (d *Driver) CheckRefModel(t testing.TB) {
-	t.Helper()
+// SaveOpLog writes the op log so far to path (mode 0600), one record per '\n'-terminated
+// line: T-COR-1 keeps its logs under .out/.
+func (d *Driver) SaveOpLog(path string) error {
 	d.mu.Lock()
 	lines := slices.Clone(d.oplog)
 	d.mu.Unlock()
+	if err := os.WriteFile(path, joinLines(lines), 0o600); err != nil {
+		return fmt.Errorf("driver: writing the op log: %w", err)
+	}
+	return nil
+}
+
+// joinLines is the op log's file content.
+func joinLines(lines [][]byte) []byte {
 	var buf bytes.Buffer
 	for _, l := range lines {
 		buf.Write(l)
 		buf.WriteByte('\n')
 	}
-	path := filepath.Join(t.TempDir(), "oplog.jsonl")
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		t.Fatalf("driver: writing the op log: %v", err)
-		return
-	}
+	return buf.Bytes()
+}
+
+// RunRefModel runs python3 -m <module> <args…> from the repo root (the directory holding
+// go.mod), within a minute of ctx, and returns its exit code and combined output. err
+// reports that it could not run: no python3 on PATH, no repo root, or no exit status (a
+// failure for the caller, never a skip).
+func RunRefModel(ctx context.Context, module string, args ...string) (int, []byte, error) {
 	root, err := storeproc.ModuleRoot()
 	if err != nil {
-		t.Fatalf("driver: the repo root: %v", err)
-		return
+		return 0, nil, fmt.Errorf("the repo root: %w", err)
 	}
 	py, err := exec.LookPath("python3")
 	if err != nil {
-		t.Fatalf("driver: the reference model needs python3, not found on PATH (a failure, never a skip): %v", err)
-		return
+		return 0, nil, fmt.Errorf("the reference model needs python3, not found on PATH: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, py, "-m", "refmodel.replay", path)
+	cmd := exec.CommandContext(ctx, py, append([]string{"-m", module}, args...)...)
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("driver: refmodel.replay rejects the op log (%v):\n%s\nop log, %d records:\n%s", err, out, len(lines), excerpt(lines))
+	if err == nil {
+		return 0, out, nil
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && exit.ExitCode() >= 0 {
+		return exit.ExitCode(), out, nil
+	}
+	return 0, out, fmt.Errorf("python3 -m %s: %w", module, err)
+}
+
+// CheckRefModel is the Go ↔ Python bridge (DESIGN §C4): it writes the op log to
+// <t.TempDir()>/oplog.jsonl and runs python3 -m refmodel.replay, then python3 -m
+// refmodel.check_bud11 (S6 step 10), on it from the repo root. Both must exit 0; a non-zero
+// exit, or no python3 on PATH, fails t with t.Fatalf, never a skip.
+func (d *Driver) CheckRefModel(t testing.TB) {
+	t.Helper()
+	d.mu.Lock()
+	lines := slices.Clone(d.oplog)
+	d.mu.Unlock()
+	path := filepath.Join(t.TempDir(), "oplog.jsonl")
+	if err := os.WriteFile(path, joinLines(lines), 0o600); err != nil {
+		t.Fatalf("driver: writing the op log: %v", err)
 		return
+	}
+	for _, module := range []string{"refmodel.replay", "refmodel.check_bud11"} {
+		code, out, err := RunRefModel(t.Context(), module, path)
+		if err != nil {
+			t.Fatalf("driver: %v (a failure, never a skip)", err)
+			return
+		}
+		if code != 0 {
+			t.Fatalf("driver: %s rejects the op log (exit status %d):\n%s\nop log, %d records:\n%s", module, code, out, len(lines), excerpt(lines))
+			return
+		}
 	}
 }
 

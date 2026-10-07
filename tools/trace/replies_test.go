@@ -98,7 +98,7 @@ func TestReplies(t *testing.T) {
 			"hold.lua:23: {…}: a reply needs a code, t_us and a reason",
 			"hold.lua:24: {…} replies through code_name",
 			"read_epoch.lua:4: {…} replies code 23, but read_epoch's source state holds 0 ''",
-			"refund.lua:1: refund has no rows in the reply table",
+			"unlisted.lua:1: unlisted has no rows in the reply table",
 			"admin_start_epoch.lua:3: {…}: cannot read the table",
 			"admin_start_epoch.lua:4: reply(…): cannot read its arguments",
 			"prelude.lua:30: {…} replies 25 'keys_mismatch', which no script with a .lua file lists",

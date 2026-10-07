@@ -44,7 +44,7 @@ func TestNewRejectsControlled(t *testing.T) {
 	if l == nil {
 		t.Fatal("New returned a nil limiter")
 	}
-	t.Cleanup(l.Close)
+	t.Cleanup(func() { l.Close() })
 	var se *settings.Error
 	if !errors.As(err, &se) || se.Field != "ClockSource" {
 		t.Fatalf("New with ClockSource = Controlled: err = %v, want a settings error on ClockSource", err)
@@ -69,7 +69,7 @@ func TestNewRejectsControlled(t *testing.T) {
 	if valid == nil || err != nil {
 		t.Fatalf("New with the store clock: limiter %v, err = %v; want a limiter, no error", valid != nil, err)
 	}
-	t.Cleanup(valid.Close)
+	t.Cleanup(func() { valid.Close() })
 	if h := valid.Health(); h.Fixtures || h.ClockSource != "store" {
 		t.Fatalf("Health = %+v, want fixtures false, clock_source store", h)
 	}
