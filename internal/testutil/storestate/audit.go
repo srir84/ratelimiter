@@ -64,8 +64,10 @@ type AuditConfig struct {
 //     x) (§A3.2). Every ix member that is not exempt must pass is_enc, and q may hold only
 //     exempt budget keys, so it is empty when nothing is Damaged.
 //   - Counters, only when Damaged is empty: nm = the sum of mc = the sum of ZCARD
-//     mi:<enc>; ZCARD ix = the number of k:<enc> keys ≤ nb ≤ that number + len(Restored)
-//     (§A3.3: a restore may count a key once too many).
+//     mi:<enc>; ZCARD ix = the number of k:<enc> keys ≤ nb ≤ that number + the number of
+//     distinct budget keys of the namespace that Restored names (§A3.3: a restore may count
+//     a key once too many). A key listed twice, or by its k: and its mi: name, counts once;
+//     a key of another namespace counts none, since nb starts again in each epoch.
 //   - Canaries: no key name, field, member, score or value holds a canary raw, in hex
 //     (lower or upper case) or in base64 (standard or URL alphabet, padded or not), also
 //     inside a longer base64 value, at any byte offset and with bytes after it.
@@ -306,7 +308,7 @@ func (a *auditor) namespace(e epoch, names []string, parsed map[string]keyName) 
 		}
 	}
 	if len(a.c.Damaged) == 0 {
-		a.counters(e, len(ix), buckets, names, parsed)
+		a.counters(e, len(ix), buckets, len(restored), names, parsed)
 	}
 }
 
@@ -384,8 +386,9 @@ func (a *auditor) budgetKey(e epoch, enc string, ix map[string]string, restored 
 	}
 }
 
-// counters applies the counter rule.
-func (a *auditor) counters(e epoch, ixCard, buckets int, names []string, parsed map[string]keyName) {
+// counters applies the counter rule; restored is the number of distinct budget keys of the
+// namespace that Restored names, each of which a restore may have counted once too many.
+func (a *auditor) counters(e epoch, ixCard, buckets, restored int, names []string, parsed map[string]keyName) {
 	var sumMC, sumMI int64
 	for _, n := range names {
 		kn, v := parsed[n], a.snap[n]
@@ -408,7 +411,7 @@ func (a *auditor) counters(e epoch, ixCard, buckets int, names []string, parsed 
 	if ixCard != buckets {
 		a.addf("%q: ZCARD %d, but %d k:<enc> keys", keys.IndexKey(e.id), ixCard, buckets)
 	}
-	if lo, hi := int64(buckets), int64(buckets)+int64(len(a.c.Restored)); e.nb < lo || e.nb > hi {
+	if lo, hi := int64(buckets), int64(buckets)+int64(restored); e.nb < lo || e.nb > hi {
 		a.addf("%q: nb %d, want %d … %d (the k:<enc> keys, plus Restored)", keys.EpochKey, e.nb, lo, hi)
 	}
 }

@@ -113,6 +113,7 @@ def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert "line 5:" in capsys.readouterr().out
     check_refund_fields(tmp_path, capsys)
     check_cleanup_fields(tmp_path, capsys)
+    check_admin_fields(tmp_path, capsys)
     test_capacity_policy_sensitivity(tmp_path, capsys)
     test_exit_zero_equivalences(tmp_path)
     # Error replies compare zero-valued numeric fields as well.
@@ -765,3 +766,150 @@ def test_pb17_units_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(replay_module, "replay", FunctionType(replay_code, vars(replay_module)))
     with pytest.raises(AssertionError):
         assert run(path, records) == 1
+
+
+def default_policy() -> dict[str, object]:
+    return {
+        "type": "policy",
+        "rate_tokens": 10,
+        "rate_period_ns": 1_000_000_000,
+        "capacity": 20,
+        "max_tracked_buckets": 1000,
+        "receipt_lifetime_ns": 60_000_000_000,
+    }
+
+
+def default_acquire(
+    u: int, s: int, time: int = 0, *, g: int = 1, epoch: str = "e", key: str = "YQ"
+) -> dict[str, object]:
+    return {
+        "type": "acquire",
+        "instance": "i",
+        "key_b64url": key,
+        "result": "allowed",
+        "decision_ns": time,
+        "retry_after_ns": 0,
+        "u": u,
+        "g": g,
+        "s": s,
+        "expiry_us": time // 1000 + 60_000_000,
+        "deduction_id": f"{epoch}:{key}:{g}:{s}",
+        "epoch_id": epoch,
+    }
+
+
+def integrity_signal(key: str = "YQ") -> dict[str, object]:
+    return dict(
+        default_acquire(0, 0, key=key),
+        result="state_integrity_error",
+        g=0,
+        expiry_us=0,
+        deduction_id="",
+        epoch_id="",
+    )
+
+
+def inspect(
+    u: int | str,
+    t_us: int | str,
+    g: int | str,
+    s: int | str,
+    x_us: int | str,
+    mc: int | str,
+    *,
+    key: str = "YQ",
+    present: int = 1,
+) -> dict[str, object]:
+    return {
+        "type": "inspect",
+        "key_b64url": key,
+        "present": present,
+        "u": u,
+        "t_us": t_us,
+        "g": g,
+        "s": s,
+        "x_us": x_us,
+        "mc": mc,
+    }
+
+
+def admin_log() -> list[dict[str, object]]:
+    # Default policy: units/token = 10**9, refill = 10 units/ns, cap = 20*10**9.
+    # At 1 s restore 3*10**9, g=2, s=0, x=61 s, keeping quarantine.
+    # Clear changes no balance; 0.5 s refill adds 5*10**9, deduct 10**9
+    # at 1.5 s leaves 7*10**9. Refund at that same instant leaves 8*10**9
+    # and one marker. Stored x remains the acquire's 61.5 s expiry.
+    return [
+        default_policy(),
+        {"type": "epoch", "epoch_id": "e", "origin_ns": 0},
+        default_acquire(19_000_000_000, 1),
+        integrity_signal(),
+        {"type": "clock", "value_ns": 1_000_000_000},
+        {
+            "type": "restore",
+            "key_b64url": "YQ",
+            "balance_units": 3_000_000_000,
+            "t_us": 1_000_000,
+            "g": 2,
+            "epoch_id": "e",
+        },
+        inspect(3_000_000_000, 1_000_000, 2, 0, 61_000_000, 0),
+        {"type": "clear", "key_b64url": "YQ", "t_us": 1_000_000},
+        {"type": "clock", "value_ns": 1_500_000_000},
+        default_acquire(7_000_000_000, 1, 1_500_000_000, g=2),
+        {"type": "release", "instance": "i", "deduction_id": "e:YQ:2:1"},
+        {
+            "type": "refund",
+            "deduction_id": "e:YQ:2:1",
+            "key_b64url": "YQ",
+            "g": 2,
+            "s": 1,
+            "expiry_us": 61_500_000,
+            "attempts": [{"code": "applied", "t_us": 1_500_000, "credited": 1_000_000_000}],
+            "result": "applied",
+        },
+        inspect(8_000_000_000, 1_500_000, 2, 1, 61_500_000, 1),
+    ]
+
+
+def check_admin_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path.joinpath("admin-fields.jsonl")
+    original = admin_log()
+    assert run(path, original) == 0
+    # Interior baselines let each numeric output comparison move by ±1 while
+    # remaining well-formed; generation belongs to the never-reused source.
+    for index, fields in (
+        (5, ("t_us", "g")),
+        (7, ("t_us",)),
+        (12, ("present", "u", "t_us", "g", "s", "x_us", "mc")),
+    ):
+        for field in fields:
+            for delta in (-1, 1):
+                records = copy.deepcopy(original)
+                value = records[index][field]
+                assert isinstance(value, int)
+                records[index][field] = value + delta
+                assert run(path, records) == 1, (index, field, delta)
+                output = capsys.readouterr().out
+                assert f"line {index + 1}: {field}:" in output
+                assert f"expected {value!r}, actual {value + delta!r}" in output
+    # Restore balance and key are inputs. Stored snapshots make their changed
+    # effects observable without inventing an independently known input value.
+    for balance in (2_999_999_999, 3_000_000_001):
+        records = copy.deepcopy(original)
+        records[5]["balance_units"] = balance
+        assert run(path, records) == 1
+        assert "line 7: u:" in capsys.readouterr().out
+    for key in ("YA", "Yg"):
+        records = copy.deepcopy(original)
+        records[5]["key_b64url"] = key
+        assert run(path, records) == 1
+        assert "line 6: code: expected 41, actual 40" in capsys.readouterr().out
+    for index in (5, 7, 12):
+        records = copy.deepcopy(original)
+        del records[index]
+        if index == 12:
+            # Inspect is state neutral, so removing it is an equivalence.
+            assert run(path, records) == 0
+        else:
+            assert run(path, records) == 1

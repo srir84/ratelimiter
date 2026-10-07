@@ -1,4 +1,4 @@
-"""Replay acquire, refund and cleanup JSONL records; main is callable in-process.
+"""Replay budget and admin JSONL records; main is callable in-process.
 
 G1: Clocks are legal anywhere and set a nonnegative whole-microsecond reading.
 G2: Neutral and validation_error acquires are legal anywhere and change no state.
@@ -15,6 +15,24 @@ CLK-4 compares it with max(clock, hwm) // 1000 and stores that budget time,
 even if the page has no due entries. Cleanup steps compare their code and
 budget time, including gone/not-due skips; those skips store nothing.
 Existing quarantines move with code 31; newly detected malformed buckets use 32.
+DECISIONS S8: successful restore and clear records are applied in sequence.
+Replay may infer quarantine before admin only from a per-key integrity signal
+since the current epoch began or that key's last modeled clear: an acquire
+state_integrity_error, refund attempt 23 or cleanup 32. Without that evidence
+or a modeled quarantine, a successful admin record mismatches not_quarantined.
+The log omits the expected fingerprint and epoch-wide hold, so these admin
+preconditions cannot be independently compared.
+Inspect changes no state or high-water mark. After cleanup 31, until the key's
+next allow, applied refund or restore, u and t_us are compared by the balance
+they imply at the later of snapshot and model time, with exact capped refill.
+Every other inspect compares u and t_us exactly; present, g, s, x_us and the
+per-key marker count mc are always exact for modeled bucket state.
+Refund attempt 22 is epoch-wide and neutral: no model call, hwm or comparison.
+The compact inspect record omits marker expiries, index scores and quarantine;
+external malformed/unreadable fields and the store's raw types are not modeled.
+Absent bucket fields are empty strings, as admin_inspect returns for missing
+fields; present=2 and empty fields remain valid raw snapshots but mismatch the
+model's readable stored bucket when one exists.
 G4: Each epoch needs a policy since the previous epoch (or log start). Legal
 records may intervene. Epoch IDs must be nonempty and fresh; a pending policy
 at end of log is malformed. A new epoch resets the controlled reading to origin.
@@ -118,6 +136,63 @@ def validate_cleanup_scan(record: dict[str, object], line: int) -> int:
     if not 0 <= t_us < TBOUND // 1000:
         raise RecordError(f"line {line}", "t_us", "expected bounded budget time")
     return t_us
+
+
+def admin_key(record: dict[str, object], line: int) -> bytes:
+    key = decode_key(string(record, "key_b64url", line), line)
+    if not 1 <= len(key) <= 256:
+        raise RecordError(f"line {line}", "key_b64url", "expected 1..256 UTF-8 bytes")
+    try:
+        key.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RecordError(f"line {line}", "key_b64url", "expected UTF-8 bytes") from error
+    return key
+
+
+def admin_time(record: dict[str, object], line: int) -> int:
+    t_us = integer(record, "t_us", line)
+    if not 0 <= t_us < TBOUND // 1000:
+        raise RecordError(f"line {line}", "t_us", "expected bounded budget time")
+    return t_us
+
+
+def validate_restore(record: dict[str, object], line: int, policy: Policy) -> bytes:
+    shape(record, {"key_b64url", "balance_units", "t_us", "g", "epoch_id"}, line)
+    key = admin_key(record, line)
+    balance = integer(record, "balance_units", line)
+    if not 0 <= balance <= policy.capacity * policy.rate_period_ns:
+        raise RecordError(f"line {line}", "balance_units", "expected balance within capacity")
+    admin_time(record, line)
+    if not 1 <= integer(record, "g", line) < 2**53:
+        raise RecordError(f"line {line}", "g", "expected positive uint53 generation")
+    if not string(record, "epoch_id", line):
+        raise RecordError(f"line {line}", "epoch_id", "expected nonempty current epoch ID")
+    return key
+
+
+def validate_clear(record: dict[str, object], line: int) -> bytes:
+    shape(record, {"key_b64url", "t_us"}, line)
+    key = admin_key(record, line)
+    admin_time(record, line)
+    return key
+
+
+INSPECT_NUMBERS = ("u", "t_us", "g", "s", "x_us", "mc")
+
+
+def validate_inspect(record: dict[str, object], line: int) -> bytes:
+    shape(record, {"key_b64url", "present", *INSPECT_NUMBERS}, line)
+    key = admin_key(record, line)
+    if not 0 <= integer(record, "present", line) <= 2:
+        raise RecordError(f"line {line}", "present", "expected present code 0..2")
+    for field in INSPECT_NUMBERS:
+        # A4.6 returns missing, unreadable or non-uint53 fields as ''. These
+        # fields are raw snapshots, so malformed stored balances are not capped.
+        if record[field] == "":
+            continue
+        if not 0 <= integer(record, field, line) < 2**53:
+            raise RecordError(f"line {line}", field, "expected uint53 integer or empty string")
+    return key
 
 
 SCRIPT_CODES = {
@@ -241,6 +316,8 @@ def replay(path: Path, mutant: str = "") -> int:
     finished: dict[str, str] = {}
     epochs: set[str] = set()
     refunds: set[str] = set()
+    integrity_signals: set[bytes] = set()
+    moved_balances: set[bytes] = set()
     records = read_records(path)
     declared_epochs = {
         record.get("epoch_id")
@@ -268,6 +345,8 @@ def replay(path: Path, mutant: str = "") -> int:
                 raise RecordError(f"line {line}", "origin_ns", str(error)) from error
             epochs.add(epoch)
             policy = None
+            integrity_signals.clear()
+            moved_balances.clear()
         elif kind == "clock":
             shape(record, {"value_ns"}, line)
             clock = integer(record, "value_ns", line)
@@ -298,6 +377,83 @@ def replay(path: Path, mutant: str = "") -> int:
                     print(
                         f"line {line}: {cleanup_field}: expected {cleanup_wanted!r}, "
                         f"actual {cleanup_got!r}"
+                    )
+                    return 1
+            if cleanup.code == 32:
+                integrity_signals.add(key)
+            if cleanup.code == 31:
+                moved_balances.add(key)
+            elif cleanup.code == 30:
+                moved_balances.discard(key)
+        elif kind in {"restore", "clear"}:
+            if model is None:
+                raise RecordError(f"line {line}", "type", f"{kind} before epoch")
+            if kind == "restore":
+                key = validate_restore(record, line, model.policy)
+                if record["epoch_id"] != epoch:
+                    raise RecordError(f"line {line}", "epoch_id", "differs from current epoch")
+            else:
+                key = validate_clear(record, line)
+            # An integrity signal is evidence of an unlogged quarantine write;
+            # an admin success alone cannot establish its own precondition.
+            if key in integrity_signals:
+                model.quarantined.add(key)
+            admin = (
+                model.restore(key, integer(record, "balance_units", line), clock)
+                if kind == "restore"
+                else model.clear(key, clock)
+            )
+            admin_checks: list[tuple[str, object, object]] = [("code", admin.code, 40)]
+            admin_checks.append(("t_us", admin.decision_ns // 1000, record["t_us"]))
+            if kind == "restore":
+                admin_checks.append(("g", admin.g, record["g"]))
+            for admin_field, admin_wanted, admin_got in admin_checks:
+                if admin_wanted != admin_got:
+                    print(
+                        f"line {line}: {admin_field}: expected {admin_wanted!r}, "
+                        f"actual {admin_got!r}"
+                    )
+                    return 1
+            if kind == "clear":
+                integrity_signals.discard(key)
+            else:
+                moved_balances.discard(key)
+        elif kind == "inspect":
+            key = validate_inspect(record, line)
+            if model is None:
+                raise RecordError(f"line {line}", "type", "inspect before epoch")
+            stored = model.buckets.get(key)
+            snapshot: dict[str, object] = dict.fromkeys(INSPECT_NUMBERS, "")
+            snapshot["present"] = int(stored is not None)
+            if stored is not None:
+                snapshot.update(
+                    u=stored.units,
+                    t_us=stored.time_ns // 1000,
+                    g=stored.generation,
+                    s=stored.sequence,
+                    x_us=stored.latest_expiry_ns // 1000,
+                    mc=sum(marker[0] == key for marker in model.markers),
+                )
+                if (
+                    key in moved_balances
+                    and type(record["u"]) is int
+                    and type(record["t_us"]) is int
+                ):
+                    u = integer(record, "u", line)
+                    t = integer(record, "t_us", line) * 1000
+                    later = max(t, stored.time_ns)
+                    cap = model.policy.capacity * model.policy.rate_period_ns
+                    rate = model.policy.rate_tokens
+                    snapshot["u"] = min(cap, stored.units + (later - stored.time_ns) * rate)
+                    record = dict(record, u=min(cap, u + (later - t) * rate))
+                    # Both balances are now at the same comparison time.
+                    snapshot["t_us"] = record["t_us"]
+            for inspect_field, inspect_wanted in snapshot.items():
+                inspect_got = record[inspect_field]
+                if inspect_wanted != inspect_got:
+                    print(
+                        f"line {line}: {inspect_field}: expected {inspect_wanted!r}, "
+                        f"actual {inspect_got!r}"
                     )
                     return 1
         elif kind == "acquire":
@@ -333,6 +489,8 @@ def replay(path: Path, mutant: str = "") -> int:
                         return 1
             if result in NEUTRAL:
                 # G2/S7: neutral outcomes, including integrity errors, change no state.
+                if result == "state_integrity_error" and model is not None:
+                    integrity_signals.add(key)
                 continue
             if result == "validation_error":
                 invalid = not 1 <= len(key) <= 256
@@ -379,6 +537,8 @@ def replay(path: Path, mutant: str = "") -> int:
                 if wanted != got:
                     print(f"line {line}: {field}: expected {wanted!r}, actual {got!r}")
                     return 1
+            if expected.result == "allowed":
+                moved_balances.discard(key)
             if deduction:
                 ids.add(deduction)
                 receipts[deduction] = record
@@ -434,7 +594,7 @@ def replay(path: Path, mutant: str = "") -> int:
             for attempt in attempts:
                 code = attempt["code"]
                 raw_code = attempt["raw_code"]
-                if raw_code == "capacity_error" or code in {
+                if raw_code in {"capacity_error", 22} or code in {
                     "outcome_unknown",
                     "unavailable",
                     "cancelled",
@@ -465,6 +625,8 @@ def replay(path: Path, mutant: str = "") -> int:
                                 f"line {line}: code: expected {hidden.result!r}, actual 'applied'"
                             )
                             return 1
+                        if hidden.result == "applied":
+                            moved_balances.discard(key)
                     continue
                 if raw_code == 24:
                     # Probe API-2a through marker lookup without committing credit.
@@ -520,6 +682,10 @@ def replay(path: Path, mutant: str = "") -> int:
                     if wanted != got:
                         print(f"line {line}: {field}: expected {wanted!r}, actual {got!r}")
                         return 1
+                if raw_code == 23:
+                    integrity_signals.add(key)
+                if reply.result == "applied":
+                    moved_balances.discard(key)
             result = string(record, "result", line)
             if result != last:
                 print(f"line {line}: result: expected {last!r}, actual {result!r}")

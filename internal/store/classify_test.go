@@ -200,6 +200,55 @@ func TestNotReadyReply(t *testing.T) {
 	}
 }
 
+// TestNoScriptReply (DESIGN §A5.4; AGENTS.md §6): exactly the error replies whose first
+// space-delimited word is NOSCRIPT prove the script never ran; a longer word, a lowercase
+// one, a leading space, NOSCRIPT after another word, the other classified words and an empty
+// text do not.
+func TestNoScriptReply(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"NOSCRIPT No matching script. Please use EVAL.", true},
+		{"NOSCRIPT", true},
+		{"NOSCRIPTS No matching script", false},
+		{"noscript No matching script", false},
+		{" NOSCRIPT leading space", false},
+		{"ERR NOSCRIPT after another word", false},
+		{"LOADING Valkey is loading the dataset in memory", false},
+		{"BUSY Valkey is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.", false},
+		{"OOM command not allowed when used memory > 'maxmemory'.", false},
+		{"", false},
+	} {
+		if got := NoScriptReply(tc.text); got != tc.want {
+			t.Errorf("NoScriptReply(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
+// TestRewriteRunningReply (DESIGN §A6 store-rewrite): only Valkey's exact error reply to
+// BGREWRITEAOF while an AOF rewrite runs says one is running; its other error reply, a
+// prefix, a longer text, another casing, the text without its ERR word and an empty text do
+// not.
+func TestRewriteRunningReply(t *testing.T) {
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{"ERR Background append only file rewriting already in progress", true},
+		{"ERR Can't execute an AOF background rewriting. Please check the server logs for more information.", false},
+		{"ERR Background append only file rewriting", false},
+		{"ERR Background append only file rewriting already in progress.", false},
+		{"err background append only file rewriting already in progress", false},
+		{"Background append only file rewriting already in progress", false},
+		{"", false},
+	} {
+		if got := RewriteRunningReply(tc.text); got != tc.want {
+			t.Errorf("RewriteRunningReply(%q) = %v, want %v", tc.text, got, tc.want)
+		}
+	}
+}
+
 func TestReloadThenLostReply(t *testing.T) {
 	e := newEnv(t)
 	sc := scripts.New("acquire", "-- reload, then the resend's reply is lost")

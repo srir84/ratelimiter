@@ -69,10 +69,10 @@ type replyScript struct {
 	sources []replySource
 }
 
-// replyTable is the reply table (DESIGN §A3.3, §A4.1–§A4.9; plan S4 step 15) for the scripts
-// written so far; S6–S8 add the rows of the scripts they write (S7: due_entries, cleanup_entry
-// and reclaim). No call-graph expansion: each script's rows say which replies it can give, the
-// prelude's included.
+// replyTable is the reply table (DESIGN §A3.3, §A4.1–§A4.9; plan S4 step 15) of the 12
+// scripts; S6–S8 added the rows of the scripts they wrote (S7: due_entries, cleanup_entry and
+// reclaim; S8: admin_restore and admin_clear). No call-graph expansion: each script's rows say
+// which replies it can give, the prelude's included.
 func replyTable() []replyScript {
 	// load_epoch's reasons (§A4.2), E_INTEGRITY_EPOCH's list in §A4.9; integrity_hold is also
 	// the reply of hold(…).
@@ -87,6 +87,9 @@ func replyTable() []replyScript {
 	cleanupCheckKey := slices.DeleteFunc(slices.Clone(checkKey), func(r string) bool { return r == "bucket_without_index" })
 	// The record checks admin_status and admin_inspect share (§A4.6).
 	record := []string{"epoch_record_missing", "epoch_record_malformed", "epoch_changed"}
+	// The fence admin_restore and admin_clear share (§A4.6): load_epoch's reason, then the
+	// expected id and the fingerprint; then each one's own refusals.
+	fence := slices.Concat(loadEpoch, []string{"epoch_changed", "fingerprint_mismatch"})
 	none := []string{""}
 	return []replyScript{
 		{
@@ -175,6 +178,33 @@ func replyTable() []replyScript {
 				{21, []string{"clock"}},
 				{40, none},
 				{41, []string{"epoch_exists", "epoch_record_missing", "epoch_record_malformed", "epoch_changed"}},
+			},
+		},
+		{
+			script: "admin_restore", // §A4.1 (keys_mismatch), §A4.6, §A4.8 rule 2, §A4.9
+			codes: []replyCode{
+				{21, []string{"clock"}},
+				{22, []string{"integrity_hold"}}, // hold('shared_key_malformed')
+				{25, []string{"keys_mismatch"}},
+				{40, none},
+				{41, slices.Concat(fence, []string{"not_quarantined", "balance_out_of_range"})},
+			},
+			sources: []replySource{
+				{"why", []replyCode{{41, loadEpoch}}}, // the fence: load_epoch's reason
+			},
+		},
+		{
+			script: "admin_clear", // §A4.1 (keys_mismatch), §A4.6, §A3.3, §A4.8 rule 2, §A4.9
+			codes: []replyCode{
+				{21, []string{"clock"}},
+				{22, []string{"integrity_hold"}}, // hold('shared_key_malformed')
+				{25, []string{"keys_mismatch"}},
+				{40, none},
+				{41, slices.Concat(fence, []string{"not_quarantined", "bucket_missing"}, checkKey)},
+			},
+			sources: []replySource{
+				{"why", []replyCode{{41, loadEpoch}}},   // the fence: load_epoch's reason
+				{"reason", []replyCode{{41, checkKey}}}, // check_key's reason for a key that is not ok
 			},
 		},
 		{

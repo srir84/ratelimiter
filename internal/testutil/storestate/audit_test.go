@@ -25,6 +25,7 @@ const (
 	kA    = "rl:e:" + nsID + ":k:YQ"
 	miA   = "rl:e:" + nsID + ":mi:YQ"
 	kB    = "rl:e:" + nsID + ":k:Yg"
+	miB   = "rl:e:" + nsID + ":mi:Yg" // "b" has no marker, so this key is absent
 	oldK  = "rl:e:" + oldID + ":k:YQ"
 	// tbound is TBOUND = 2^53 − 2^43 = 9007199254740992 − 8796093022208 (§A3.1).
 	tbound = "8998403161718784"
@@ -97,10 +98,17 @@ func unset(st storestate.State, key string, names ...string) {
 // line is a report line: the quoted key name, then what was found.
 func line(key, rest string) string { return strconv.Quote(key) + ": " + rest }
 
-// TestAuditDetectsEachViolation (plan S4, L1): each fixture breaks one rule of
-// storestate.Audit and gets exactly the lines that rule (and the rules it necessarily
-// breaks too) report; the passing fixtures get none. Expected lines are written out from
-// DESIGN §A3.1–§A3.3, §C3 and the numbers in cleanState.
+// TestAuditDetectsEachViolation (plan S4, L1; S8 adds the fixtures named S8): each fixture
+// breaks one rule of storestate.Audit and gets exactly the lines that rule (and the rules it
+// necessarily breaks too) report; the passing fixtures get none. Expected lines are written
+// out from DESIGN §A3.1–§A3.3, §C3 and the numbers in cleanState. The S8 fixtures (plan S8
+// step 10): keys of an old namespace in state index_without_bucket pass (grammar only), while a
+// key name outside the grammar there is reported; with rl:epoch missing or unreadable (a wipe,
+// CorruptRecord, ChangeSharedKeyType(epoch), DeleteHwm), only the grammar is checked; a key
+// whose ix score is later than its eligibility (as after admin_clear) passes when it is in
+// Restored and is reported when it is not; the counter rule allows nb one above the k: keys
+// per distinct restored budget key of the namespace, so a key listed twice or by both its
+// names allows one, and an old namespace's key none.
 func TestAuditDetectsEachViolation(t *testing.T) {
 	type edit = func(storestate.State, *storestate.AuditConfig)
 	type fixture struct {
@@ -214,6 +222,37 @@ func TestAuditDetectsEachViolation(t *testing.T) {
 	nbLine := func(nb, lo, hi string) string {
 		return line(epK, "nb "+nb+", want "+lo+" … "+hi+" (the k:<enc> keys, plus Restored)")
 	}
+	// restoredNb sets the record's nb and lists restored in Restored; cleanState has 2 k: keys.
+	restoredNb := func(nb string, restored ...string) edit {
+		return func(st storestate.State, c *storestate.AuditConfig) {
+			c.Restored = restored
+			set(st, epK, "nb", nb)
+		}
+	}
+	// The S8 fixtures (plan S8 step 10): an old namespace awaiting reclaim, rl:epoch missing or
+	// unreadable, and a key admin_clear re-scored.
+	oldIx := "rl:e:" + oldID + ":ix"
+	stray := line("rl:junk", "not a key of the §A3.2 layout")
+	// unchecked breaks the current namespace in ways only its rules see, and adds a stray key,
+	// which the grammar rule reports whatever the record.
+	unchecked := func(st storestate.State) {
+		set(st, kB, "u", "x")                  // check_key malformed_bucket
+		st[qK] = hash("YQ", "x|1")             // a q entry whose key is not Damaged
+		set(st, ixK, "!!", "1760000000000000") // an ix member failing is_enc
+		st["rl:junk"] = str("x")
+	}
+	// afterClear leaves "b" full (u = cap_units) with every receipt expired (x = t =
+	// 1760000000400000), so its eligibility is max(t + ⌈0 / 10^4⌉, x) = 1760000000400000, and
+	// its ix score at hwm = 1760000000500000, the time of an admin_clear write (§A3.2, §A4.6).
+	afterClear := func(restored bool) edit {
+		return func(st storestate.State, c *storestate.AuditConfig) {
+			set(st, kB, "u", "20000000000", "t", "1760000000400000", "x", "1760000000400000")
+			set(st, ixK, "Yg", "1760000000500000")
+			if restored {
+				c.Restored = []string{kB}
+			}
+		}
+	}
 
 	cases := []fixture{
 		// Passing fixtures.
@@ -307,6 +346,37 @@ func TestAuditDetectsEachViolation(t *testing.T) {
 		{"store clock", func(st storestate.State, _ *storestate.AuditConfig) { set(st, epK, "clock", "store") }, nil},
 		{"policy: rate_tokens 1", setFP(minRate), nil},
 		{"policy: rate_tokens 2^31 - 1", setFP(maxRate), nil},
+
+		// S8 (plan S8 step 10): across epochs and restores.
+		{"S8: an old namespace in state index_without_bucket passes (grammar only)", func(st storestate.State, _ *storestate.AuditConfig) {
+			st[oldIx] = zset("YQ", "1760000000000000", "Yg", "inf")
+		}, nil},
+		{"S8: a key name outside the grammar in that old namespace is reported", func(st storestate.State, _ *storestate.AuditConfig) {
+			st[oldIx] = zset("YQ", "1760000000000000", "Yg", "inf")
+			st["rl:e:"+oldID+":k:!"] = hash("u", "1")
+		}, []string{line("rl:e:"+oldID+":k:!", "not a key of the §A3.2 layout")}},
+		{"S8: rl:epoch missing (a wipe): grammar only", func(st storestate.State, _ *storestate.AuditConfig) {
+			delete(st, epK)
+			unchecked(st)
+		}, []string{stray}},
+		{"S8: rl:epoch a string, declared (ChangeSharedKeyType(epoch)): grammar only", func(st storestate.State, c *storestate.AuditConfig) {
+			c.Damaged = []string{epK}
+			st[epK] = str("x")
+			unchecked(st)
+		}, []string{stray}},
+		{"S8: a corrupt record, declared (CorruptRecord): grammar only", func(st storestate.State, c *storestate.AuditConfig) {
+			c.Damaged = []string{epK}
+			set(st, epK, "id", "x", "gen", "x")
+			unchecked(st)
+		}, []string{stray}},
+		{"S8: hwm deleted, declared (DeleteHwm): grammar only", func(st storestate.State, c *storestate.AuditConfig) {
+			c.Damaged = []string{epK}
+			unset(st, epK, "hwm")
+			unchecked(st)
+		}, []string{stray}},
+		{"S8: an ix score at the admin_clear time, past eligibility, Restored", afterClear(true), nil},
+		{"S8: an ix score at the admin_clear time, past eligibility, not Restored", afterClear(false),
+			[]string{line(kB, "ix score 1760000000500000 > 1760000000400000 = min(eligibility 1760000000400000, earliest marker expiry none)")}},
 
 		// Grammar.
 		{"stray key", func(st storestate.State, _ *storestate.AuditConfig) { st["rl:junk"] = str("x") },
@@ -515,6 +585,16 @@ func TestAuditDetectsEachViolation(t *testing.T) {
 			c.Restored = []string{kB}
 			set(st, epK, "nb", "4")
 		}, []string{nbLine("4", "2", "3")}},
+		// S8 (plan S8 step 10): the Restored allowance counts the distinct budget keys of the
+		// audited namespace that Restored names. A key listed twice (Restore, then Clear) or by
+		// its k: and its mi: name allows one; an old namespace's key allows none, since nb
+		// starts again at 0 in a new epoch.
+		{"S8: nb one above with Restored [kB, kB]", restoredNb("3", kB, kB), nil},
+		{"S8: nb two above with Restored [kB, kB]", restoredNb("4", kB, kB), []string{nbLine("4", "2", "3")}},
+		{"S8: nb one above with Restored [kB, mi:Yg]", restoredNb("3", kB, miB), nil},
+		{"S8: nb two above with Restored [kB, mi:Yg]", restoredNb("4", kB, miB), []string{nbLine("4", "2", "3")}},
+		{"S8: nb = k: keys with Restored [an old namespace's k:]", restoredNb("2", oldK), nil},
+		{"S8: nb one above with Restored [an old namespace's k:]", restoredNb("3", oldK), []string{nbLine("3", "2", "2")}},
 		{"undeclared q entry", func(st storestate.State, _ *storestate.AuditConfig) {
 			st[qK] = hash("YQ", "malformed_bucket|1760000000500000")
 		}, []string{line(qK, `entry "YQ", but neither its k: nor its mi: key is Damaged`)}},

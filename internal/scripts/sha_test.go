@@ -18,11 +18,12 @@ import (
 //go:embed *.lua
 var luaFiles embed.FS
 
-// TestScriptSHA1 (plan S4, L2; S6 adds refund, S7 due_entries, cleanup_entry and reclaim): for
-// all 10 scripts, SCRIPT LOAD as the script's §A2 user returns Script.SHA, the SHA-1 of the
-// assembled text (§A4.1); the text is the file's first line, "\n", prelude.lua and the rest of
-// the file (plan S4 step 3); the header line is the one §A4.8 rule 1 gives the script; ByName
-// finds each script and nothing else.
+// TestScriptSHA1 (plan S4, L2; S6 adds refund, S7 due_entries, cleanup_entry and reclaim, S8
+// admin_restore and admin_clear): for all 12 scripts, SCRIPT LOAD as the script's §A2 user
+// returns Script.SHA, the SHA-1 of the assembled text (§A4.1); the text is the file's first
+// line, "\n", prelude.lua and the rest of the file (plan S4 step 3); the header line is the one
+// §A4.8 rule 1 gives the script; ByName finds each script and nothing else (not prelude, a
+// file name, a Go name or "").
 func TestScriptSHA1(t *testing.T) {
 	h := scriptrun.Store(t)
 	conns := map[string]bool{}
@@ -46,6 +47,8 @@ func TestScriptSHA1(t *testing.T) {
 		{scripts.AdminStartEpoch, "admin_start_epoch", "#!lua flags=allow-oom", "rl_admin"},
 		{scripts.AdminStatus, "admin_status", "#!lua flags=no-writes", "rl_admin"},
 		{scripts.AdminInspect, "admin_inspect", "#!lua flags=no-writes", "rl_admin"},
+		{scripts.AdminRestore, "admin_restore", "#!lua flags=allow-oom", "rl_admin"},
+		{scripts.AdminClear, "admin_clear", "#!lua flags=allow-oom", "rl_admin"},
 	} {
 		t.Run(c.name+"/"+c.user, func(t *testing.T) {
 			src, err := luaFiles.ReadFile(c.name + ".lua")
@@ -74,7 +77,7 @@ func TestScriptSHA1(t *testing.T) {
 			}
 		})
 	}
-	for _, name := range []string{"prelude", "admin_restore", "admin_clear", ""} {
+	for _, name := range []string{"prelude", "admin_restore.lua", "Acquire", ""} {
 		if s, ok := scripts.ByName(name); ok {
 			t.Errorf("ByName(%q) = %s, want no script", name, s.Name)
 		}

@@ -21,7 +21,8 @@ import (
 // step 13): once every instance is closed or killed and while the store still runs, the
 // commands each instance sent, its refund attempts against its refund sends, the store audit
 // on a quiet store with every signing-key canary (and the canary search of the store's AOF
-// files), and BUD-11 on the op log. S8 adds Tamper writes and restored keys.
+// files), and BUD-11 on the op log. S8 adds Tamper writes (declared Damaged, as Fixture writes
+// are) and the keys rladmin restored or cleared (Restored).
 
 const (
 	quietTries = 5                      // snapshots taken at most
@@ -157,10 +158,12 @@ func (d *Driver) checkRefundSends(tb testing.TB, all []*instance) {
 
 // auditStore takes snapshots as rl_lib until two in a row are identical (at most 5, 100 ms
 // apart; otherwise "store not quiet"), then reports every storestate.Audit message: the
-// policy is the epoch policy whose fingerprint is rl:epoch.fp, Damaged every key a Fixture
-// write named, the filler prefix rl:pad:, and Canaries every signing-key canary the driver
-// gave an instance. It also searches every file in the store's appendonlydir/ for the
-// canaries (searchAOF).
+// policy is the one, among the policies the driver started or replaced an epoch with, whose
+// fingerprint is rl:epoch.fp (T-CFG-5), Damaged every key a Fixture or Tamper write named,
+// Restored the k:<enc> of every key an rladmin restore or clear wrote (IMPLEMENTATION_PLAN S8
+// step 10), the filler prefix rl:pad:, and Canaries every signing-key canary the driver gave an
+// instance. It also searches every file in the store's appendonlydir/ for the canaries
+// (searchAOF).
 func (d *Driver) auditStore(tb testing.TB) {
 	tb.Helper()
 	c, err := d.st.Conn("rl_lib")
@@ -194,6 +197,7 @@ func (d *Driver) auditStore(tb testing.TB) {
 	cfg := storestate.AuditConfig{
 		Policy:         d.policyFor(snap[keys.EpochKey].Fields["fp"]),
 		Damaged:        slices.Clone(d.damaged),
+		Restored:       slices.Clone(d.restored),
 		FillerPrefixes: []string{FillerPrefix},
 		Canaries:       d.canaryListLocked(),
 	}
@@ -244,10 +248,10 @@ func (d *Driver) searchAOF(tb testing.TB, canaries [][]byte) {
 }
 
 // checkBud11 is the teardown BUD-11 check (DESIGN §C4; plan S6 step 13): when the test logged
-// ops (acquire, release, done, cleanup or cleanup_scan records), it writes the op log and runs
-// python3 -m refmodel.check_bud11 on it; a non-zero exit,
-// or no python3, fails the test (as in CheckRefModel). A test that wrote through Fixture
-// (a declared key, or FLUSHALL/FLUSHDB) is exempt: it asserts its refusals directly.
+// ops (acquire, release, done, cleanup, cleanup_scan, restore or clear records), it writes the
+// op log and runs python3 -m refmodel.check_bud11 on it; a non-zero exit, or no python3, fails
+// the test (as in CheckRefModel). A test that wrote through Fixture or Tamper (a declared key,
+// or FLUSHALL/FLUSHDB) is exempt: it asserts its refusals directly.
 func (d *Driver) checkBud11(tb testing.TB) {
 	tb.Helper()
 	d.mu.Lock()

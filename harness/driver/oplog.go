@@ -60,7 +60,17 @@ import (
 //     budget time (a gone or not_due skip carries it too) (orchestrator decision, S7 task 2);
 //   - cleanup_scan {t_us} (orchestrator decision, S7 task 2): one per due_entries page (code
 //     0) the adapter returns, the same way; t_us is the page's T0, which the page stored as
-//     the high-water mark (CLK-4). A refusal stores nothing and has no record.
+//     the high-water mark (CLK-4). A refusal stores nothing and has no record;
+//   - restore {key_b64url, balance_units, t_us, g, epoch_id} and clear {key_b64url, t_us} (S8
+//     step 5): one per rladmin restore or clear that exits 0 (a refused or failed one changed
+//     nothing and has none; orchestrator decision, S8 task 3): balance_units as sent, t_us and
+//     g from the output, epoch_id the --expect-epoch, which the fence matched;
+//   - inspect {key_b64url, present, u, t_us, g, s, x_us, mc} (S8 step 5): a snapshot from
+//     rladmin inspect's output, written only by LogInspect; a value the reply showed empty is
+//     "";
+//   - a policy and epoch pair for every epoch the driver starts or replaces, however: StartEpoch,
+//     ReplaceEpoch, or an rladmin start-epoch that exits 0 (after a wipe, say), origin_ns being
+//     its output's t_us × 1000 (S8 step 5).
 //
 // Ops are logged in completion order, so only tests that issue ops one at a time use the
 // bridge; check_bud11 (teardown) sorts by budget time and takes concurrent logs too. Writes
@@ -143,6 +153,35 @@ type cleanupRecord struct {
 type cleanupScanRecord struct {
 	Type string `json:"type"`
 	TUs  int64  `json:"t_us"`
+}
+
+type restoreRecord struct {
+	Type         string `json:"type"`
+	KeyB64URL    string `json:"key_b64url"`
+	BalanceUnits int64  `json:"balance_units"`
+	TUs          int64  `json:"t_us"`
+	G            int64  `json:"g"`
+	EpochID      string `json:"epoch_id"`
+}
+
+type clearRecord struct {
+	Type      string `json:"type"`
+	KeyB64URL string `json:"key_b64url"`
+	TUs       int64  `json:"t_us"`
+}
+
+// inspectRecord is an inspect snapshot: each of u … mc is an int64, or "" where the reply
+// showed the empty string (missing or unreadable, §A4.9).
+type inspectRecord struct {
+	Type      string `json:"type"`
+	KeyB64URL string `json:"key_b64url"`
+	Present   int64  `json:"present"`
+	U         any    `json:"u"`
+	TUs       any    `json:"t_us"`
+	G         any    `json:"g"`
+	S         any    `json:"s"`
+	XUs       any    `json:"x_us"`
+	MC        any    `json:"mc"`
 }
 
 func policyRecordOf(p limiter.Policy) policyRecord {

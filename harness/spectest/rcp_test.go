@@ -13,6 +13,7 @@ import (
 	"ratelimiter/internal/keys"
 	"ratelimiter/internal/store"
 	"ratelimiter/limiter"
+	"ratelimiter/limitertest"
 )
 
 // TestT_RCP_6 (SPEC T-RCP-6; API-12a, RCP-3; FLT-10): with a frozen clock and the signer
@@ -419,3 +420,47 @@ func TestT_RCP_4(t *testing.T) {
 	}
 	d.CheckRefModel(t)
 }
+
+// TestT_RCP_5 (SPEC T-RCP-5; RCP-1, RCP-2, RCP-5, CFG-5): an instance holds an epoch-A permit,
+// and its epoch read sees that traffic (rl_tracked_buckets 1: A's grown gen reaches its floors);
+// ReplaceEpoch starts B with the same settings; once the instance's health shows B (and with
+// the scripts cached, so no NOSCRIPT round adds a send), Release() ends with receipt_invalid
+// (wrong epoch_id: the call names B in its KEYS and the receipt's A in its ARGV, so the store
+// answers 10 epoch), Attempts 1, and credits nothing in B: the key has no bucket there and
+// status shows no marker. The op log matches the reference model.
+func TestT_RCP_5(t *testing.T) {
+	d := fastDriver(t, 1, nil)
+	const key = "rcp5"
+	op := allowed(t, d, 0, key)
+	allowedAt := time.Now()
+	idA := limitertestEpoch(op)
+	// an epoch read sees A's traffic (its new bucket), so A's grown gen reaches the floors (§A5.7)
+	waitMetric(t, d, 0, "rl_tracked_buckets", "", time.Until(allowedAt.Add(epochReads(d))), "after the allow in A", func(v float64) bool { return v == 1 })
+	start := time.Now()
+	idB := d.ReplaceEpoch()
+	if idB == idA {
+		t.Fatalf("ReplaceEpoch kept epoch %s", idA)
+	}
+	if err := d.WaitJoined(0, idB, joinTolerance(d)-time.Since(start)); err != nil {
+		t.Fatal(err)
+	}
+	d.LoadScripts() // the refund script is cached: no NOSCRIPT round adds a send (API-1d)
+	d.Release(op)
+	ev := event(t, d, op)
+	if ev.Result != limiter.ReceiptInvalid || ev.Attempts != 1 {
+		t.Errorf("release of the epoch-A permit in B: %+v, want receipt_invalid after 1 attempt", ev)
+	}
+	if as := d.RefundAttempts(op); len(as) != 1 {
+		t.Errorf("refund calls %d, want 1", len(as))
+	} else {
+		storeReply(t, "the refund in B", as[0], 10, "epoch")
+	}
+	if in, st := d.Inspect(key), d.Status(); in.Present != 0 || st.EpochID != idB || st.NB != 0 || st.NM != 0 {
+		t.Errorf("epoch B after the refund: inspect %+v, status %+v; want no bucket and no marker", in, st)
+	}
+	d.CheckRefModel(t)
+}
+
+// limitertestEpoch is the epoch_id an allowed op's permit carries, from its acquire reply's
+// epoch (the driver's op log records it the same way).
+func limitertestEpoch(op driver.Op) string { return limitertest.PermitEpoch(op.Permit) }

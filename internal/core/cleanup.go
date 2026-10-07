@@ -153,8 +153,9 @@ func (l *Limiter) runPass(ctx context.Context) CleanupReport {
 // joined and its floors: due_entries with cutoff 0, its T0 kept as the pass's cutoff (and
 // rl_cleanup_lag_seconds set from that first page); the page's steps; the next page with that
 // cutoff only after the page completes; until a page is empty. The first failed call stops
-// the pass with its status; the confirmed steps are counted, the others not. After a complete
-// pass, and only then, the reclaimer runs (§A4.7).
+// the pass with its status; the confirmed steps are counted, the others not, and an epoch-wide
+// config_error or state_integrity_error reply asks the watch for an early read (epochWideStop).
+// After a complete pass, and only then, the reclaimer runs (§A4.7).
 func (l *Limiter) pass(ctx context.Context) (CleanupReport, passStatus) {
 	var rep CleanupReport
 	rd := l.readiness()
@@ -172,6 +173,7 @@ func (l *Limiter) pass(ctx context.Context) (CleanupReport, passStatus) {
 	for first := true; ; first = false {
 		page, status, d := l.duePage(ctx, c, cutoff)
 		if status != passComplete {
+			l.epochWideStop(status)
 			rep.Diag = d
 			return rep, status
 		}
@@ -187,12 +189,26 @@ func (l *Limiter) pass(ctx context.Context) (CleanupReport, passStatus) {
 			break
 		}
 		if status, d := l.steps(store.CleanupEntries(ctx, l.adapter, c, page.members), &rep); status != passComplete {
+			l.epochWideStop(status)
 			rep.Diag = d
 			return rep, status
 		}
 	}
 	l.reclaim(ctx, st.id)
 	return rep, passComplete
+}
+
+// epochWideStop asks the epoch watch for an early read (§A5.7), which it takes at most once per
+// interval, when a reply stopped the pass with an epoch-wide config_error (20) or
+// state_integrity_error (22): an epoch replaced, lost or held is joined or reported without
+// waiting for the next timed read, and the next pass runs under it (plan S8 step 2). The
+// readiness stops of pass send nothing and ask for nothing, as acquire's local refusals.
+func (l *Limiter) epochWideStop(s passStatus) {
+	switch s {
+	case passConfigError, passStateIntegrityError:
+		l.watch.trigger()
+	case passComplete, passClockError, passUnavailable, passOutcomeUnknown:
+	}
 }
 
 // notReadyStop maps a refused readiness look to the pass's status and Diag (§A5.8). A health

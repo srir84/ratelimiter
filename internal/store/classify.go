@@ -37,3 +37,18 @@ func NotReadyReply(text string) bool {
 	out, _ := classifyErrorReply("", text)
 	return out == Unavailable
 }
+
+// NoScriptReply reports whether text, a store error reply, is NOSCRIPT by classifyErrorReply's
+// first-word rule: the script never ran, so one SCRIPT LOAD and one resend are safe (AGENTS.md
+// §6). rladmin, which sends its scripts on its own connection, resends after it.
+func NoScriptReply(text string) bool {
+	_, reload := classifyErrorReply("", text)
+	return reload
+}
+
+// RewriteRunningReply reports whether text, an error reply to BGREWRITEAOF, is exactly the one
+// Valkey sends while an AOF rewrite already runs: that BGREWRITEAOF did nothing, and one sent
+// after the running rewrite ends starts a new one (rladmin store-rewrite, DESIGN §A6).
+func RewriteRunningReply(text string) bool {
+	return text == "ERR Background append only file rewriting already in progress"
+}

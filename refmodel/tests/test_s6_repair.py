@@ -317,7 +317,7 @@ def test_c9_multiple_model_attempts(tmp_path: Path) -> None:
     for index in (0, 1):
         changed = copy.deepcopy(records)
         changed[-1] = refund(
-            [attempt(21) if i != index else attempt(22) for i in (0, 1)], "unresolved"
+            [attempt(21) if i != index else attempt(23) for i in (0, 1)], "unresolved"
         )
         assert run(tmp_path / "log", changed) == 1
 

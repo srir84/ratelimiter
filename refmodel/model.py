@@ -1,4 +1,4 @@
-"""Token buckets, receipt refunds and cleanup, derived from SPEC."""
+"""Token buckets, receipt refunds, cleanup and admin recovery, derived from SPEC."""
 
 from dataclasses import dataclass
 
@@ -65,6 +65,14 @@ class CleanupDecision:
     time_known: bool = True
 
 
+@dataclass(frozen=True)
+class AdminDecision:
+    code: int | str
+    decision_ns: int = 0
+    g: int = 0
+    reason: str = ""
+
+
 class Model:
     def __init__(self, policy: Policy, origin_ns: int = 0) -> None:
         if type(origin_ns) is not int or not 0 <= origin_ns < TBOUND or origin_ns % 1000:
@@ -77,6 +85,183 @@ class Model:
         self.mutant = ""
         self.quarantined: set[bytes] = set()
         self.cleanup_due: dict[bytes, int] = {}
+
+    @staticmethod
+    def _admin_key(key_bytes: bytes, operation: str) -> None:
+        if not isinstance(key_bytes, bytes):
+            raise RecordError(operation, "key_bytes", "expected bytes")
+        if not 1 <= len(key_bytes) <= 256:
+            raise RecordError(operation, "key_bytes", "expected 1-256 UTF-8 bytes")
+        try:
+            key_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RecordError(operation, "key_bytes", "expected UTF-8") from error
+
+    def _admin_fence(
+        self,
+        operation: str,
+        epoch_matches: bool,
+        fingerprint_matches: bool,
+        integrity_held: bool,
+    ) -> AdminDecision | None:
+        for field, value in (
+            ("epoch_matches", epoch_matches),
+            ("fingerprint_matches", fingerprint_matches),
+            ("integrity_held", integrity_held),
+        ):
+            if type(value) is not bool:
+                raise RecordError(operation, field, "expected boolean")
+        hwm = getattr(self, "hwm", None)
+        if hwm is None:
+            return AdminDecision(41, reason="hwm_missing")
+        if type(hwm) is not int or not 0 <= hwm < TBOUND or hwm % 1000:
+            return AdminDecision(41, reason="hwm_malformed")
+        generation = getattr(self, "generation", None)
+        if type(generation) is not int or not 0 <= generation < 2**53:
+            return AdminDecision(41, reason="epoch_record_malformed")
+        if integrity_held:
+            return AdminDecision(41, reason="integrity_hold")
+        if not epoch_matches:
+            return AdminDecision(41, reason="epoch_changed")
+        if not fingerprint_matches:
+            return AdminDecision(41, reason="fingerprint_mismatch")
+        return None
+
+    def _admin_time(self, operation: str, clock_ns: int) -> int | AdminDecision:
+        if type(clock_ns) is not int:
+            raise RecordError(operation, "clock_ns", "expected integer")
+        if not 0 <= clock_ns < TBOUND:
+            return AdminDecision("clock_error")
+        if clock_ns % 1000:
+            raise RecordError(operation, "clock_ns", "expected microsecond granularity")
+        return max(clock_ns, self.hwm)
+
+    def restore(
+        self,
+        key_bytes: bytes,
+        balance_units: int,
+        clock_ns: int,
+        *,
+        epoch_matches: bool = True,
+        fingerprint_matches: bool = True,
+        integrity_held: bool = False,
+    ) -> AdminDecision:
+        """Replace a quarantined key's state, retaining its quarantine (ADM-2).
+
+        The supplied bounded balance is assigned, with no refill or additive
+        credit calculation. The eight refill, admission and refund mutants
+        therefore keep their existing rules on subsequent ordinary operations.
+        """
+        self._admin_key(key_bytes, "restore")
+        if type(balance_units) is not int:
+            raise RecordError("restore", "balance_units", "expected integer")
+        refused = self._admin_fence("restore", epoch_matches, fingerprint_matches, integrity_held)
+        if refused is not None:
+            return refused
+        if key_bytes not in self.quarantined:
+            return AdminDecision(41, reason="not_quarantined")
+        if not 0 <= balance_units <= self.policy.capacity * self.policy.rate_period_ns:
+            return AdminDecision(41, reason="balance_out_of_range")
+        if self.generation + 1 >= 2**53:
+            return AdminDecision(41, reason="epoch_record_malformed")
+        t = self._admin_time("restore", clock_ns)
+        if isinstance(t, AdminDecision):
+            return t
+        for identity in tuple(self.markers):
+            if identity and identity[0] == key_bytes:
+                del self.markers[identity]
+        self.generation += 1
+        self.buckets[key_bytes] = Bucket(
+            balance_units, t, self.generation, 0, t + self.policy.receipt_lifetime_ns
+        )
+        self.cleanup_due[key_bytes] = t
+        self.hwm = t
+        return AdminDecision(40, t, self.generation)
+
+    def _clear_consistency(self, key_bytes: bytes) -> str:
+        bucket: object = self.buckets.get(key_bytes)
+        if bucket is None:
+            return "bucket_missing"
+        if not isinstance(bucket, Bucket):
+            return "bucket_malformed"
+        for value in (
+            bucket.units,
+            bucket.time_ns,
+            bucket.generation,
+            bucket.sequence,
+            bucket.latest_expiry_ns,
+        ):
+            if type(value) is not int or value < 0:
+                return "bucket_malformed"
+        if (
+            bucket.units > self.policy.capacity * self.policy.rate_period_ns
+            or not 1 <= bucket.generation <= self.generation
+            or bucket.sequence >= 2**53
+            or bucket.time_ns > self.hwm
+            or bucket.time_ns % 1000
+            or bucket.latest_expiry_ns >= 2**53 * 1000
+            or bucket.latest_expiry_ns % 1000
+        ):
+            return "bucket_malformed"
+        if key_bytes not in self.cleanup_due:
+            return "index_missing"
+        due = self.cleanup_due[key_bytes]
+        if type(due) is not int or not 0 <= due < 2**53 * 1000 or due % 1000:
+            return "index_malformed"
+        for stored_identity, stored_marker in self.markers.items():
+            identity: object = stored_identity
+            marker: object = stored_marker
+            if not isinstance(identity, tuple) or not identity:
+                return "marker_malformed"
+            if identity[0] != key_bytes:
+                continue
+            if len(identity) != 3 or not isinstance(marker, tuple) or len(marker) != 2:
+                return "marker_malformed"
+            _, g, s = identity
+            credit_ns, expiry_us = marker
+            if (
+                any(type(value) is not int for value in (g, s, credit_ns, expiry_us))
+                or g != bucket.generation
+                or not 1 <= s <= bucket.sequence
+                or not 0 <= credit_ns <= self.hwm
+                or credit_ns % 1000
+                or not 0 <= expiry_us < 2**53
+                or credit_ns >= expiry_us * 1000
+                or expiry_us * 1000 > bucket.latest_expiry_ns
+            ):
+                return "marker_malformed"
+        return ""
+
+    def clear(
+        self,
+        key_bytes: bytes,
+        clock_ns: int,
+        *,
+        epoch_matches: bool = True,
+        fingerprint_matches: bool = True,
+        integrity_held: bool = False,
+    ) -> AdminDecision:
+        """Clear quarantine only for a consistent stored bucket (ADM-3).
+
+        Preserve the bucket and its markers without refill. Moving the index
+        to the current budget time lets the next cleanup reconsider it at once.
+        """
+        self._admin_key(key_bytes, "clear")
+        refused = self._admin_fence("clear", epoch_matches, fingerprint_matches, integrity_held)
+        if refused is not None:
+            return refused
+        if key_bytes not in self.quarantined:
+            return AdminDecision(41, reason="not_quarantined")
+        reason = self._clear_consistency(key_bytes)
+        if reason:
+            return AdminDecision(41, reason=reason)
+        t = self._admin_time("clear", clock_ns)
+        if isinstance(t, AdminDecision):
+            return t
+        self.quarantined.remove(key_bytes)
+        self.cleanup_due[key_bytes] = t
+        self.hwm = t
+        return AdminDecision(40, t)
 
     def acquire(self, key_bytes: bytes, clock_ns: int) -> Decision:
         if not isinstance(key_bytes, bytes):

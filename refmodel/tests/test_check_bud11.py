@@ -373,3 +373,353 @@ def test_cleanup_requires_current_epoch(tmp_path: Path, capsys: pytest.CaptureFi
         )
         == 0
     )
+
+
+def default_epoch(epoch: str = "e", origin_ns: int = 0) -> list[dict[str, object]]:
+    return [
+        {
+            "type": "policy",
+            "rate_tokens": 10,
+            "rate_period_ns": 1_000_000_000,
+            "capacity": 20,
+            "max_tracked_buckets": 1000,
+            "receipt_lifetime_ns": 60_000_000_000,
+        },
+        {"type": "epoch", "epoch_id": epoch, "origin_ns": origin_ns},
+    ]
+
+
+def default_allow(s: int, time_ns: int = 0, epoch: str = "e", g: int = 1) -> dict[str, object]:
+    # Frozen default-policy deductions cost 10^9 units each, with 60-s receipts.
+    # Claimed allows beyond capacity are deliberately retained for the audit.
+    return {
+        "type": "acquire",
+        "instance": "i",
+        "key_b64url": "YQ",
+        "result": "allowed",
+        "decision_ns": time_ns,
+        "retry_after_ns": 0,
+        "u": max(20 - s, 0) * 1_000_000_000,
+        "g": g,
+        "s": s,
+        "expiry_us": time_ns // 1000 + 60_000_000,
+        "deduction_id": f"{epoch}:YQ:{g}:{s}",
+        "epoch_id": epoch,
+    }
+
+
+def restore_record(balance_units: int = 3_000_000_000, t_us: int = 0) -> dict[str, object]:
+    return {
+        "type": "restore",
+        "key_b64url": "YQ",
+        "balance_units": balance_units,
+        "t_us": t_us,
+        "g": 2,
+        "epoch_id": "e",
+    }
+
+
+def inspect_record() -> dict[str, object]:
+    return {
+        "type": "inspect",
+        "key_b64url": "YQ",
+        "present": 1,
+        "u": 0,
+        "t_us": 0,
+        "g": 1,
+        "s": 20,
+        "x_us": 60_000_000,
+        "mc": 0,
+    }
+
+
+def test_restore_credit(tmp_path: Path) -> None:
+    path = tmp_path.joinpath("log")
+    frozen = [*default_epoch(), *(default_allow(s) for s in range(1, 21))]
+    records = [
+        *frozen,
+        restore_record(),
+        *(default_allow(s, g=2) for s in range(1, 4)),
+    ]
+    # [0,0]: (20 + 3) × 10^9 - 3 × 10^9 = capacity 20 × 10^9.
+    assert run_check(path, records) == 0
+    # A fourth post-restore allow raises the same window to 21 × 10^9.
+    assert run_check(path, [*records, default_allow(4, g=2)]) == 1
+
+    # At a nonzero frozen instant, the restore still belongs to the same
+    # [10^9,10^9] window. Reading t_us as nanoseconds loses that credit.
+    nonzero = [
+        *default_epoch(),
+        *(default_allow(s, time_ns=1_000_000_000) for s in range(1, 21)),
+        dict(restore_record(), t_us=1_000_000),
+        *(default_allow(s, time_ns=1_000_000_000, g=2) for s in range(1, 4)),
+    ]
+    assert run_check(path, nonzero) == 0
+    assert run_check(path, [*nonzero, default_allow(4, time_ns=1_000_000_000, g=2)]) == 1
+
+    # [3×10^9,3×10^9] contains 21 allows and no restore credit: the
+    # three-token restore happened at 1 s, not at the later clear at 3 s.
+    cleared = [
+        *frozen,
+        dict(restore_record(), t_us=1_000_000),
+        {"type": "clear", "key_b64url": "YQ", "t_us": 3_000_000},
+        *(default_allow(s, time_ns=3_000_000_000, g=2) for s in range(1, 22)),
+    ]
+    assert run_check(path, cleared) == 1
+    # Credit at 1 s cannot change the violating closed window [0,0].
+    assert run_check(path, [*frozen, default_allow(21), restore_record(t_us=1_000_000)]) == 1
+    # Epoch B owns a separate 20-token capacity; the elapsed 1 us adds nothing
+    # to the conclusion because each epoch independently has exactly 20 allows.
+    assert (
+        run_check(
+            path,
+            [
+                *frozen,
+                *default_epoch("f", 1000),
+                *(default_allow(s, 1000, "f") for s in range(1, 21)),
+            ],
+        )
+        == 0
+    )
+
+
+def test_applied_refund_belongs_to_receipt_epoch(tmp_path: Path) -> None:
+    # Epoch e's [0,0] window costs (20 + 1 - 1) × 10^9 units. A later
+    # epoch must not move the applied refund away from that receipt's epoch.
+    records: list[dict[str, object]] = [
+        *default_epoch(),
+        *(default_allow(s) for s in range(1, 21)),
+        {"type": "release", "instance": "i", "deduction_id": "e:YQ:1:1"},
+        {
+            "type": "refund",
+            "deduction_id": "e:YQ:1:1",
+            "key_b64url": "YQ",
+            "g": 1,
+            "s": 1,
+            "expiry_us": 60_000_000,
+            "attempts": [{"code": 3, "t_us": 0, "credited": 1_000_000_000}],
+            "result": "applied",
+        },
+        default_allow(21),
+        *default_epoch("f"),
+    ]
+    assert run_check(tmp_path.joinpath("log"), records) == 0
+
+
+def test_inspect_snapshot_balance_adds_no_credit(tmp_path: Path) -> None:
+    # The restore contributes three tokens once. A read of those same three
+    # tokens supplies no second credit: (20 + 4 - 3) × 10^9 exceeds capacity.
+    snapshot = dict(inspect_record(), u=3_000_000_000, g=2, s=0)
+    records = [
+        *default_epoch(),
+        *(default_allow(s) for s in range(1, 21)),
+        restore_record(),
+        snapshot,
+        *(default_allow(s, g=2) for s in range(1, 5)),
+    ]
+    assert run_check(tmp_path.joinpath("log"), records) == 1
+
+
+@pytest.mark.parametrize("balance_units,expected", [(0, 1), (999_999_999, 1), (1_000_000_000, 0)])
+def test_restore_counts_explicit_units(tmp_path: Path, balance_units: int, expected: int) -> None:
+    # Twenty-one allows cost 21×10^9 units; exactly 10^9 of restore credit is
+    # needed to reduce the frozen window to its 20×10^9-unit capacity.
+    records = [
+        *default_epoch(),
+        *(default_allow(s) for s in range(1, 22)),
+        restore_record(balance_units),
+    ]
+    assert run_check(tmp_path.joinpath("log"), records) == expected
+
+
+@pytest.mark.parametrize("kind", ["clear", "inspect"])
+def test_s8_observation_and_clear_add_no_credit(tmp_path: Path, kind: str) -> None:
+    record = (
+        {"type": "clear", "key_b64url": "YQ", "t_us": 0} if kind == "clear" else inspect_record()
+    )
+    records = [*default_epoch(), *(default_allow(s) for s in range(1, 21)), record]
+    assert run_check(tmp_path.joinpath("log"), records) == 0
+    assert run_check(tmp_path.joinpath("log"), [*records, default_allow(21)]) == 1
+
+
+def test_restore_credit_belongs_to_its_key_and_epoch(tmp_path: Path) -> None:
+    path = tmp_path.joinpath("log")
+    records = [*default_epoch(), *(default_allow(s) for s in range(1, 22))]
+    other_key = dict(restore_record(), key_b64url="Yg")
+    assert run_check(path, [*records, other_key]) == 1
+    other_epoch = dict(restore_record(), epoch_id="f")
+    assert run_check(path, [*records, *default_epoch("f"), other_epoch]) == 1
+
+
+@pytest.mark.parametrize("kind", ["restore", "clear", "inspect"])
+@pytest.mark.parametrize("pending", [False, True])
+def test_s8_records_require_current_epoch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], kind: str, pending: bool
+) -> None:
+    record = (
+        restore_record()
+        if kind == "restore"
+        else {"type": "clear", "key_b64url": "YQ", "t_us": 0}
+        if kind == "clear"
+        else inspect_record()
+    )
+    records = [default_epoch()[0], record] if pending else [record]
+    assert run_check(tmp_path.joinpath("log"), records) == 2
+    assert f"line {len(records)}: field epoch:" in capsys.readouterr().out
+
+
+def test_pending_policy_keeps_current_epoch_for_restore(tmp_path: Path) -> None:
+    # The pending two-token policy cannot validate a three-token restore;
+    # until the epoch record, the current twenty-token policy still applies.
+    pending = dict(default_epoch()[0], capacity=2)
+    records = [
+        *default_epoch(),
+        *(default_allow(s) for s in range(1, 24)),
+        pending,
+        restore_record(),
+        {"type": "epoch", "epoch_id": "f", "origin_ns": 0},
+    ]
+    assert run_check(tmp_path.joinpath("log"), records) == 0
+
+
+@pytest.mark.parametrize("epoch_id", ["", "unknown", "f", 1])
+def test_restore_requires_current_epoch_id(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], epoch_id: object
+) -> None:
+    record = dict(restore_record(), epoch_id=epoch_id)
+    records = [*default_epoch("f"), *default_epoch(), record]
+    assert run_check(tmp_path.joinpath("log"), records) == 2
+    assert "line 5: field epoch_id:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("key_b64url", 1),
+        ("key_b64url", ""),
+        ("key_b64url", "YQ="),
+        ("key_b64url", "_w"),
+        ("key_b64url", "YWFh" * 86),
+        ("balance_units", True),
+        ("balance_units", 1.0),
+        ("balance_units", "1"),
+        ("balance_units", -1),
+        ("balance_units", 20_000_000_001),
+        ("t_us", True),
+        ("t_us", 1.0),
+        ("t_us", "1"),
+        ("t_us", -1),
+        ("t_us", TBOUND // 1000),
+        ("g", True),
+        ("g", 1.0),
+        ("g", "1"),
+        ("g", 0),
+        ("g", 2**53),
+    ],
+)
+def test_restore_validates_each_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object
+) -> None:
+    record = restore_record()
+    record[field] = value
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    output = capsys.readouterr().out
+    assert "line 3:" in output
+    assert f"field {field}:" in output
+
+
+@pytest.mark.parametrize("field", ["key_b64url", "balance_units", "t_us", "g", "epoch_id", "extra"])
+def test_restore_validates_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str
+) -> None:
+    record = restore_record()
+    if field == "extra":
+        record[field] = 0
+    else:
+        del record[field]
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    assert "line 3: field fields:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("field", ["key_b64url", "t_us"])
+@pytest.mark.parametrize("value", [True, 1.0, -1, ""])
+def test_clear_validates_each_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object
+) -> None:
+    record: dict[str, object] = {"type": "clear", "key_b64url": "YQ", "t_us": 0}
+    record[field] = value
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    output = capsys.readouterr().out
+    assert "line 3:" in output
+    assert f"field {field}:" in output
+
+
+@pytest.mark.parametrize("field", ["key_b64url", "t_us", "extra"])
+def test_clear_validates_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str
+) -> None:
+    record: dict[str, object] = {"type": "clear", "key_b64url": "YQ", "t_us": 0}
+    if field == "extra":
+        record[field] = 0
+    else:
+        del record[field]
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    assert "line 3: field fields:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("field", ["u", "t_us", "g", "s", "x_us", "mc"])
+@pytest.mark.parametrize("value", [True, 1.0, "1", -1, 2**53])
+def test_inspect_validates_each_bucket_field(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object
+) -> None:
+    record = inspect_record()
+    record[field] = value
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    output = capsys.readouterr().out
+    assert "line 3:" in output
+    assert f"field {field}:" in output
+
+
+@pytest.mark.parametrize(
+    "field,value", [("present", True), ("present", -1), ("present", 3), ("key_b64url", "")]
+)
+def test_inspect_validates_snapshot_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object
+) -> None:
+    record = inspect_record()
+    record[field] = value
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    output = capsys.readouterr().out
+    assert "line 3:" in output
+    assert f"field {field}:" in output
+
+
+@pytest.mark.parametrize(
+    "field", ["key_b64url", "present", "u", "t_us", "g", "s", "x_us", "mc", "extra"]
+)
+def test_inspect_validates_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str
+) -> None:
+    record = inspect_record()
+    if field == "extra":
+        record[field] = 0
+    else:
+        del record[field]
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 2
+    assert "line 3: field fields:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("present", [0, 2])
+def test_inspect_accepts_absent_and_unreadable_snapshots(tmp_path: Path, present: int) -> None:
+    record: dict[str, object] = {
+        "type": "inspect",
+        "key_b64url": "YQ",
+        "present": present,
+        "u": "",
+        "t_us": "",
+        "g": "",
+        "s": "",
+        "x_us": "",
+        "mc": "",
+    }
+    assert run_check(tmp_path.joinpath("log"), [*default_epoch(), record]) == 0

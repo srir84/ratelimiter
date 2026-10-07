@@ -3,6 +3,8 @@
 package spectest
 
 import (
+	"os"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
@@ -150,4 +152,212 @@ func TestT_CLK_2(t *testing.T) {
 	doneAll(ops)
 	waitMetric(t, d, 0, "rl_clock_lag_microseconds", "", epochReads(d), "after the regression", func(v float64) bool { return v >= 1_900_000 })
 	d.CheckRefModel(t)
+}
+
+// TestT_CLK_3 (SPEC T-CLK-3; CLK-7, STA-9, CFG-6; FLT-11): with an open permit on the key, the
+// high-water mark is deleted (DeleteHwm), or separately corrupted to "x", and the clock steps
+// back 2 s. An acquire then gets the epoch-wide state_integrity_error hwm_missing (or
+// hwm_malformed), never degraded; health turns not_ready (state_lost); status shows hwm empty,
+// and the record still holds no hwm (or "x"): never re-initialized. The permit's release gets
+// code 22 and credits nothing: the key's inspect is unchanged.
+func TestT_CLK_3(t *testing.T) {
+	cases := []struct {
+		name, reason string
+		damage       func(tm *fixtures.Tamper) error
+		stored       func(fields map[string]string) bool // the record's hwm after the refusals
+	}{
+		{"deleted", "hwm_missing", func(tm *fixtures.Tamper) error { return tm.DeleteHwm() },
+			func(f map[string]string) bool { _, ok := f["hwm"]; return !ok }},
+		{"corrupted", "hwm_malformed", func(tm *fixtures.Tamper) error { return tm.CorruptField(keys.EpochKey, "hwm", "x") },
+			func(f map[string]string) bool { return f["hwm"] == "x" }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := fastDriver(t, 1, nil)
+			const key = "clk3"
+			open := allowed(t, d, 0, key)
+			in0 := d.Inspect(key)
+			if err := c.damage(d.Tamper()); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.Clock().Back(2 * second); err != nil {
+				t.Fatal(err)
+			}
+			refusedIntegrity(t, "acquire after the clock went back", d.Acquire(0, key), "epoch", c.reason)
+			if err := waitHealth(d.Limiter(0), "not_ready", "state_lost", time.Now().Add(epochReads(d))); err != nil {
+				t.Error(err)
+			}
+			d.Release(open)
+			storeReply(t, "refund", firstAttempt(t, d, open), 22, c.reason)
+			if st := d.Status(); st.Code != 40 || st.HWM != -1 {
+				t.Errorf("status: %+v, want hwm shown empty", st)
+			}
+			if f := d.Dump()[keys.EpochKey].Fields; !c.stored(f) {
+				t.Errorf("record after the refusals: hwm %q (present %v), want it not re-initialized", f["hwm"], f["hwm"] != "")
+			}
+			if in := d.Inspect(key); !reflect.DeepEqual(in, in0) {
+				t.Errorf("key after the refund: %+v, want unchanged %+v (no credit)", in, in0)
+			}
+			d.Kill(0) // the refund retries until its retention timer
+		})
+	}
+}
+
+// TestT_CLK_4 (SPEC T-CLK-4; CLK-8, API-7a, API-1f, CMP-4): rl:ctl:time set to "abc", to "-5"
+// (raw SET as rl_fixture) or deleted, each on its own driver. An acquire gets clock_error, a
+// release's refund calls get code 21 (the per-attempt capture), a cleanup pass stops with status
+// clock_error, and rladmin start-epoch --replace --expect-epoch <current> exits 4 (without the
+// flag the readable record refuses first: exit 2). Nothing changes: status (hwm included), the
+// key's inspect and the epoch record stay as they were. Once the clock is readable again the
+// refund applies.
+func TestT_CLK_4(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cmd  []string
+	}{
+		{"unreadable", []string{"SET", keys.CtlTimeKey, "abc"}},
+		{"negative", []string{"SET", keys.CtlTimeKey, "-5"}},
+		{"missing", []string{"DEL", keys.CtlTimeKey}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := fastDriver(t, 1, nil)
+			const key = "clk4"
+			t0 := d.Clock().NowNs()
+			d.Done(allowed(t, d, 0, key))
+			open := allowed(t, d, 0, key)
+			st0, in0, rec0 := d.Status(), d.Inspect(key), d.Dump()[keys.EpochKey]
+			if r, err := d.Fixture().Do(c.cmd...); err != nil || r.Kind == '-' {
+				t.Fatalf("%v: %v %s", c.cmd, err, r)
+			}
+			if op := d.Acquire(0, key); op.Kind != limiter.ClockError || op.Permit != nil {
+				t.Errorf("acquire: %v %+v, want clock_error", op.Kind, op.Diag)
+			}
+			d.Release(open)
+			storeReply(t, "refund", firstAttempt(t, d, open), 21, "clock")
+			if rep := d.RunCleanupPass(0); rep.Status != "clock_error" {
+				t.Errorf("pass: %+v, want status clock_error", rep)
+			}
+			adminCode(t, "start-epoch --replace", d.RLAdmin("start-epoch", "--replace", "--expect-epoch", st0.EpochID), 4)
+			adminCode(t, "start-epoch without the flag", d.RLAdmin("start-epoch"), 2)
+			if st, in, rec := d.Status(), d.Inspect(key), d.Dump()[keys.EpochKey]; st != st0 || !reflect.DeepEqual(in, in0) || !reflect.DeepEqual(rec, rec0) {
+				t.Errorf("after the clock errors: status %+v, inspect %+v, record %v; want unchanged %+v, %+v, %v", st, in, rec, st0, in0, rec0)
+			}
+			setClock(t, d, t0)
+			if ev := event(t, d, open); ev.Result != limiter.Applied {
+				t.Errorf("refund once the clock is readable: %+v, want applied", ev)
+			}
+		})
+	}
+}
+
+// clk5Policy is T-CLK-5's deployment (plan S8 Tests (b) choice): the store clock, receipt
+// lifetime 4 s, refund deadline 2 s, outage tolerance 0.5 s and timed passes off; the instance
+// has a max release delay of 0.5 s, a margin of 0.5 s, D 200 ms, refund backoff 50 → 100 ms and
+// 128 refund workers for 128 pending refunds. RCP-8: 0.5 + 2 + 0.5 + 0.5 = 3.5 s ≤ 4 s; §A5.6:
+// 0.1 + 1 + (1 + 3) × 0.2 = 1.9 s ≤ 2 s.
+func clk5Policy() (limiter.Policy, limiter.Instance) {
+	p := driver.FastPolicy()
+	p.ClockSource = limiter.Store
+	p.ReceiptLifetimeNs, p.RefundDeadlineNs, p.OutageToleranceNs = 4_000_000_000, 2_000_000_000, 500_000_000
+	in := driver.FastInstance(p)
+	in.MaxReleaseDelayNs, in.MarginNs = 500_000_000, 500_000_000
+	in.DependencyDeadlineNs = 200_000_000
+	in.RefundBackoffInitialNs, in.RefundBackoffMaxNs = 50_000_000, 100_000_000
+	in.MaxHeldReceipts, in.MaxPendingRefunds, in.RefundWorkers = 128, 128, 128
+	return p, in
+}
+
+// clk5Uptime is the store uptime T-CLK-5 waits for before the restart: 10 s, or RL_CLK5_UPTIME
+// (a Go duration) when it is longer.
+func clk5Uptime(t *testing.T) time.Duration {
+	t.Helper()
+	up := 10 * time.Second
+	if v := os.Getenv("RL_CLK5_UPTIME"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			t.Fatalf("RL_CLK5_UPTIME %q: %v", v, err)
+		}
+		up = max(up, d)
+	}
+	return up
+}
+
+// storeTimeUs waits up to waitMax until the store clock reads at least us (read_epoch's
+// clock_us) and fails the test otherwise.
+func storeTimeUs(t *testing.T, d *driver.Driver, us int64) {
+	t.Helper()
+	deadline := time.Now().Add(waitMax)
+	for d.ReadEpoch().ClockUs < us {
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the store clock did not reach %d µs within %v", us, waitMax)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestT_CLK_5 (SPEC T-CLK-5; CLK-3), durable profile (checked in the store: durableProfile),
+// store clock (clk5Policy). A warm-up allow on another key loads the acquire script and makes
+// the first fsynced write. With at least 10 s of store uptime (RL_CLK5_UPTIME lengthens it), the
+// key is emptied (20 allows) and two of its permits are released and confirmed, leaving two
+// markers that outlive the restart; then the store restarts with its data kept. Budget time continues from the same origin: the clock
+// lag (hwm − clock) is at most 100,000 µs (read_epoch right after the restart, and the
+// instance's gauge after an epoch read); after 2 s idle the refilled key gives 20 allows, the
+// first deciding after every pre-restart decision; a pass after the markers' expiry removes both
+// (no marker or marker index entry left, the bucket kept: its new receipts are unexpired), and a
+// pass after the bucket's eligibility removes it. The durable profile fsyncs every write, so
+// calls that end on the transport alone are sent again (acquireSettled, passSettled).
+func TestT_CLK_5(t *testing.T) {
+	p, in := clk5Policy()
+	d := driver.New(t, driver.Options{Instances: 1, Policy: p, Instance: in, Profile: storeproc.Durable})
+	up := time.Now().Add(clk5Uptime(t)) // the store started before New returned
+	durableProfile(t, d)
+	const key = "clk5"
+	d.Done(allowedSettled(t, d, 0, "clk5-warm"))
+	time.Sleep(time.Until(up.Add(-time.Second)))
+	var ops []driver.Op
+	for range 20 {
+		ops = append(ops, allowedSettled(t, d, 0, key))
+	}
+	for _, op := range ops[2:] {
+		d.Done(op)
+	}
+	var markerExpiry int64
+	for _, op := range ops[:2] {
+		releaseConfirmed(t, d, op)
+		markerExpiry = max(markerExpiry, expiryOf(op))
+	}
+	if in := d.Inspect(key); in.MC != 2 {
+		t.Fatalf("before the restart: %+v, want the two markers", in)
+	}
+	before := ops[19].DecisionNs
+	time.Sleep(time.Until(up))
+	d.Store().Stop()
+	d.RestartStore()
+	if e := d.ReadEpoch(); e.HWM-e.ClockUs > 100_000 {
+		t.Errorf("after the restart: hwm %d − clock %d = %d µs, want at most 100,000", e.HWM, e.ClockUs, e.HWM-e.ClockUs)
+	}
+	time.Sleep(2 * time.Second) // idle: the key refills to capacity (10 tokens/s, from 2 tokens)
+	waitMetric(t, d, 0, "rl_clock_lag_microseconds", "", epochReads(d), "after the restart", func(v float64) bool { return v <= 100_000 })
+	var after []driver.Op
+	for k := range 20 {
+		op := acquireSettled(t, d, 0, key)
+		if op.Kind != limiter.Allowed {
+			t.Fatalf("allow %d after 2 s idle: %v %+v, want allowed", k+1, op.Kind, op.Diag)
+		}
+		after = append(after, op)
+	}
+	doneAll(after)
+	if after[0].DecisionNs <= before {
+		t.Errorf("first decision after the restart at %d ns, want after the last one before it, %d", after[0].DecisionNs, before)
+	}
+	storeTimeUs(t, d, markerExpiry)
+	passSettled(t, d, 0)
+	if in := d.Inspect(key); in.Present != 1 || in.MC != 0 || len(in.Expiries) != 0 {
+		t.Errorf("after the pass past the markers' expiry: %+v, want the bucket with no marker left", in)
+	}
+	storeTimeUs(t, d, expiryOf(after[19])+1_000_000) // x passed, refilled long before
+	passSettled(t, d, 0)
+	if in := d.Inspect(key); in.Present != 0 {
+		t.Errorf("after the pass past the bucket's eligibility: %+v, want it removed", in)
+	}
 }

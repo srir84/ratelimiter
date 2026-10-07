@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand/v2"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -16,6 +17,7 @@ import (
 
 	"ratelimiter/harness/driver"
 	"ratelimiter/harness/fixtures"
+	"ratelimiter/internal/keys"
 	"ratelimiter/limiter"
 )
 
@@ -186,7 +188,9 @@ func goroutines(t *testing.T) int {
 // TestDesign_SeparateDeployments (DESIGN §C4, §A5.2; F32): two drivers in one process, each
 // with its own store and policy (A: the default; B: capacity 40 at 3 tokens per 7 s), use the
 // same key names. Interleaved sequential traffic matches each driver's own reference model.
-// Closing all of A's instances leaves B's results matching its model, and the goroutine
+// ReplaceEpoch on A (S8), whose instances join the new epoch within the join tolerance, leaves
+// B's epoch (id, fp) unchanged, B's instances ready in it, and B's further results matching its
+// model. Closing all of A's instances leaves B's results matching its model, and the goroutine
 // count returns to its value just before A's instances were built (A starts with none and
 // adds 3, plan choice), so B's goroutines are untouched.
 func TestDesign_SeparateDeployments(t *testing.T) {
@@ -224,6 +228,20 @@ func TestDesign_SeparateDeployments(t *testing.T) {
 	}
 	traffic([]*driver.Driver{a, b}, 90)
 	a.CheckRefModel(t)
+	b.CheckRefModel(t)
+	eb := b.ReadEpoch()
+	start := time.Now()
+	idA := a.ReplaceEpoch()
+	waitAllJoined(t, a, idA, start.Add(joinTolerance(a)))
+	if e := b.ReadEpoch(); e.ID != eb.ID || e.FP != eb.FP {
+		t.Errorf("B's epoch after A's replace: %s %s, want %s %s", e.ID, e.FP, eb.ID, eb.FP)
+	}
+	for i := range 3 {
+		if h := b.Limiter(i).Health(); h.Status != "ready" || h.EpochID != eb.ID {
+			t.Errorf("B's instance %d after A's replace: %s/%s in %q, want ready in %s", i, h.Status, h.Reason, h.EpochID, eb.ID)
+		}
+	}
+	traffic([]*driver.Driver{b}, 30)
 	b.CheckRefModel(t)
 	for i := range 3 {
 		a.Close(i)
@@ -584,4 +602,161 @@ func TestDesign_MetamorphicCleanup(t *testing.T) {
 	mustEqualRuns(t, base, other, 1, 0)
 	d1.CheckRefModel(t)
 	d2.CheckRefModel(t)
+}
+
+// rollbackTraffic makes n new keys named prefix-<k>, one allow each on alternating instances
+// (allowedSettled: the instances redial after a store restart), finished with done(), with the
+// controlled clock stepping 250 ms after every 4th: hwm and gen grow.
+func rollbackTraffic(t *testing.T, d *driver.Driver, prefix string, n int) {
+	t.Helper()
+	for k := range n {
+		d.Done(allowedSettled(t, d, k%d.Instances(), fmt.Sprintf("%s-%02d", prefix, k)))
+		if k%4 == 3 {
+			step(t, d, 250_000_000)
+		}
+	}
+}
+
+// restoreAndCheckHold replaces the stopped store's data with the copy in dir, restarts it, and
+// checks DESIGN §C4's rollback rule (§A5.7): among acquires sent on every instance from the
+// moment the restored store is up, none is allowed, and within one re-read interval + 100 ms
+// status shows the hold store_rollback and every instance reports not_ready (integrity_hold).
+func restoreAndCheckHold(t *testing.T, d *driver.Driver, dir string) {
+	t.Helper()
+	d.Store().Stop()
+	if err := d.Store().ReplaceDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	d.RestartStore()
+	up := time.Now()
+	deadline := up.Add(joinTolerance(d))
+	held := func() bool {
+		if d.Status().Hold != "store_rollback" {
+			return false
+		}
+		for i := range d.Instances() {
+			if h := d.Limiter(i).Health(); h.Status != "not_ready" || h.Reason != "integrity_hold" {
+				return false
+			}
+		}
+		return true
+	}
+	ok := false
+	for n := 0; !ok; n++ {
+		for i := range d.Instances() {
+			if op := d.Acquire(i, fmt.Sprintf("rollback-after-%d", n%5)); op.Kind == limiter.Allowed {
+				t.Errorf("acquire on instance %d after the restored store came up: allowed", i)
+				d.Done(op)
+			}
+		}
+		ok = held()
+		if !ok && !time.Now().Before(deadline) {
+			break
+		}
+	}
+	if !ok {
+		hs := make([]string, d.Instances())
+		for i := range hs {
+			h := d.Limiter(i).Health()
+			hs[i] = h.Status + "/" + h.Reason
+		}
+		t.Fatalf("%v after the restored store came up: status %+v, health %v; want hold store_rollback and every instance integrity_hold within %v",
+			time.Since(up), d.Status(), hs, joinTolerance(d))
+	}
+	t.Logf("hold store_rollback on every instance %v after the restored store came up", time.Since(up))
+	for i := range d.Instances() {
+		if op := d.Acquire(i, "rollback-after-0"); op.Kind != limiter.StateIntegrityError {
+			t.Errorf("instance %d under the hold: %v, want state_integrity_error", i, op.Kind)
+		}
+	}
+}
+
+// TestDesign_RollbackHold (DESIGN §C4, §A5.7; plan S8 Tests (a)), closed mode, two instances:
+// (same epoch) after traffic, the stopped store's data directory is copied; the store restarts
+// and more traffic advances the clock 3 s and creates keys, so hwm and gen grow (and every
+// instance reads them); then the copy replaces the data and the store restarts. (earlier
+// epoch) epoch A's data is copied, ReplaceEpoch starts B, every instance joins it and B serves;
+// then A's copy is restored. Both: no acquire sent after the restored store is up is allowed, and
+// within one re-read interval + 100 ms status shows the hold store_rollback and every instance
+// reports integrity_hold.
+func TestDesign_RollbackHold(t *testing.T) {
+	t.Run("same_epoch", func(t *testing.T) {
+		d := fastDriver(t, 2, nil)
+		rollbackTraffic(t, d, "before", 8)
+		dir := filepath.Join(t.TempDir(), "copy")
+		d.Store().Stop()
+		if err := d.Store().CopyDataDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		d.RestartStore()
+		for i := range d.Instances() {
+			if err := d.WaitReady(i, waitMax); err != nil {
+				t.Fatal(err)
+			}
+		}
+		e0 := d.ReadEpoch()
+		rollbackTraffic(t, d, "after", 48)
+		if e := d.ReadEpoch(); e.HWM < e0.HWM+3_000_000 || e.Gen <= e0.Gen {
+			t.Fatalf("after the copy: hwm %d, gen %d; want hwm 3 s past %d and gen past %d", e.HWM, e.Gen, e0.HWM, e0.Gen)
+		}
+		time.Sleep(joinTolerance(d)) // every instance's epoch read takes the grown hwm and gen as floors
+		restoreAndCheckHold(t, d, dir)
+	})
+	t.Run("earlier_epoch", func(t *testing.T) {
+		d := fastDriver(t, 2, nil)
+		rollbackTraffic(t, d, "epoch-a", 8)
+		dir := filepath.Join(t.TempDir(), "copy-a")
+		d.Store().Stop()
+		if err := d.Store().CopyDataDir(dir); err != nil {
+			t.Fatal(err)
+		}
+		d.RestartStore()
+		start := time.Now()
+		idB := d.ReplaceEpoch()
+		waitAllJoined(t, d, idB, start.Add(joinTolerance(d)))
+		rollbackTraffic(t, d, "epoch-b", 8)
+		restoreAndCheckHold(t, d, dir)
+	})
+}
+
+// TestDesign_ReclaimOldEpoch (DESIGN §A4.7; plan S8 Tests (a)): epoch A gets 5,000 keys; the
+// driver replaces the epoch (ReplaceEpoch: admin_start_epoch with replace) and both instances
+// join B within the join tolerance; B gets 100 keys. After at most 3 completed passes per
+// instance, rl:e:<A>:* is empty, all 100 of B's buckets are there, and the instances'
+// rl_reclaim_keys_total add up to A's key count.
+func TestDesign_ReclaimOldEpoch(t *testing.T) {
+	d := fastDriver(t, 2, nil)
+	idA := d.ReadEpoch().ID
+	for k := range 5000 {
+		d.Done(allowed(t, d, k%2, fmt.Sprintf("reclaim-a-%04d", k)))
+	}
+	aKeys := len(d.StoreKeys("rl:e:" + idA + ":*"))
+	start := time.Now()
+	idB := d.ReplaceEpoch()
+	waitAllJoined(t, d, idB, start.Add(joinTolerance(d)))
+	var want []string
+	for k := range 100 {
+		key := fmt.Sprintf("reclaim-b-%03d", k)
+		d.Done(allowed(t, d, k%2, key))
+		want = append(want, keys.BucketKey(idB, b64(key)))
+	}
+	slices.Sort(want)
+	for round := 0; round < 3 && len(d.StoreKeys("rl:e:"+idA+":*")) > 0; round++ {
+		for i := range d.Instances() {
+			passOK(t, d, i)
+		}
+	}
+	if left := d.StoreKeys("rl:e:" + idA + ":*"); len(left) != 0 {
+		t.Errorf("after 3 passes per instance %d of epoch A's %d keys are left, want none", len(left), aKeys)
+	}
+	if got := d.StoreKeys("rl:e:" + idB + ":k:*"); !slices.Equal(got, want) {
+		t.Errorf("epoch B's buckets: %d keys, want its %d", len(got), len(want))
+	}
+	reclaimed := 0.0
+	for i := range d.Instances() {
+		reclaimed += metric(t, d, i, "rl_reclaim_keys_total", "")
+	}
+	if reclaimed != float64(aKeys) {
+		t.Errorf("rl_reclaim_keys_total over the instances: %v, want epoch A's %d keys", reclaimed, aKeys)
+	}
 }

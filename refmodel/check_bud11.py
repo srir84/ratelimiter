@@ -15,6 +15,10 @@ position, validated against all epoch records and each epoch's preceding policy.
 DECISIONS S7: cleanup_scan {t_us} records each pass page's due-entry read,
 whose reply T0 stores the CLK-4 budget time. Scans require a current epoch and
 bounded microsecond time; scans and cleanup steps change no BUD-11a window.
+DECISIONS S8: successful restore records credit their explicit balance_units at
+t_us in the current epoch; a restore must name that epoch. Clear and inspect
+records change no window. A policy and epoch pair begins independent accounting
+for every key in the new epoch, including when the policy remains unchanged.
 """
 
 import sys
@@ -36,7 +40,10 @@ from refmodel.replay import (
     string,
     validate_cleanup,
     validate_cleanup_scan,
+    validate_clear,
     validate_finish,
+    validate_inspect,
+    validate_restore,
 )
 
 
@@ -111,6 +118,7 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
     current = ""
     policies: dict[str, Policy] = {}
     allows: dict[tuple[str, bytes], list[int]] = {}
+    credits: dict[tuple[str, bytes], list[tuple[int, int]]] = {}
     receipts: dict[str, dict[str, object]] = {}
     releases: set[str] = set()
     references: dict[str, int] = {}
@@ -155,6 +163,20 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
             validate_cleanup_scan(record, line)
             if not current:
                 raise RecordError(f"line {line}", "epoch", "needs current epoch")
+        elif kind in {"restore", "clear", "inspect"}:
+            if not current:
+                raise RecordError(f"line {line}", "epoch", "needs current epoch")
+            if kind == "restore":
+                key = validate_restore(record, line, policies[current])
+                if string(record, "epoch_id", line) != current:
+                    raise RecordError(f"line {line}", "epoch_id", "needs current epoch")
+                credits.setdefault((current, key), []).append(
+                    (integer(record, "t_us", line) * 1000, integer(record, "balance_units", line))
+                )
+            elif kind == "clear":
+                validate_clear(record, line)
+            else:
+                validate_inspect(record, line)
         elif kind == "acquire":
             shape(
                 record,
@@ -225,7 +247,6 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
                 line for line, record in read_records(path) if record.get("epoch_id") == epoch
             )
             raise RecordError(f"line {line}", "epoch_id", "unknown epoch")
-    credits: dict[tuple[str, bytes], list[tuple[int, int]]] = {}
     unknown: dict[tuple[str, bytes], list[tuple[int, int]]] = {}
     for deduction in releases | refunds.keys():
         receipt = receipts.get(deduction)

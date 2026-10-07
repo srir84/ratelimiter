@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,13 +29,16 @@ import (
 
 // recTB is a testing.TB that records failures and skips instead of acting on them, so a
 // test can check what a driver check reports. Its Fatal methods return: the driver returns
-// right after each.
+// right after each. While exit is set (setExit), they end the calling goroutine after
+// recording (runtime.Goexit), as testing.T's do, so a test can check that no code after a
+// driver call runs.
 type recTB struct {
 	testing.TB
 	mu      sync.Mutex
 	errs    []string
 	fatals  []string
 	skipped bool
+	exit    bool
 }
 
 func (r *recTB) add(to *[]string, s string) {
@@ -43,13 +47,24 @@ func (r *recTB) add(to *[]string, s string) {
 	*to = append(*to, s)
 }
 
+func (r *recTB) fatal(s string) {
+	r.mu.Lock()
+	r.fatals = append(r.fatals, s)
+	exit := r.exit
+	r.mu.Unlock()
+	if exit {
+		runtime.Goexit()
+	}
+}
+
+func (r *recTB) setExit(on bool)              { r.mu.Lock(); r.exit = on; r.mu.Unlock() }
 func (r *recTB) Helper()                      {}
 func (r *recTB) Error(args ...any)            { r.add(&r.errs, fmt.Sprint(args...)) }
 func (r *recTB) Errorf(f string, args ...any) { r.add(&r.errs, fmt.Sprintf(f, args...)) }
 func (r *recTB) Fail()                        { r.add(&r.errs, "Fail") }
-func (r *recTB) Fatal(args ...any)            { r.add(&r.fatals, fmt.Sprint(args...)) }
-func (r *recTB) Fatalf(f string, args ...any) { r.add(&r.fatals, fmt.Sprintf(f, args...)) }
-func (r *recTB) FailNow()                     { r.add(&r.fatals, "FailNow") }
+func (r *recTB) Fatal(args ...any)            { r.fatal(fmt.Sprint(args...)) }
+func (r *recTB) Fatalf(f string, args ...any) { r.fatal(fmt.Sprintf(f, args...)) }
+func (r *recTB) FailNow()                     { r.fatal("FailNow") }
 func (r *recTB) Skip(...any)                  { r.skip() }
 func (r *recTB) Skipf(string, ...any)         { r.skip() }
 func (r *recTB) SkipNow()                     { r.skip() }

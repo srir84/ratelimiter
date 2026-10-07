@@ -59,9 +59,13 @@ type epochRecord struct {
 }
 
 // epochWatch is the epoch watch of DESIGN §A5.7: one goroutine (run) that reads read_epoch on
-// a call connection at startup, every EpochRereadIntervalNs, and early after an acquire's
-// epoch-wide config_error or state_integrity_error, at most once per interval. Until its
-// first successful read the state is no_epoch: New never waits for the store (plan choice).
+// a call connection at startup, every EpochRereadIntervalNs, and early after an epoch-wide
+// config_error or state_integrity_error reply to an acquire, a refund attempt or a cleanup pass
+// (plan S8 step 2), at most once per interval. Until its first successful read the state is
+// no_epoch: New never waits for the store (plan choice). Acquire, each refund attempt and each
+// cleanup pass build their commands from the snapshot they load (the joined epoch's namespace
+// and its floors), so after a switch to a new epoch_id every later command carries the new
+// namespace and the floors reset to the new record's values (§A4.1, §A5.7).
 type epochWatch struct {
 	l        *Limiter
 	interval time.Duration

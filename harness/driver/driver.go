@@ -1,17 +1,19 @@
 //go:build rltest
 
 // Package driver is the direct library driver (DESIGN §C4; HARNESS §9.4; IMPLEMENTATION_PLAN
-// S5 steps 10, 11 and 16, S6 steps 10 and 13, S7 step 11): one fast-profile store per driver,
-// its controlled time and epoch, and N limiter instances built through limitertest, each with
-// its own store wrapper, signer wrapper, send observer, refund listener and signing-key canary.
-// It logs every acquire, permit finish, final refund event, clock step, cleanup step and
-// cleanup page read for the reference model (CheckRefModel), captures every refund attempt and
-// cleanup step, reads the store as the ACL users the plan names (StartEpoch, ReadEpoch, Status
-// and Inspect as rl_admin; the clock and Fixture as rl_fixture; Dump, StoreKeys, SetHold and the
-// audit as rl_lib; Info as rl_ops), restarts the store with its data kept, and at teardown,
-// once every instance is closed or killed and while the store still runs, checks the commands
-// and refund attempts each instance sent, audits the store and its AOF files, and checks
-// BUD-11 on the op log.
+// S5 steps 10, 11 and 16, S6 steps 10 and 13, S7 step 11, S8 steps 5 and 10): one store per
+// driver (the fast profile unless Options.Profile says otherwise), its controlled time and
+// epoch, and N limiter instances built through limitertest, each with its own store wrapper,
+// signer wrapper, send observer, refund listener and signing-key canary. It logs every acquire,
+// permit finish, final refund event, clock step, cleanup step, cleanup page read, epoch start or
+// replace, restore, clear and inspect snapshot for the reference model (CheckRefModel),
+// captures every refund attempt and cleanup step, reads the store as the ACL users the plan
+// names (StartEpoch, ReadEpoch, Status and Inspect as rl_admin; the clock, Fixture and Tamper as
+// rl_fixture; Dump, StoreKeys, SetHold and the audit as rl_lib; Info as rl_ops), runs rladmin as
+// rl_admin (RLAdmin, ReplaceEpoch, Restore, Clear, LogInspect), restarts the store with its data
+// kept, and at teardown, once every instance is closed or killed and while the store still
+// runs, checks the commands and refund attempts each instance sent, audits the store and its
+// AOF files, and checks BUD-11 on the op log.
 //
 // The methods that read the store or build instances fail the test through the driver's
 // testing.TB, so call them from the test's goroutine; Acquire and the accessors may run on
@@ -82,6 +84,9 @@ type Options struct {
 	Instance  limiter.Instance // the instance settings; the zero value is DefaultInstance(Policy)
 	NoEpoch   bool             // start no epoch (StartEpoch starts it later)
 	StartNs   int64            // the first controlled time; 0 is DefaultStartNs
+	// Profile is the store's deployment profile: the zero value is storeproc.Fast; durability
+	// tests (T-INT-11, T-CLK-5) take storeproc.Durable.
+	Profile storeproc.Profile
 	// PerInstance holds a spec for each of the first instances New builds.
 	PerInstance []InstanceSpec
 }
@@ -180,10 +185,12 @@ type Driver struct {
 	insts    []*instance      // the current instance of each index
 	all      []*instance      // every instance ever built, for teardown
 	oplog    [][]byte         // op-log lines, without their newline
-	logged   int              // acquire, release, done, cleanup and cleanup_scan records in the op log
-	policies []limiter.Policy // every policy an epoch was started with
-	damaged  []string         // keys written through Fixture
+	logged   int              // acquire, release, done, cleanup, cleanup_scan, restore and clear records in the op log
+	policies []limiter.Policy // every policy an epoch was started or replaced with
+	damaged  []string         // keys written through Fixture (and so through Tamper)
+	restored []string         // the k:<enc> of every key an rladmin restore or clear wrote
 	wiped    bool             // a FLUSHALL or FLUSHDB went through Fixture
+	adminDir string           // where RLAdmin writes policy files, made on first use
 	permits  map[string]*permitRec
 	attempts map[string][]RefundAttempt // by deduction_id
 	canaries map[int][]byte             // each index's signing-key canary, when the driver chose it
@@ -216,7 +223,7 @@ func (in *instance) sends() []Send {
 	return slices.Clone(in.sent)
 }
 
-// New spawns a fast-profile store, writes the controlled time, starts the epoch (unless
+// New spawns a store of o.Profile, writes the controlled time, starts the epoch (unless
 // NoEpoch) and builds o.Instances instances, waiting (≤ 5 s) until each one that shares the
 // epoch's fingerprint and the driver's store options is ready. t.Cleanup closes every instance, runs the teardown checks while the
 // store still runs (cleanups run last-in, first-out, and the store's was registered first),
@@ -239,7 +246,7 @@ func New(t testing.TB, o Options) *Driver {
 		t: t, policy: p, inst: in,
 		permits: map[string]*permitRec{}, attempts: map[string][]RefundAttempt{}, canaries: map[int][]byte{},
 	}
-	d.st = storeproc.Start(t, storeproc.Options{Profile: storeproc.Fast})
+	d.st = storeproc.Start(t, storeproc.Options{Profile: o.Profile})
 	t.Cleanup(d.cleanup)
 	cc, err := d.st.Conn("rl_fixture")
 	if err != nil {
@@ -426,6 +433,27 @@ func (d *Driver) WaitReady(i int, within time.Duration) error {
 	}
 }
 
+// WaitJoined waits up to within until instance i reports ready in epoch id (its health's
+// epoch_id): after a replace, an instance stays ready in the old epoch until its next epoch
+// read (§A5.7).
+func (d *Driver) WaitJoined(i int, id string, within time.Duration) error {
+	in := d.current(i)
+	if in == nil {
+		return fmt.Errorf("driver: no instance %d", i)
+	}
+	deadline := time.Now().Add(within)
+	for {
+		h := in.l.Health()
+		if h.Status == "ready" && h.EpochID == id {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("driver: instance %d not ready in epoch %s within %v: %s/%s in epoch %q (%s)", i, id, within, h.Status, h.Reason, h.EpochID, h.StoreError)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
 // Kill stops instance i at once (limitertest.Kill), within killWait (killBounded).
 func (d *Driver) Kill(i int) {
 	if in := d.current(i); in != nil {
@@ -593,9 +621,9 @@ func (d *Driver) acquire(ctx context.Context, i int, key, tag string) Op {
 }
 
 // StartEpoch starts an epoch with the driver's policy as rl_admin (admin_start_epoch, ADM-1;
-// rladmin replaces this in S8): a new 16-byte crypto/rand id, fingerprint.Of(policy), the
-// policy's clock source, no replace flag. It logs a policy record and the epoch record with
-// origin_ns from the reply's budget time, and returns the id.
+// the S8 epoch replaces go through rladmin: ReplaceEpoch): a new 16-byte crypto/rand id,
+// fingerprint.Of(policy), the policy's clock source, no replace flag. It logs a policy record
+// and the epoch record with origin_ns from the reply's budget time, and returns the id.
 func (d *Driver) StartEpoch() string {
 	d.t.Helper()
 	var raw [16]byte

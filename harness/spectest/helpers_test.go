@@ -5,10 +5,12 @@ package spectest
 import (
 	"fmt"
 	"math/big"
+	"slices"
 	"testing"
 	"time"
 
 	"ratelimiter/harness/driver"
+	"ratelimiter/internal/store"
 	"ratelimiter/limiter"
 )
 
@@ -137,3 +139,163 @@ func waitUntil(deadline time.Time, cond func() bool) bool {
 
 // token is one token of p in units: rate_period_ns (BUD-13).
 func token(p limiter.Policy) int64 { return p.RatePeriodNs }
+
+// modes are the failure modes of a "both modes" test: one subtest per mode, each with its own
+// driver and epoch, since the mode is fingerprinted (plan S8 Tests (b)).
+func modes() []limiter.FailureMode { return []limiter.FailureMode{limiter.Closed, limiter.Open} }
+
+// modeDriver returns fastDriver(t, n, edit) with failure_mode mode.
+func modeDriver(t *testing.T, n int, mode limiter.FailureMode, edit func(*limiter.Policy, *limiter.Instance)) *driver.Driver {
+	t.Helper()
+	return fastDriver(t, n, func(p *limiter.Policy, in *limiter.Instance) {
+		p.FailureMode = mode
+		if edit != nil {
+			edit(p, in)
+		}
+	})
+}
+
+// bothModes runs f in one subtest per failure mode, each on its own driver of n instances
+// (modeDriver).
+func bothModes(t *testing.T, n int, edit func(*limiter.Policy, *limiter.Instance), f func(t *testing.T, d *driver.Driver)) {
+	t.Helper()
+	for _, m := range modes() {
+		t.Run(m.String(), func(t *testing.T) { f(t, modeDriver(t, n, m, edit)) })
+	}
+}
+
+// joinTolerance is the plan's join tolerance (S8 Tests (b), as for T-CFG-2): one re-read
+// interval + 100 ms.
+func joinTolerance(d *driver.Driver) time.Duration { return interval(d) + 100*time.Millisecond }
+
+// refusedIntegrity fails the test unless op is a state_integrity_error of scope ("key" or
+// "epoch") and reason, with no permit: never degraded, in either mode (STA-9, API-9).
+func refusedIntegrity(t *testing.T, what string, op driver.Op, scope, reason string) {
+	t.Helper()
+	if op.Kind != limiter.StateIntegrityError || op.Permit != nil || op.Diag.Scope != scope || op.Diag.Reason != reason {
+		t.Errorf("%s: %v %+v (permit %v), want state_integrity_error, scope %s, reason %s, no permit", what, op.Kind, op.Diag, op.Permit != nil, scope, reason)
+	}
+}
+
+// firstAttempt waits up to waitMax for the first refund call of op's permit to return from the
+// store adapter, and returns it.
+func firstAttempt(t *testing.T, d *driver.Driver, op driver.Op) driver.RefundAttempt {
+	t.Helper()
+	var as []driver.RefundAttempt
+	if !waitUntil(time.Now().Add(waitMax), func() bool { as = d.RefundAttempts(op); return len(as) > 0 }) {
+		t.Fatalf("no refund call of %q returned within %v", op.Key, waitMax)
+	}
+	return as[0]
+}
+
+// storeReply fails the test unless refund attempt a reached the store and its adapter returned
+// code with reason.
+func storeReply(t *testing.T, what string, a driver.RefundAttempt, code int64, reason string) {
+	t.Helper()
+	if !a.Reached || a.Store.Outcome != store.OK || a.Store.Reply.Code != code || a.Store.Reply.Reason != reason {
+		t.Errorf("%s: refund attempt reached %v, store outcome %v, reply %d %q; want reply %d %q", what, a.Reached, a.Store.Outcome, a.Store.Reply.Code, a.Store.Reply.Reason, code, reason)
+	}
+}
+
+// sameBucket reports whether two inspects show the same bucket: presence, u, t, g, s, x, the
+// marker count and the marker expiries (not the index score or the quarantine flag).
+func sameBucket(a, b driver.Inspect) bool {
+	return a.Code == b.Code && a.Present == b.Present && a.U == b.U && a.T == b.T && a.G == b.G && a.S == b.S &&
+		a.X == b.X && a.MC == b.MC && slices.Equal(a.Expiries, b.Expiries)
+}
+
+// waitAllHealth waits until every instance of d reports status and reason, by deadline.
+func waitAllHealth(t *testing.T, d *driver.Driver, status, reason string, deadline time.Time) {
+	t.Helper()
+	for i := range d.Instances() {
+		if err := waitHealth(d.Limiter(i), status, reason, deadline); err != nil {
+			t.Errorf("instance %d: %v", i, err)
+		}
+	}
+}
+
+// waitAllJoined waits until every instance of d is ready in epoch id, by deadline.
+func waitAllJoined(t *testing.T, d *driver.Driver, id string, deadline time.Time) {
+	t.Helper()
+	for i := range d.Instances() {
+		if err := d.WaitJoined(i, id, time.Until(deadline)); err != nil {
+			t.Error(err)
+		}
+	}
+}
+
+// durableProfile fails the test unless d's store runs the durable profile (plan S8 Tests (b):
+// T-INT-11 and T-CLK-5; deploy/valkey-durable.conf): CONFIG GET appendfsync, run as rl_ops,
+// answers always (the fast profile's is no).
+func durableProfile(t *testing.T, d *driver.Driver) {
+	t.Helper()
+	c, err := d.Store().Conn("rl_ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	r, err := c.Do("CONFIG", "GET", "appendfsync")
+	if err != nil || len(r.Arr) != 2 || r.Arr[0].Str != "appendfsync" || r.Arr[1].Str != "always" {
+		t.Fatalf("CONFIG GET appendfsync as rl_ops: %v, %v; want appendfsync always (the durable profile)", r, err)
+	}
+}
+
+// acquireSettled acquires key on instance i, again while the result is a transport failure
+// (unavailable or outcome_unknown with an empty Diag: a connection a store restart closed and
+// the adapter has not redialed yet, or a call past its deadline D, §A5.4), up to waitMax, and
+// returns the first other result. Tests use it where the store restarts or fsyncs every write
+// (the durable profile) and the transport is not what they check; an outcome_unknown may have
+// charged, which leaves fewer allows, never more (check_bud11 counts it as no charge).
+func acquireSettled(t *testing.T, d *driver.Driver, i int, key string) driver.Op {
+	t.Helper()
+	deadline := time.Now().Add(waitMax)
+	for {
+		op := d.Acquire(i, key)
+		transport := (op.Kind == limiter.Unavailable || op.Kind == limiter.OutcomeUnknown) && op.Diag == (limiter.Diag{})
+		if !transport || !time.Now().Before(deadline) {
+			return op
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// allowedSettled is acquireSettled that fails the test unless the result is allowed.
+func allowedSettled(t *testing.T, d *driver.Driver, i int, key string) driver.Op {
+	t.Helper()
+	op := acquireSettled(t, d, i, key)
+	if op.Kind != limiter.Allowed || op.Permit == nil {
+		t.Fatalf("acquire of %q on instance %d: %v (%+v), want allowed", key, i, op.Kind, op.Diag)
+	}
+	return op
+}
+
+// releaseConfirmed releases op's permit and fails the test unless its final event confirms the
+// refund: applied, or already_applied when an attempt's reply was lost after the store applied
+// it (API-14).
+func releaseConfirmed(t *testing.T, d *driver.Driver, op driver.Op) limiter.RefundEvent {
+	t.Helper()
+	d.Release(op)
+	ev := event(t, d, op)
+	if ev.Result != limiter.Applied && ev.Result != limiter.AlreadyApplied {
+		t.Fatalf("release of %q (%s): %+v, want applied or already_applied", op.Key, op.Permit.DeductionID(), ev)
+	}
+	return ev
+}
+
+// passSettled runs cleanup passes on instance i until one completes, again while a pass stops on
+// the transport alone (transportStop), up to waitMax, and fails the test otherwise.
+func passSettled(t *testing.T, d *driver.Driver, i int) limiter.CleanupReport {
+	t.Helper()
+	deadline := time.Now().Add(waitMax)
+	for {
+		rep := d.RunCleanupPass(i)
+		if rep.Status == "complete" {
+			return rep
+		}
+		if !transportStop(rep) || !time.Now().Before(deadline) {
+			t.Fatalf("cleanup pass on instance %d: %+v, want complete", i, rep)
+			return rep
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}

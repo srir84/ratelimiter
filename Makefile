@@ -92,17 +92,19 @@ test-store-quick: bin/trace
 # (RL_SCRIPT_AUDIT=1, read only in internal/testutil/scriptrun). Every L2 test file carries
 # //go:build scripttest, so make test-unit starts no store. Both runs append the replies they
 # observe to a fresh .out/replies-l2.jsonl, so bin/trace replies reads only this target's
-# (never an earlier run's, or a mutant's).
+# (never an earlier run's, or a mutant's). Both also run cmd/rladmin's L2 test,
+# TestStoreInfoAndRewrite (IMPLEMENTATION_PLAN S8 step 8).
 .PHONY: test-scripts
 test-scripts: bin/trace
 	rm -f .out/replies-l2.jsonl
-	$(TRACE) gotest -o .out/test-scripts.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
-	RL_SCRIPT_AUDIT=1 $(TRACE) gotest -o .out/test-scripts-audit.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/...
+	$(TRACE) gotest -o .out/test-scripts.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/... ./cmd/rladmin/...
+	RL_SCRIPT_AUDIT=1 $(TRACE) gotest -o .out/test-scripts-audit.json -- -tags scripttest -count=1 -timeout 20m ./internal/scripts/... ./internal/testutil/storestate/... ./internal/testutil/scriptrun/... ./cmd/rladmin/...
 
 # L3 library integration through the direct driver (DESIGN §C1, §C4; IMPLEMENTATION_PLAN S5
-# step 13): every package under -tags rltest, with -race.
+# step 13): every package under -tags rltest, with -race. It builds first, so the driver finds
+# bin/test/rladmin (IMPLEMENTATION_PLAN S8 step 8); bin/trace stays the first prerequisite.
 .PHONY: test-integration
-test-integration: bin/trace
+test-integration: bin/trace build
 	$(TRACE) gotest -o .out/test-integration.json -- -tags rltest -race -count=1 -timeout 30m ./limiter/... ./limitertest/... ./internal/core/... ./harness/fixtures/... ./harness/driver/... ./harness/spectest/...
 
 # The Python tests (DESIGN §C1; IMPLEMENTATION_PLAN S5 step 13), shuffled by the root
