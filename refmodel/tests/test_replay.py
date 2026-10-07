@@ -1,9 +1,12 @@
 import copy
 import json
 from pathlib import Path
+from types import CodeType, FunctionType
 
 import pytest
 
+from refmodel import replay as replay_module
+from refmodel.model import Model, Policy, RefundDecision
 from refmodel.replay import main
 
 
@@ -109,6 +112,7 @@ def test_detects_each_field(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     assert run(path, records) == 1
     assert "line 5:" in capsys.readouterr().out
     check_refund_fields(tmp_path, capsys)
+    check_cleanup_fields(tmp_path, capsys)
     test_capacity_policy_sensitivity(tmp_path, capsys)
     test_exit_zero_equivalences(tmp_path)
     # Error replies compare zero-valued numeric fields as well.
@@ -171,6 +175,7 @@ def test_exit_zero_equivalences(tmp_path: Path) -> None:
         "unavailable",
         "degraded",
         "outcome_unknown",
+        "state_integrity_error",
     ],
 )
 def test_neutral(tmp_path: Path, result: str) -> None:
@@ -179,6 +184,44 @@ def test_neutral(tmp_path: Path, result: str) -> None:
     neutral["result"] = result
     records.insert(3, neutral)
     assert run(tmp_path.joinpath("log.jsonl"), records) == 0
+
+
+def test_state_integrity_error_anywhere(tmp_path: Path) -> None:
+    # Neutral reply numbers are opaque, including before there is a model.
+    neutral = dict(acquire(37, 0, 9000), result="state_integrity_error")
+    records = [neutral, log()[0], neutral, *log()[1:], neutral]
+    assert run(tmp_path.joinpath("log.jsonl"), records) == 0
+
+
+@pytest.mark.parametrize("before_epoch", [False, True])
+@pytest.mark.parametrize("field", ["deduction_id", "epoch_id"])
+def test_state_integrity_error_empty_ids(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], before_epoch: bool, field: str
+) -> None:
+    neutral = dict(acquire(0, 0), result="state_integrity_error")
+    records = [neutral, *log()] if before_epoch else [*log(), neutral]
+    path = tmp_path.joinpath("log.jsonl")
+    assert run(path, records) == 0
+    neutral[field] = "unexpected"
+    assert run(path, records) == 1
+    assert f"{field}: expected '', actual 'unexpected'" in capsys.readouterr().out
+
+
+def test_state_integrity_error_preserves_budget_and_hwm(tmp_path: Path) -> None:
+    # A's first allow leaves 1000 at hwm=0. The refusal at 5 us must neither
+    # spend/refill that budget nor store time: the regressed allow uses 0,
+    # spends the remaining 1000 and retains sequence 2, then limits.
+    records = [
+        *log()[:4],
+        {"type": "clock", "value_ns": 5000},
+        dict(acquire(0, 0), result="state_integrity_error"),
+        {"type": "clock", "value_ns": 0},
+        acquire(0, 2),
+        acquire(0, 0),
+    ]
+    path = tmp_path.joinpath("log.jsonl")
+    assert run(path, records[:5] + records[6:]) == 0
+    assert run(path, records) == 0
 
 
 @pytest.mark.parametrize(
@@ -386,3 +429,339 @@ def test_mutants(tmp_path: Path, name: str) -> None:
         )
     assert run(path, records) == 0
     assert main(["--mutant", name, str(path)]) == 1
+
+
+def moved_cleanup_log() -> list[dict[str, object]]:
+    # At 0, two deductions leave 0 and the first receipt's refund restores 1000.
+    # The marker expires at 10 us. An acquire at 9 us leaves 1000,
+    # extends x to 19 us; cleanup at 10 removes only the old marker.
+    # A clock regression to 9 us still uses cleanup's hwm of 10 us.
+    return [
+        *refund_log()[:7],
+        {"type": "clock", "value_ns": 9000},
+        acquire(1000, 3, 9000),
+        {"type": "clock", "value_ns": 10000},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 10, "code": 31},
+        {"type": "clock", "value_ns": 9000},
+        acquire(1000, 4, 10000),
+    ]
+
+
+def check_cleanup_fields(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path.joinpath("cleanup.jsonl")
+    original = moved_cleanup_log()
+    assert run(path, original) == 0
+    for field in ("code", "t_us"):
+        for delta in (-1, 1):
+            records = copy.deepcopy(original)
+            value = records[10][field]
+            assert isinstance(value, int)
+            records[10][field] = value + delta
+            assert run(path, records) == 1, (field, delta)
+            output = capsys.readouterr().out
+            assert f"line 11: {field}:" in output
+            assert f"expected {value!r}, actual {value + delta!r}" in output
+    # Changing the input key by one byte changes the actual cleanup outcome.
+    for key in ("YA", "Yg"):
+        records = copy.deepcopy(original)
+        records[10]["key_b64url"] = key
+        assert run(path, records) == 1
+        assert "line 11:" in capsys.readouterr().out
+    records = copy.deepcopy(original)
+    del records[10]
+    assert run(path, records) == 1
+    assert "line 12:" in capsys.readouterr().out
+
+
+def test_cleanup_removed_and_new_generation(tmp_path: Path) -> None:
+    # At x=10 us the balance has refilled to 2000, so removal is legal.
+    # Recreating the key starts at 2000, deducts 1000 and allocates g=2.
+    records = [
+        *log()[:4],
+        {"type": "clock", "value_ns": 10000},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 10, "code": 30},
+        acquire(1000, 1, 10000, g=2),
+    ]
+    path = tmp_path.joinpath("cleanup.jsonl")
+    assert run(path, records) == 0
+    del records[5]
+    assert run(path, records) == 1
+
+
+def test_cleanup_moved_marker_removal_and_hwm(tmp_path: Path) -> None:
+    assert run(tmp_path.joinpath("cleanup.jsonl"), moved_cleanup_log()) == 0
+
+
+def test_cleanup_uses_hwm_after_clock_regression(tmp_path: Path) -> None:
+    # A's marker expires at 10 us, its latest receipt at 19 us. B's allow
+    # stores hwm=10 us, so a raw clock of 0 still removes A's expired marker,
+    # keeps A at 2000 units, and the next deduction leaves 1000 units.
+    records = [
+        *refund_log()[:7],
+        {"type": "clock", "value_ns": 9000},
+        acquire(1000, 3, 9000),
+        {"type": "clock", "value_ns": 10000},
+        acquire(1000, 1, 10000, key="Yg", g=2),
+        {"type": "clock", "value_ns": 0},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 10, "code": 31},
+        acquire(1000, 4, 10000),
+    ]
+    assert run(tmp_path.joinpath("cleanup.jsonl"), records) == 0
+
+
+@pytest.mark.parametrize("gone", [False, True])
+def test_cleanup_skipped(tmp_path: Path, capsys: pytest.CaptureFixture[str], gone: bool) -> None:
+    # At 9 us a present bucket is not due (x=10). Both skipped replies carry
+    # budget time 9 us, but store nothing: the later regressed allow uses 0.
+    records: list[dict[str, object]] = [
+        *log()[:4],
+        {"type": "clock", "value_ns": 9000},
+        {
+            "type": "cleanup",
+            "key_b64url": "Yg" if gone else "YQ",
+            "t_us": 9,
+            "code": 33,
+        },
+        {"type": "clock", "value_ns": 0},
+        acquire(0, 2),
+    ]
+    path = tmp_path.joinpath("cleanup.jsonl")
+    assert run(path, records) == 0
+    for wrong_time in (7, 8, 10):
+        changed = copy.deepcopy(records)
+        changed[5]["t_us"] = wrong_time
+        assert run(path, changed) == 1
+        assert f"line 6: t_us: expected 9, actual {wrong_time}" in capsys.readouterr().out
+
+
+def test_cleanup_clock_bound_mismatch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    bound = (2**53 - 2**43) * 1000  # DESIGN A3.1, hand-derived.
+    path = tmp_path.joinpath("cleanup.jsonl")
+    records = [
+        *log()[:2],
+        {"type": "clock", "value_ns": bound - 1000},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": bound // 1000 - 1, "code": 33},
+    ]
+    assert run(path, records) == 0
+    for clock in (bound, bound + 1000):
+        records[2]["value_ns"] = clock
+        records[3]["t_us"] = 0
+        assert run(path, records) == 1
+        assert "line 4: code: expected 'clock_error', actual 33" in capsys.readouterr().out
+
+
+def test_cleanup_between_policy_and_epoch(tmp_path: Path) -> None:
+    records = [
+        *log()[:2],
+        log()[0],
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 0, "code": 33},
+        {"type": "epoch", "epoch_id": "f", "origin_ns": 0},
+    ]
+    assert run(tmp_path.joinpath("cleanup.jsonl"), records) == 0
+
+
+def test_cleanup_scan_stores_hwm_and_checks_time(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The pass at 5 us has nothing due (A expires at 10). Its page read still
+    # stores hwm=5000. Refill caps A at 2000; the regressed allow leaves 1000,
+    # uses sequence 2 and expires at 15 us. Without the scan, it leaves 0.
+    records = [
+        *log()[:4],
+        {"type": "clock", "value_ns": 5000},
+        {"type": "cleanup_scan", "t_us": 5},
+        {"type": "clock", "value_ns": 0},
+        acquire(1000, 2, 5000),
+    ]
+    path = tmp_path.joinpath("cleanup_scan.jsonl")
+    assert run(path, records) == 0
+    for t_us in (4, 6):
+        changed = copy.deepcopy(records)
+        changed[5]["t_us"] = t_us
+        assert run(path, changed) == 1
+        assert f"line 6: t_us: expected 5, actual {t_us}" in capsys.readouterr().out
+    # A second page read after regression must retain the same cutoff.
+    records.insert(7, {"type": "cleanup_scan", "t_us": 5})
+    assert run(path, records) == 0
+    records[7]["t_us"] = 0
+    assert run(path, records) == 1
+    assert "line 8: t_us: expected 5, actual 0" in capsys.readouterr().out
+    without_scan = [*records[:5], records[6], records[-1]]
+    assert run(path, without_scan) == 1
+    assert "line 7: u: expected 0, actual 1000" in capsys.readouterr().out
+    without_scan[-1] = acquire(0, 2)
+    assert run(path, without_scan) == 0
+
+
+def test_cleanup_scan_validation(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path.joinpath("cleanup_scan.jsonl")
+    bound_us = 2**53 - 2**43
+    for t_us in (0, bound_us - 1):
+        records = [
+            *log()[:2],
+            {"type": "clock", "value_ns": t_us * 1000},
+            {"type": "cleanup_scan", "t_us": t_us},
+        ]
+        assert run(path, records) == 0
+    malformed_scans: tuple[dict[str, object], ...] = (
+        {"type": "cleanup_scan"},
+        {"type": "cleanup_scan", "t_us": 0, "extra": 0},
+        {"type": "cleanup_scan", "t_us": True},
+        {"type": "cleanup_scan", "t_us": "0"},
+        {"type": "cleanup_scan", "t_us": -1},
+        {"type": "cleanup_scan", "t_us": bound_us},
+    )
+    for scan in malformed_scans:
+        assert run(path, [*log()[:2], scan]) == 2
+        assert "line 3: field " in capsys.readouterr().out
+    assert run(path, [{"type": "cleanup_scan", "t_us": 0}]) == 2
+    assert "line 1: field type: cleanup_scan before epoch" in capsys.readouterr().out
+
+
+def test_cleanup_quarantined(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Integrity faults have no op-log record; seed the model's quarantine
+    # explicitly to exercise the cleanup reply without inventing a log type.
+    def quarantined_model(policy: Policy, origin_ns: int, name: str = "") -> Model:
+        model = Model(policy, origin_ns)
+        model.acquire(b"a", origin_ns)
+        model.quarantined.add(b"a")
+        model.mutant = name
+        return model
+
+    monkeypatch.setattr(replay_module, "make_model", quarantined_model)
+    records: list[dict[str, object]] = [
+        *log()[:2],
+        {"type": "clock", "value_ns": 10000},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 10, "code": 31},
+    ]
+    assert run(tmp_path.joinpath("cleanup.jsonl"), records) == 0
+
+
+def test_cleanup_after_refund_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The missing bucket is an integrity fault, not an op-log record. Inject
+    # its loss at refund so replay itself transitions the key to quarantine.
+    class MissingBucketModel(Model):
+        def refund(
+            self,
+            key_bytes: bytes,
+            g: int,
+            s: int,
+            expiry_us: int,
+            clock_ns: int,
+            *,
+            epoch_matches: bool = True,
+            max_live_markers: int | None = None,
+            max_markers_per_key: int | None = None,
+        ) -> RefundDecision:
+            self.buckets.pop(key_bytes, None)
+            return super().refund(
+                key_bytes,
+                g,
+                s,
+                expiry_us,
+                clock_ns,
+                epoch_matches=epoch_matches,
+                max_live_markers=max_live_markers,
+                max_markers_per_key=max_markers_per_key,
+            )
+
+    def missing_bucket_model(policy: Policy, origin_ns: int, name: str = "") -> Model:
+        model = MissingBucketModel(policy, origin_ns)
+        model.mutant = name
+        return model
+
+    monkeypatch.setattr(replay_module, "make_model", missing_bucket_model)
+    records: list[dict[str, object]] = [
+        *log()[:4],
+        {"type": "release", "instance": "i", "deduction_id": "YQ:1:1"},
+        {"type": "clock", "value_ns": 1000},
+        dict(
+            refund_log()[6],
+            attempts=[{"code": 23, "t_us": 1, "credited": 0}],
+            result="unresolved",
+        ),
+        {"type": "clock", "value_ns": 10000},
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 10, "code": 31},
+        {"type": "clock", "value_ns": 0},
+        acquire(1000, 1, 10000, key="Yg", g=2),
+    ]
+    path = tmp_path.joinpath("cleanup.jsonl")
+    assert run(path, records) == 0
+    changed = copy.deepcopy(records)
+    changed[8]["code"] = 32
+    assert run(path, changed) == 1
+    assert "line 9: code: expected 31, actual 32" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("code", True),
+        ("code", "30"),
+        ("code", 29),
+        ("code", 34),
+        ("t_us", True),
+        ("t_us", "10"),
+        ("t_us", -1),
+        ("t_us", 2**53 - 2**43),
+        ("key_b64url", 0),
+        ("key_b64url", "!"),
+        ("key_b64url", "YQ="),
+        ("key_b64url", ""),
+        ("key_b64url", "_w"),
+        ("key_b64url", "YWFh" * 86),
+    ],
+)
+def test_cleanup_malformed_fields(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], field: str, value: object
+) -> None:
+    records = [
+        *log()[:2],
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 0, "code": 33},
+    ]
+    records[-1][field] = value
+    assert run(tmp_path.joinpath("cleanup.jsonl"), records) == 2
+    output = capsys.readouterr().out
+    assert "line 3:" in output and f"field {field}:" in output
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "epoch"])
+def test_cleanup_malformed_shape_and_epoch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], change: str
+) -> None:
+    records = [
+        *log()[:2],
+        {"type": "cleanup", "key_b64url": "YQ", "t_us": 0, "code": 33},
+    ]
+    if change == "missing":
+        del records[-1]["code"]
+    elif change == "extra":
+        records[-1]["instance"] = "i"
+    else:
+        records = records[-1:]
+    assert run(tmp_path.joinpath("cleanup.jsonl"), records) == 2
+    output = capsys.readouterr().out
+    assert "line 1:" in output if change == "epoch" else "line 3:" in output
+    assert "field type:" in output if change == "epoch" else "field fields:" in output
+
+
+def test_pb17_units_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_path = Path(replay_module.__file__ or "")
+    source = source_path.read_text()
+    mutation = '            checks.append(("u", expected.u, actual["u"]))\n'
+    assert source.count(mutation) == 1
+    compiled = compile(source.replace(mutation, ""), str(source_path), "exec")
+    replay_code = next(
+        code
+        for code in compiled.co_consts
+        if isinstance(code, CodeType) and code.co_name == "replay"
+    )
+    records = log()
+    records[3]["u"] = 1001
+    path = tmp_path.joinpath("pb17.jsonl")
+    assert run(path, records) == 1
+    monkeypatch.setattr(replay_module, "replay", FunctionType(replay_code, vars(replay_module)))
+    with pytest.raises(AssertionError):
+        assert run(path, records) == 1

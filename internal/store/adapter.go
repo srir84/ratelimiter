@@ -116,10 +116,12 @@ type Adapter interface {
 	// came first, else unavailable (API-1).
 	Call(ctx context.Context, req Request) Response
 	// CallBatch writes the scripts as one pipeline on one connection of reqs[0].Kind, with
-	// no reload: a NOSCRIPT reply sets NoScript for the caller to resend.
+	// no reload: a NOSCRIPT reply sets NoScript for the caller to resend. ctx may carry the
+	// start of the call the pipeline continues (a resend), whose deadline it keeps; a wrapper
+	// passes ctx on.
 	CallBatch(ctx context.Context, reqs []Request) []Response
 	// Do sends one non-script command (SCAN, PING) and returns its raw reply, classified
-	// like a script's.
+	// like a script's; like CallBatch, it keeps the call start ctx may carry.
 	Do(ctx context.Context, kind Kind, args ...string) (resp.Value, Response)
 	// ReadyConns returns the number of ready connections of a kind.
 	ReadyConns(kind Kind) int
@@ -277,11 +279,23 @@ func (a *StoreAdapter) call(ctx context.Context, start time.Time, req Request) R
 }
 
 // CallBatch writes reqs as one pipeline on one connection of reqs[0].Kind, every command
-// with its own byte range, within one deadline min(ctx deadline, start + D). There is no
-// reload: a NOSCRIPT response is OutcomeUnknown with NoScript set, for the cleanup runner
-// to resend (§A5.4). Each SentCommands is 0 or 1.
+// with its own byte range, within one deadline min(ctx deadline, start + D), start being now
+// or the call start ctx carries (withCallStart). There is no reload: a NOSCRIPT response is
+// OutcomeUnknown with NoScript set, for the cleanup runner to resend (§A5.4). Each
+// SentCommands is 0 or 1. It observes rl_store_call_seconds{script} once per request, each
+// with the pipeline's time.
 func (a *StoreAdapter) CallBatch(ctx context.Context, reqs []Request) []Response {
-	return a.callBatch(ctx, time.Now(), reqs)
+	start := time.Now()
+	out := a.callBatch(ctx, callStart(ctx, start), reqs)
+	if a.metrics != nil {
+		d := time.Since(start)
+		for _, req := range reqs {
+			if i, ok := scriptLabel(req.Script.Name); ok {
+				a.metrics.Observe(metrics.StoreCallSeconds, i, d)
+			}
+		}
+	}
+	return out
 }
 
 func (a *StoreAdapter) callBatch(ctx context.Context, start time.Time, reqs []Request) []Response {
@@ -312,11 +326,33 @@ func (a *StoreAdapter) callBatch(ctx context.Context, start time.Time, reqs []Re
 	return out
 }
 
-// Do sends one non-script command (SCAN, PING) within min(ctx deadline, start + D) and
-// returns its raw reply. The Response classifies it like a script's, with no reload and no
-// decoding; Outcome is OK when the reply is not an error reply.
+// Do sends one non-script command (SCAN, PING) within min(ctx deadline, start + D), start
+// being now or the call start ctx carries (withCallStart), and returns its raw reply. The
+// Response classifies it like a script's, with no reload and no decoding; Outcome is OK when
+// the reply is not an error reply.
 func (a *StoreAdapter) Do(ctx context.Context, kind Kind, args ...string) (resp.Value, Response) {
-	return a.do(ctx, time.Now(), kind, args)
+	return a.do(ctx, callStart(ctx, time.Now()), kind, args)
+}
+
+// callStartKey is the context key of the call start withCallStart sets.
+type callStartKey struct{}
+
+// withCallStart returns ctx carrying start, when the call that the commands sent with it
+// continue began: CallBatch and Do then end them at that call's deadline, min(ctx deadline,
+// start + D), instead of a deadline of their own, since one deadline covers the whole call, a
+// NOSCRIPT reload and retry included (§A5.4, API-22). CleanupEntries sends a step's SCRIPT
+// LOAD and resend with it. ctx stays the host's own context, so a command that sent nothing
+// is classified as in any call.
+func withCallStart(ctx context.Context, start time.Time) context.Context {
+	return context.WithValue(ctx, callStartKey{}, start)
+}
+
+// callStart returns the call start ctx carries (withCallStart), else now.
+func callStart(ctx context.Context, now time.Time) time.Time {
+	if s, ok := ctx.Value(callStartKey{}).(time.Time); ok {
+		return s
+	}
+	return now
 }
 
 func (a *StoreAdapter) do(ctx context.Context, start time.Time, kind Kind, args []string) (resp.Value, Response) {

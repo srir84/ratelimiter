@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -524,4 +525,61 @@ func TestT_COR_7(t *testing.T) {
 		t.Errorf("Inspect after the refunds: %+v, want present 0 (no bucket created)", in)
 	}
 	f.Kill(0) // the refund retries until its retention; nothing more to see
+}
+
+// TestT_COR_6 (SPEC T-COR-6; BUD-1, BUD-14): (a) at a frozen t0, key A is exhausted over 3
+// instances (exactly 20 allows, then limited) and 5 of A's receipts are released and applied.
+// At t0 + 3 s key B is exhausted: exactly 20 allows, then limited, so B's latest receipt
+// expires 3 s after A's. After B is exhausted, the other 5 refunds of A's earlier receipts are
+// applied and leave B's stored record (inspect: u, t, g, s, x, mc, ix score, markers)
+// unchanged; no A acquire follows B. (b) At t0 + L + 1 s, L = the policy's receipt lifetime
+// (6 s), A's receipts have expired and B's have not: a pass removes A (its step 30, with its 10
+// markers) and does not touch B, whose record is still what (a) left. B has refilled only: its
+// next allow leaves u = 19 tokens (0 at t0 + 3 s, refilled for 4 s to the cap of 20, one
+// taken), as the reference model gives. The op log matches the reference model.
+func TestT_COR_6(t *testing.T) {
+	d := fastDriver(t, 3, nil)
+	p := d.Policy()
+	t0 := d.Clock().NowNs()
+	as := burst(t, d, "A", 20)
+	for _, op := range as[:5] {
+		releaseApplied(t, d, op)
+	}
+	step(t, d, 3*second)
+	bs := burst(t, d, "B", 20)
+	doneAll(bs)
+	before := d.Inspect("B")
+	if before.Present != 1 || before.U != 0 || before.S != 20 || before.X != (t0+3*second+p.ReceiptLifetimeNs)/1000 {
+		t.Fatalf("B after its exhaustion: %+v, want u 0, s 20, x = t0 + 3 s + L", before)
+	}
+	for _, op := range as[5:10] {
+		releaseApplied(t, d, op)
+	}
+	doneAll(as[10:])
+	if got := d.Inspect("B"); !reflect.DeepEqual(got, before) {
+		t.Errorf("B after A's 5 later refunds: %+v, want unchanged %+v", got, before)
+	}
+
+	setClock(t, d, t0+p.ReceiptLifetimeNs+second)
+	if rep := passOK(t, d, 0); rep.Removed != 1 || rep.Moved+rep.Skipped+rep.Quarantined != 0 {
+		t.Errorf("pass at t0 + L + 1 s: %+v, want Removed 1 (A) alone", rep)
+	}
+	if steps := d.StepsFor("A"); len(steps) != 1 || steps[0].Code != 30 || steps[0].Markers != 10 {
+		t.Errorf("A's steps %+v, want one 30 removing its 10 markers", steps)
+	}
+	if steps := d.StepsFor("B"); len(steps) != 0 {
+		t.Errorf("B's steps %+v, want none: not due", steps)
+	}
+	if in := d.Inspect("A"); in.Present != 0 {
+		t.Errorf("A after the pass: %+v, want absent", in)
+	}
+	if got := d.Inspect("B"); !reflect.DeepEqual(got, before) {
+		t.Errorf("B after the pass: %+v, want unchanged %+v", got, before)
+	}
+	op := allowed(t, d, 1, "B")
+	if u := op.Reply.Elems[3].Int; u != 19*token(p) {
+		t.Errorf("B's allow at t0 + L + 1 s: u %d, want %d (refill only: the cap, one token taken)", u, 19*token(p))
+	}
+	d.Done(op)
+	d.CheckRefModel(t)
 }

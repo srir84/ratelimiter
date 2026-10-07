@@ -70,8 +70,9 @@ type replyScript struct {
 }
 
 // replyTable is the reply table (DESIGN §A3.3, §A4.1–§A4.9; plan S4 step 15) for the scripts
-// written so far; S6–S8 add the rows of the scripts they write. No call-graph expansion: each
-// script's rows say which replies it can give, the prelude's included.
+// written so far; S6–S8 add the rows of the scripts they write (S7: due_entries, cleanup_entry
+// and reclaim). No call-graph expansion: each script's rows say which replies it can give, the
+// prelude's included.
 func replyTable() []replyScript {
 	// load_epoch's reasons (§A4.2), E_INTEGRITY_EPOCH's list in §A4.9; integrity_hold is also
 	// the reply of hold(…).
@@ -81,6 +82,9 @@ func replyTable() []replyScript {
 		"marker_index_without_bucket", "index_without_bucket", "malformed_bucket", "marker_without_bucket",
 		"malformed_marker", "marker_count", "marker_index_mismatch", "bucket_without_index", "malformed_index",
 	}
+	// cleanup_entry's code 32: check_key's reasons but bucket_without_index, which cannot
+	// occur there, since the step runs only for a key whose ix member exists (§A4.5).
+	cleanupCheckKey := slices.DeleteFunc(slices.Clone(checkKey), func(r string) bool { return r == "bucket_without_index" })
 	// The record checks admin_status and admin_inspect share (§A4.6).
 	record := []string{"epoch_record_missing", "epoch_record_malformed", "epoch_changed"}
 	none := []string{""}
@@ -120,6 +124,39 @@ func replyTable() []replyScript {
 				{"why", []replyCode{{22, loadEpoch}}}, // load_epoch's reason, in the prelude's enter
 				{"b", []replyCode{{23, checkKey}}},    // quarantine(b): check_key's reason
 			},
+		},
+		{
+			script: "due_entries", // §A4.2 (the prelude), §A4.5, §A4.9
+			codes: []replyCode{
+				{0, none}, // a page
+				{20, []string{"epoch_or_fingerprint"}},
+				{21, []string{"clock"}},
+				{22, loadEpoch},
+			},
+			sources: []replySource{
+				{"why", []replyCode{{22, loadEpoch}}}, // load_epoch's reason, in the prelude's enter
+			},
+		},
+		{
+			script: "cleanup_entry", // §A4.1 (keys_mismatch), §A4.2 (the prelude), §A4.5, §A3.3, §A4.9
+			codes: []replyCode{
+				{20, []string{"epoch_or_fingerprint"}},
+				{21, []string{"clock"}},
+				{22, loadEpoch},
+				{25, []string{"keys_mismatch"}},
+				{30, none},                        // E_REMOVED
+				{31, []string{"", "quarantined"}}, // E_MOVED: re-scored, or the push of a quarantined key
+				{32, cleanupCheckKey},             // E_QUARANTINED: check_key's reason
+				{33, []string{"gone", "not_due"}}, // E_SKIPPED
+			},
+			sources: []replySource{
+				{"why", []replyCode{{22, loadEpoch}}},     // load_epoch's reason, in the prelude's enter
+				{"b", []replyCode{{32, cleanupCheckKey}}}, // finish(E_QUARANTINED, b, 0): check_key's reason
+			},
+		},
+		{
+			script: "reclaim", // §A4.7, §A4.9: the count unlinked, 0 when the record is missing or not well-formed
+			codes:  []replyCode{{40, none}},
 		},
 		{
 			script: "read_epoch", // §A4.9: state 0 = healthy, 22 = epoch-wide problem
@@ -169,6 +206,10 @@ func replyData() []replyDatum {
 	return []replyDatum{
 		{"prelude.lua", "to_map", "m"},    // HGETALL's field → value map (§A4.2)
 		{"prelude.lua", "check_key", "b"}, // the bucket check_key returns with 'ok' (§A3.3)
+		// cleanup_entry's due marker fields and mi members, and the other markers' expiries (§A4.5)
+		{"cleanup_entry.lua", "split_markers_by_expiry", "due_fields"},
+		{"cleanup_entry.lua", "split_markers_by_expiry", "due_members"},
+		{"cleanup_entry.lua", "split_markers_by_expiry", "rest"},
 	}
 }
 

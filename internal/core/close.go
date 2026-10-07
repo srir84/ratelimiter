@@ -19,8 +19,9 @@ func WithDrainTimeout(d time.Duration) CloseOption {
 // drain deadline to take the queued events; then its dispatcher is stopped without waiting
 // for a callback that is blocked, and later events are dropped: when Close returns, every
 // event is delivered, dropped and counted, or in a callback still running. Last, the epoch
-// watch stops and every connection closes. Close returns as soon as that is done; a second
-// Close returns at once (plan choice).
+// watch and the cleanup runner stop (a timed pass from Close's start on returns unavailable,
+// sending nothing), and then every connection closes. Close returns as soon as that is done;
+// a second Close returns at once (plan choice).
 func (l *Limiter) Close(opts ...CloseOption) {
 	o := closeOptions{drain: time.Duration(l.in.DrainTimeoutNs)}
 	for _, opt := range opts {

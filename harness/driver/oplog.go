@@ -49,12 +49,24 @@ import (
 //     added to the written record when it returns later (orchestrator decision, S6 task 2);
 //     so is every call with a final code (3, 4, 10, 11) in the record of an unresolved
 //     event: the event counted it, but the retention timer took the permit before that reply
-//     could end it (orchestrator decision, S6 review round 1).
+//     could end it (orchestrator decision, S6 review round 1);
+//   - cleanup {key_b64url, t_us, code} (S7 step 11): one per cleanup_entry step result (codes
+//     30–33) an instance's store adapter returns, before its store wrapper's faults, written
+//     when it returns: a dropped reply keeps its record, while a refused step, which never
+//     ran, a NOSCRIPT reply (its resend has the record) and a refusal (20–22, 25) have none.
+//     key_b64url is the step's ix member (a key's enc is its unpadded base64url; a member
+//     that fails is_enc, from damaged state alone, is not logged), code the reply's code (30
+//     removed, 31 moved, 32 quarantined, 33 skipped) and t_us the reply's t, the step's
+//     budget time (a gone or not_due skip carries it too) (orchestrator decision, S7 task 2);
+//   - cleanup_scan {t_us} (orchestrator decision, S7 task 2): one per due_entries page (code
+//     0) the adapter returns, the same way; t_us is the page's T0, which the page stored as
+//     the high-water mark (CLK-4). A refusal stores nothing and has no record.
 //
 // Ops are logged in completion order, so only tests that issue ops one at a time use the
 // bridge; check_bud11 (teardown) sorts by budget time and takes concurrent logs too. Writes
 // through Fixture, rl:ctl:time included, are not logged: a test that makes them does not use
-// the bridge.
+// the bridge. A timed cleanup pass that runs while the test issues ops logs its records in
+// completion order too, so a test that bridges keeps timed passes off (FastPolicy) or idle.
 
 type policyRecord struct {
 	Type              string `json:"type"`
@@ -119,6 +131,18 @@ type attemptRecord struct {
 	Code     any   `json:"code"`
 	TUs      int64 `json:"t_us"`
 	Credited int64 `json:"credited"`
+}
+
+type cleanupRecord struct {
+	Type      string `json:"type"`
+	KeyB64URL string `json:"key_b64url"`
+	TUs       int64  `json:"t_us"`
+	Code      int64  `json:"code"`
+}
+
+type cleanupScanRecord struct {
+	Type string `json:"type"`
+	TUs  int64  `json:"t_us"`
 }
 
 func policyRecordOf(p limiter.Policy) policyRecord {

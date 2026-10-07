@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"math/rand/v2"
 	"os"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -40,7 +41,14 @@ func preludeClient(t *testing.T) *storeproc.Client {
 // as rl_lib, with no keys and args as ARGV; it returns the reply's elements.
 func evalPrelude(t *testing.T, c *storeproc.Client, body string, args ...string) []storeproc.Reply {
 	t.Helper()
-	sha := mustDo(t, c, "SCRIPT", "LOAD", "#!lua flags=no-writes\n"+preludeLua+body)
+	return evalShadowed(t, c, "", body, args...)
+}
+
+// evalShadowed is evalPrelude with the Lua text before placed ahead of the prelude, so the
+// locals it declares shadow, for the prelude's functions, the globals of the same name.
+func evalShadowed(t *testing.T, c *storeproc.Client, before, body string, args ...string) []storeproc.Reply {
+	t.Helper()
+	sha := mustDo(t, c, "SCRIPT", "LOAD", "#!lua flags=no-writes\n"+before+preludeLua+body)
 	r := mustDo(t, c, append([]string{"EVALSHA", sha.Str, "0"}, args...)...)
 	if r.Kind != '*' {
 		t.Fatalf("reply %s, want an array", r)
@@ -378,6 +386,71 @@ func TestPreludeWriteHelpers(t *testing.T) {
 		for i, r := range got {
 			if r.String() != want[i] {
 				t.Errorf("%s: result %d = %s, want %s (finish's reply 0–3, then the stored hwm, the stored nb, E.nb)", tc.name, i, r, want[i])
+			}
+		}
+	}
+}
+
+// chunkRecorder goes ahead of the prelude: a local redis whose call records each command, its
+// arguments in order, instead of running it, so the prelude's chunked helpers call it.
+const chunkRecorder = `
+local calls = {}
+local redis = { call = function(...) calls[#calls + 1] = { ... } end }
+`
+
+// chunkBody runs hdel_chunked on the hash h and zrem_chunked on the sorted set z, each with
+// the list e1 … en for n = ARGV[1], and returns the recorded commands.
+const chunkBody = `
+local list = {}
+for i = 1, tonumber(ARGV[1]) do
+  list[i] = 'e' .. string.format('%d', i)
+end
+hdel_chunked('h', list)
+zrem_chunked('z', list)
+return calls
+`
+
+// TestPreludeChunkedHelpers (plan S7 step 2 and Watch out; DESIGN §A4.8 rule 3, §A3.0 row 11;
+// AGENTS.md §3 bounded work): hdel_chunked and zrem_chunked send at most 500 list elements per
+// command. With redis.call shadowed by a recorder (no store state is touched), for lists of 0,
+// 500, 501, 1,000 and 1,001 elements: HDEL h and ZREM z each come ⌈n / 500⌉ times and nothing
+// else is called, every command carries 1 to 500 elements, and together each helper's commands
+// carry every element exactly once, so no chunk overlaps another.
+func TestPreludeChunkedHelpers(t *testing.T) {
+	c := preludeClient(t)
+	for _, n := range []int{0, 500, 501, 1000, 1001} {
+		got := evalShadowed(t, c, chunkRecorder, chunkBody, strconv.Itoa(n))
+		want := make([]string, n)
+		for i := range want {
+			want[i] = "e" + strconv.Itoa(i+1)
+		}
+		slices.Sort(want)
+		sent := map[string][]string{} // command → the elements its calls carried
+		calls := map[string]int{}
+		for i, call := range got {
+			if call.Kind != '*' || len(call.Arr) < 2 {
+				t.Fatalf("n = %d: call %d is %s, want [command, key, element…]", n, i+1, call)
+			}
+			name, key, elems := call.Arr[0].Str, call.Arr[1].Str, call.Arr[2:]
+			if (name != "HDEL" || key != "h") && (name != "ZREM" || key != "z") {
+				t.Errorf("n = %d: call %d is %s %s, want only HDEL h and ZREM z", n, i+1, name, key)
+				continue
+			}
+			calls[name]++
+			if len(elems) < 1 || len(elems) > 500 {
+				t.Errorf("n = %d: %s call %d carries %d elements, want 1 to 500", n, name, calls[name], len(elems))
+			}
+			for _, e := range elems {
+				sent[name] = append(sent[name], e.Str)
+			}
+		}
+		for _, name := range []string{"HDEL", "ZREM"} {
+			if wantCalls := (n + 499) / 500; calls[name] != wantCalls {
+				t.Errorf("n = %d: %d %s calls, want %d", n, calls[name], name, wantCalls)
+			}
+			slices.Sort(sent[name])
+			if !slices.Equal(sent[name], want) {
+				t.Errorf("n = %d: %s carried %d elements (sorted, first %q), want each of the %d exactly once", n, name, len(sent[name]), sent[name][:min(3, len(sent[name]))], n)
 			}
 		}
 	}

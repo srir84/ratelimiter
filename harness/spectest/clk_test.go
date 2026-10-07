@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"ratelimiter/harness/driver"
+	"ratelimiter/harness/fixtures"
 	"ratelimiter/internal/keys"
+	"ratelimiter/internal/store"
 	"ratelimiter/internal/testutil/storeproc"
 	"ratelimiter/limiter"
 )
@@ -95,4 +97,57 @@ func TestT_CLK_1(t *testing.T) {
 	if h := d.Limiter(i).Health(); h.ClockSource != "store" {
 		t.Errorf("store-clock instance: health clock_source %q, want store", h.ClockSource)
 	}
+}
+
+// TestT_CLK_2 (SPEC T-CLK-2; CLK-4, CLK-5): R1 and R2 on K at a frozen t0 expire at E = t0 +
+// 6 s. R1's release is applied at t0 with its reply dropped, and its retry is held at a
+// barrier. At E + 1 s a pass removes K with R1's marker (step 30, markers_removed 1). The clock
+// goes back to E − 1 s, 2 s below the high-water mark E + 1 s. R1's retry is then
+// receipt_expired (its budget time is the high-water mark, past E: the expired receipt stays
+// expired with its marker gone), and so is R2's release (same E). Later acquires of K decide
+// at the high-water mark: a new bucket with exactly 20 allows at decision_ns = E + 1 s, as the
+// reference model gives (no extra allowance). After the next epoch read
+// rl_clock_lag_microseconds ≥ 1,900,000 (hwm − clock = 2 s).
+func TestT_CLK_2(t *testing.T) {
+	d := fastDriver(t, 2, nil)
+	d.LoadScripts() // the faults meet R1's refund calls, not a NOSCRIPT round
+	const key = "clk2"
+	r1, r2 := allowed(t, d, 0, key), allowed(t, d, 0, key)
+	e := expiryOf(r1) * 1000
+	arm(t, d, 0, fixtures.Fault{Mode: fixtures.DropReply, Match: "refund", Count: 1})
+	arm(t, d, 0, fixtures.Fault{Mode: fixtures.Barrier, Match: "refund", Count: 1, At: fixtures.BeforeSend, Name: "r1"})
+	d.Release(r1)
+	reached(t, d, 0, "r1")
+	if as := d.RefundAttempts(r1); len(as) != 1 || !as[0].Reached || as[0].Store.Outcome != store.OK || as[0].Store.Reply.Code != 3 {
+		t.Fatalf("R1's first refund: %+v, want applied at the store with its reply lost", as)
+	}
+	if in := d.Inspect(key); in.MC != 1 {
+		t.Fatalf("K before the pass: %+v, want R1's marker", in)
+	}
+
+	hwm := e + second
+	setClock(t, d, hwm)
+	if rep := passOK(t, d, 1); rep.Removed != 1 {
+		t.Errorf("pass at E + 1 s: %+v, want Removed 1", rep)
+	}
+	if steps := d.StepsFor(key); len(steps) != 1 || steps[0].Code != 30 || steps[0].Markers != 1 {
+		t.Fatalf("K's steps %+v, want one 30 removing R1's marker", steps)
+	}
+
+	setClock(t, d, e-second)
+	d.StoreWrapper(0).Release("r1")
+	if ev := event(t, d, r1); ev.Result != limiter.ReceiptExpired {
+		t.Errorf("R1's retry after the regression: %+v, want receipt_expired", ev)
+	}
+	releaseExpired(t, d, r2)
+	ops := burst(t, d, key, 20)
+	for _, op := range ops {
+		if op.DecisionNs != hwm {
+			t.Errorf("acquire after the regression decided at %d, want the high-water mark %d", op.DecisionNs, hwm)
+			break
+		}
+	}
+	doneAll(ops)
+	waitMetric(t, d, 0, "rl_clock_lag_microseconds", "", epochReads(d), "after the regression", func(v float64) bool { return v >= 1_900_000 })
+	d.CheckRefModel(t)
 }

@@ -1,13 +1,20 @@
-"""Replay S5 JSONL records; main is callable in-process.
+"""Replay acquire, refund and cleanup JSONL records; main is callable in-process.
 
 G1: Clocks are legal anywhere and set a nonnegative whole-microsecond reading.
 G2: Neutral and validation_error acquires are legal anywhere and change no state.
+Neutral results include state_integrity_error: no budget or hwm update and no
+model comparison, even before an epoch. G5 requires both IDs to be empty.
 Validation errors are checked solely against API-1, without needing a model.
-G3: allowed, limited, capacity_error, clock_error and receipt_error need an epoch.
+G3: charged/error acquires, cleanup and cleanup_scan records need a current epoch.
 DECISIONS clarification: a policy does not end the current epoch; the next epoch
 record does. Intervening charged/error records use the previous epoch, if any.
 Sequential replay keeps that current-epoch model. Every epoch_id-bearing record
 belongs to that epoch; concurrent grouping is handled by check_bud11.
+DECISIONS S7: cleanup_scan {t_us} records each pass page read's reply T0.
+CLK-4 compares it with max(clock, hwm) // 1000 and stores that budget time,
+even if the page has no due entries. Cleanup steps compare their code and
+budget time, including gone/not-due skips; those skips store nothing.
+Existing quarantines move with code 31; newly detected malformed buckets use 32.
 G4: Each epoch needs a policy since the previous epoch (or log start). Legal
 records may intervene. Epoch IDs must be nonempty and fresh; a pending policy
 at end of log is malformed. A new epoch resets the controlled reading to origin.
@@ -25,7 +32,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from refmodel import RecordError
-from refmodel.model import Decision, Model, Policy
+from refmodel.model import TBOUND, Decision, Model, Policy
 from refmodel.mutants import NAMES, make_model
 
 NEUTRAL = {
@@ -36,6 +43,7 @@ NEUTRAL = {
     "unavailable",
     "degraded",
     "outcome_unknown",
+    "state_integrity_error",
 }
 RESULTS = NEUTRAL | {
     "allowed",
@@ -86,6 +94,30 @@ def decode_key(encoded: str, line: int) -> bytes:
     if base64.urlsafe_b64encode(key).decode().rstrip("=") != encoded:
         raise RecordError(f"line {line}", "key_b64url", "expected canonical unpadded base64url")
     return key
+
+
+def validate_cleanup(record: dict[str, object], line: int) -> bytes:
+    shape(record, {"key_b64url", "t_us", "code"}, line)
+    key = decode_key(string(record, "key_b64url", line), line)
+    if not 1 <= len(key) <= 256:
+        raise RecordError(f"line {line}", "key_b64url", "expected 1..256 UTF-8 bytes")
+    try:
+        key.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RecordError(f"line {line}", "key_b64url", "expected UTF-8 bytes") from error
+    if not 30 <= integer(record, "code", line) <= 33:
+        raise RecordError(f"line {line}", "code", "expected cleanup code 30..33")
+    if not 0 <= integer(record, "t_us", line) < TBOUND // 1000:
+        raise RecordError(f"line {line}", "t_us", "expected bounded budget time")
+    return key
+
+
+def validate_cleanup_scan(record: dict[str, object], line: int) -> int:
+    shape(record, {"t_us"}, line)
+    t_us = integer(record, "t_us", line)
+    if not 0 <= t_us < TBOUND // 1000:
+        raise RecordError(f"line {line}", "t_us", "expected bounded budget time")
+    return t_us
 
 
 SCRIPT_CODES = {
@@ -243,6 +275,31 @@ def replay(path: Path, mutant: str = "") -> int:
                 raise RecordError(
                     f"line {line}", "value_ns", "expected nonnegative microsecond time"
                 )
+        elif kind == "cleanup_scan":
+            t_us = validate_cleanup_scan(record, line)
+            if model is None:
+                raise RecordError(f"line {line}", "type", "cleanup_scan before epoch")
+            budget = max(clock, model.hwm)
+            if t_us != budget // 1000:
+                print(f"line {line}: t_us: expected {budget // 1000!r}, actual {t_us!r}")
+                return 1
+            model.hwm = budget
+        elif kind == "cleanup":
+            key = validate_cleanup(record, line)
+            if model is None:
+                raise RecordError(f"line {line}", "type", "cleanup before epoch")
+            cleanup = model.cleanup_step(key, clock)
+            cleanup_checks = [("code", cleanup.code)]
+            if cleanup.time_known:
+                cleanup_checks.append(("t_us", cleanup.decision_ns // 1000))
+            for cleanup_field, cleanup_wanted in cleanup_checks:
+                cleanup_got = record[cleanup_field]
+                if cleanup_wanted != cleanup_got:
+                    print(
+                        f"line {line}: {cleanup_field}: expected {cleanup_wanted!r}, "
+                        f"actual {cleanup_got!r}"
+                    )
+                    return 1
         elif kind == "acquire":
             shape(
                 record,
@@ -275,7 +332,7 @@ def replay(path: Path, mutant: str = "") -> int:
                         print(f"line {line}: {field}: expected '', actual {identifier!r}")
                         return 1
             if result in NEUTRAL:
-                # No model transition: these outcomes are opaque in the S5 bridge.
+                # G2/S7: neutral outcomes, including integrity errors, change no state.
                 continue
             if result == "validation_error":
                 invalid = not 1 <= len(key) <= 256

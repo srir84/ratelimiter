@@ -15,7 +15,8 @@ import (
 // that drives one deployment of 3 instances and 4 keys through exactly cor1Ops sequential ops
 // (an acquire, a done, a release with its wait for the final event, or a controlled-clock
 // step). TestDesign_MetamorphicTimeShift and TestDesign_MetamorphicScale run it too (plan
-// choice: one shared helper taking a seed, a policy and a time offset).
+// choice: one shared helper taking a seed, a policy and a time offset), and
+// TestDesign_MetamorphicCleanup runs its forward-only variant (workload.forward, S7).
 //
 // Besides random ops, every run builds in, on purpose, at least twice each, what each of the
 // 8 model mutants of refmodel/mutants.py gets wrong (plan S6 Watch out):
@@ -70,14 +71,29 @@ func cor1Policies() []struct {
 
 // cor1 is one run of the workload.
 type cor1 struct {
-	t     *testing.T
-	d     *driver.Driver
-	p     limiter.Policy
-	rng   *rand.Rand
-	keys  []string
-	ops   []cor1Op
-	held  []driver.Op
-	maxNs int64 // the highest controlled time written: the high-water mark is at most this
+	t       *testing.T
+	d       *driver.Driver
+	p       limiter.Policy
+	rng     *rand.Rand
+	keys    []string
+	ops     []cor1Op
+	held    []driver.Op
+	maxNs   int64 // the highest controlled time written: the high-water mark is at most this
+	onlyFwd bool  // forward-only: no step back (workload.forward)
+	afterOp func()
+}
+
+// workload configures one run of the generator.
+type workload struct {
+	seed     uint64
+	policy   limiter.Policy
+	offsetNs int64 // the controlled time starts at driver.DefaultStartNs + offsetNs
+	// forward makes every clock step go forward (TestDesign_MetamorphicCleanup): no sceneBack,
+	// no random step back, and sceneLong, a step past the receipt lifetime, among the scenes.
+	forward bool
+	// afterOp, when set, runs after every op the run records, with the run's driver; it must
+	// not record ops itself.
+	afterOp func(d *driver.Driver)
 }
 
 // runCOR1 runs the workload of seed under p on a fresh driver whose controlled time starts at
@@ -85,11 +101,28 @@ type cor1 struct {
 // the ops.
 func runCOR1(t *testing.T, seed uint64, p limiter.Policy, offsetNs int64) (*driver.Driver, []cor1Op) {
 	t.Helper()
+	return runWorkload(t, workload{seed: seed, policy: p, offsetNs: offsetNs})
+}
+
+// runWorkload runs w on a fresh driver of 3 instances (driver.FastInstance settings), and
+// returns the driver and the ops.
+func runWorkload(t *testing.T, w workload) (*driver.Driver, []cor1Op) {
+	t.Helper()
+	p := w.policy
 	d := driver.New(t, driver.Options{
-		Instances: 3, Policy: p, Instance: driver.FastInstance(p), StartNs: driver.DefaultStartNs + offsetNs,
+		Instances: 3, Policy: p, Instance: driver.FastInstance(p), StartNs: driver.DefaultStartNs + w.offsetNs,
 	})
-	g := &cor1{t: t, d: d, p: p, rng: rand.New(rand.NewPCG(seed, 0x7c01)), keys: cor1Keys(), maxNs: d.Clock().NowNs()}
+	g := &cor1{
+		t: t, d: d, p: p, rng: rand.New(rand.NewPCG(w.seed, 0x7c01)), keys: cor1Keys(), maxNs: d.Clock().NowNs(),
+		onlyFwd: w.forward, afterOp: func() {},
+	}
+	if w.afterOp != nil {
+		g.afterOp = func() { w.afterOp(d) }
+	}
 	scenes := []func(){g.sceneBoundary, g.sceneExpiry, g.sceneFull, g.sceneBack, g.sceneJump}
+	if g.onlyFwd {
+		scenes = []func(){g.sceneBoundary, g.sceneExpiry, g.sceneFull, g.sceneLong, g.sceneJump}
+	}
 	var required []func()
 	for range 2 {
 		required = append(required, scenes...)
@@ -114,9 +147,15 @@ func runCOR1(t *testing.T, seed uint64, p limiter.Policy, offsetNs int64) (*driv
 		g.done(g.held[0])
 	}
 	if len(g.ops) != cor1Ops {
-		t.Fatalf("seed %d: %d ops, want %d", seed, len(g.ops), cor1Ops)
+		t.Fatalf("seed %d: %d ops, want %d", w.seed, len(g.ops), cor1Ops)
 	}
 	return d, g.ops
+}
+
+// record appends op to the run's ops and runs the afterOp hook.
+func (g *cor1) record(op cor1Op) {
+	g.ops = append(g.ops, op)
+	g.afterOp()
 }
 
 // Policy-derived times, in ns, rounded up to whole µs: one token's refill and the refill from
@@ -142,7 +181,7 @@ func (g *cor1) set(ns int64) {
 		g.t.Fatal(err)
 	}
 	g.maxNs = max(g.maxNs, ns)
-	g.ops = append(g.ops, cor1Op{kind: "clock", clockNs: ns})
+	g.record(cor1Op{kind: "clock", clockNs: ns})
 }
 
 func (g *cor1) forward(ns int64) { g.set(g.d.Clock().NowNs() + ns) }
@@ -167,7 +206,7 @@ func (g *cor1) acquire(i int, key string) driver.Op {
 		rec.expiryUs = expiryOf(op)
 		g.held = append(g.held, op)
 	}
-	g.ops = append(g.ops, rec)
+	g.record(rec)
 	if len(g.held) > 6 {
 		g.finish(g.held[0])
 	}
@@ -195,7 +234,7 @@ func (g *cor1) drop(op driver.Op) {
 func (g *cor1) done(op driver.Op) {
 	g.drop(op)
 	g.d.Done(op)
-	g.ops = append(g.ops, cor1Op{kind: "done"})
+	g.record(cor1Op{kind: "done"})
 }
 
 // release releases op and waits for its final event; the op records the result, the credited
@@ -212,7 +251,7 @@ func (g *cor1) release(op driver.Op) limiter.RefundEvent {
 	if as := g.d.RefundAttempts(op); len(as) > 0 && ev.Result == limiter.Applied {
 		rec.units = as[len(as)-1].Credited()
 	}
-	g.ops = append(g.ops, rec)
+	g.record(rec)
 	return ev
 }
 
@@ -389,6 +428,17 @@ func (g *cor1) sceneJump() {
 	}
 }
 
+// sceneLong (forward-only runs): a step past the receipt lifetime, by 1 µs to 2 s more, so
+// every receipt and marker from before it expires and every bucket refills (the time to full
+// is shorter than the lifetime): each bucket last touched before it becomes eligible for
+// cleanup. Then acquires of 2 or 3 keys.
+func (g *cor1) sceneLong() {
+	g.forward(g.p.ReceiptLifetimeNs + g.usBetween(1, 2_000_000))
+	for n := 2 + g.rng.IntN(2); n > 0; n-- {
+		g.acquire(g.inst(), g.key())
+	}
+}
+
 // randomOps runs n random ops.
 func (g *cor1) randomOps(n int) {
 	for range n {
@@ -403,9 +453,14 @@ func (g *cor1) randomOps(n int) {
 	}
 }
 
-// randomStep is one clock step: forward 1 µs to 300 ms (5 in 6) or back (1 in 6).
+// randomStep is one clock step: forward 1 µs to 300 ms (5 in 6) or back (1 in 6); in a
+// forward-only run the 1 in 6 is a step of 1 µs to 2 s forward instead.
 func (g *cor1) randomStep() {
 	if g.rng.IntN(6) == 0 {
+		if g.onlyFwd {
+			g.forward(g.usBetween(1, 2_000_000))
+			return
+		}
 		g.back(g.backStep())
 		return
 	}

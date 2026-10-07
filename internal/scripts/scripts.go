@@ -29,7 +29,7 @@ func New(name, text string) Script {
 //go:embed *.lua
 var files embed.FS
 
-// The scripts written so far (IMPLEMENTATION_PLAN S4, S6), assembled once at package
+// The scripts written so far (IMPLEMENTATION_PLAN S4, S6, S7), assembled once at package
 // initialization and never changed afterwards.
 var (
 	ReadEpoch       = assemble("read_epoch")
@@ -39,6 +39,9 @@ var (
 	AdminInspect    = assemble("admin_inspect")
 	Acquire         = assemble("acquire")
 	Refund          = assemble("refund")
+	DueEntries      = assemble("due_entries")
+	CleanupEntry    = assemble("cleanup_entry")
+	Reclaim         = assemble("reclaim")
 )
 
 // ByName returns the script with the §A4.1 name, and false for a name with no script yet.
@@ -58,6 +61,12 @@ func ByName(name string) (Script, bool) {
 		return Acquire, true
 	case "refund":
 		return Refund, true
+	case "due_entries":
+		return DueEntries, true
+	case "cleanup_entry":
+		return CleanupEntry, true
+	case "reclaim":
+		return Reclaim, true
 	}
 	return Script{}, false
 }

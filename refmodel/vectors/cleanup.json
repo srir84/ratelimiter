@@ -1,0 +1,173 @@
+{
+  "policy": {},
+  "arithmetic": "Default cap=20*1000000000=20000000000 units, refill=10 units/ns, lifetime=60000000000 ns. Twenty deductions at t=0 leave 0; five refunds at t=0 add 5*1000000000=5000000000 and five markers expiring at 60000000 us. At 59999999 us none is due, so cleanup writes nothing even though refill would be full. At 60000000 us acquire refills min(20000000000,5000000000+60000000000*10), deducts 1000000000, leaves 19000000000 and advances latest expiry to 120000000 us. Cleanup with clock=0 uses hwm=60000000000 ns, removes the five expired markers but keeps this bucket (31). Its missing 1000000000 units refill by 60100000000 ns, but x=120000000000 ns keeps the moved deadline at 120000000000 ns. A step at 100000000000 ns therefore skips (33) and leaves hwm=60000000000 ns. At 120000000 us refill adds 60000000000*10, caps at 20000000000, x=t, all markers expired: removed (30). Hwm=120000000000 means a regressed acquire starts a full new generation at that budget time, leaving 19000000000; the old receipt remains expired. A gone-key step at 121000000000 ns reports that budget time but writes nothing.",
+  "steps": [
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "repeat": 20,
+      "expected": {
+        "result": "allowed",
+        "g": 1
+      },
+      "bucket": {
+        "units": 0,
+        "sequence": 20,
+        "latest_expiry_ns": 60000000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 1,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 2,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 3,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 4,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 5,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "applied",
+        "credited": 1000000000
+      },
+      "markers": 5,
+      "bucket": {
+        "units": 5000000000
+      }
+    },
+    {
+      "op": "cleanup",
+      "clock_ns": 59999999000,
+      "expected": {
+        "code": 33,
+        "decision_ns": 59999999000
+      },
+      "hwm": 0,
+      "markers": 5,
+      "bucket": {
+        "units": 5000000000,
+        "time_ns": 0
+      }
+    },
+    {
+      "op": "acquire",
+      "clock_ns": 60000000000,
+      "expected": {
+        "result": "allowed",
+        "u": 19000000000,
+        "g": 1,
+        "s": 21,
+        "expiry_us": 120000000
+      }
+    },
+    {
+      "op": "cleanup",
+      "clock_ns": 0,
+      "expected": {
+        "code": 31,
+        "decision_ns": 60000000000
+      },
+      "markers": 0,
+      "hwm": 60000000000,
+      "bucket": {
+        "units": 19000000000,
+        "sequence": 21,
+        "latest_expiry_ns": 120000000000
+      }
+    },
+    {
+      "op": "cleanup",
+      "clock_ns": 100000000000,
+      "expected": {
+        "code": 33,
+        "decision_ns": 100000000000
+      },
+      "hwm": 60000000000
+    },
+    {
+      "op": "cleanup",
+      "clock_ns": 120000000000,
+      "expected": {
+        "code": 30,
+        "decision_ns": 120000000000
+      },
+      "markers": 0,
+      "hwm": 120000000000,
+      "absent": true
+    },
+    {
+      "op": "acquire",
+      "clock_ns": 0,
+      "expected": {
+        "result": "allowed",
+        "decision_ns": 120000000000,
+        "u": 19000000000,
+        "g": 2,
+        "s": 1,
+        "expiry_us": 180000000
+      }
+    },
+    {
+      "op": "refund",
+      "clock_ns": 0,
+      "g": 1,
+      "s": 2,
+      "expiry_us": 60000000,
+      "expected": {
+        "result": "receipt_expired",
+        "decision_ns": 120000000000
+      }
+    },
+    {
+      "op": "cleanup",
+      "key": "gone",
+      "clock_ns": 121000000000,
+      "expected": {
+        "code": 33,
+        "decision_ns": 121000000000,
+        "time_known": true
+      },
+      "hwm": 120000000000
+    }
+  ]
+}

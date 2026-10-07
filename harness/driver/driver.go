@@ -1,16 +1,17 @@
 //go:build rltest
 
 // Package driver is the direct library driver (DESIGN §C4; HARNESS §9.4; IMPLEMENTATION_PLAN
-// S5 steps 10, 11 and 16, S6 steps 10 and 13): one fast-profile store per driver, its
-// controlled time and epoch, and N limiter instances built through limitertest, each with its
-// own store wrapper, signer wrapper, send observer, refund listener and signing-key canary. It
-// logs every acquire, permit finish, final refund event and clock step for the reference model
-// (CheckRefModel), captures every refund attempt, reads the store as the ACL users the plan
-// names (StartEpoch, ReadEpoch, Status and Inspect as rl_admin; the clock and Fixture as
-// rl_fixture; Dump and the audit as rl_lib; Info as rl_ops), and at teardown, once every
-// instance is closed or killed and while the store still runs, checks the commands and refund
-// attempts each instance sent, audits the store and its AOF files, and checks BUD-11 on the op
-// log.
+// S5 steps 10, 11 and 16, S6 steps 10 and 13, S7 step 11): one fast-profile store per driver,
+// its controlled time and epoch, and N limiter instances built through limitertest, each with
+// its own store wrapper, signer wrapper, send observer, refund listener and signing-key canary.
+// It logs every acquire, permit finish, final refund event, clock step, cleanup step and
+// cleanup page read for the reference model (CheckRefModel), captures every refund attempt and
+// cleanup step, reads the store as the ACL users the plan names (StartEpoch, ReadEpoch, Status
+// and Inspect as rl_admin; the clock and Fixture as rl_fixture; Dump, StoreKeys, SetHold and the
+// audit as rl_lib; Info as rl_ops), restarts the store with its data kept, and at teardown,
+// once every instance is closed or killed and while the store still runs, checks the commands
+// and refund attempts each instance sent, audits the store and its AOF files, and checks
+// BUD-11 on the op log.
 //
 // The methods that read the store or build instances fail the test through the driver's
 // testing.TB, so call them from the test's goroutine; Acquire and the accessors may run on
@@ -25,6 +26,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"strconv"
 	"strings"
@@ -163,7 +165,7 @@ type Driver struct {
 	inst   limiter.Instance
 	clock  *fixtures.Clock
 
-	clockConn *storeproc.Client // the clock's rl_fixture connection
+	clockConn *swapConn // the clock's rl_fixture connection (RestartStore replaces it)
 
 	adminMu sync.Mutex
 	admin   *storeproc.Client // rl_admin
@@ -178,13 +180,14 @@ type Driver struct {
 	insts    []*instance      // the current instance of each index
 	all      []*instance      // every instance ever built, for teardown
 	oplog    [][]byte         // op-log lines, without their newline
-	logged   int              // acquire, release and done records in the op log
+	logged   int              // acquire, release, done, cleanup and cleanup_scan records in the op log
 	policies []limiter.Policy // every policy an epoch was started with
 	damaged  []string         // keys written through Fixture
 	wiped    bool             // a FLUSHALL or FLUSHDB went through Fixture
 	permits  map[string]*permitRec
 	attempts map[string][]RefundAttempt // by deduction_id
 	canaries map[int][]byte             // each index's signing-key canary, when the driver chose it
+	steps    []CleanupStep              // every cleanup step captured, in completion order
 }
 
 // instance is one limiter the driver built, with its wrappers and send records.
@@ -238,10 +241,11 @@ func New(t testing.TB, o Options) *Driver {
 	}
 	d.st = storeproc.Start(t, storeproc.Options{Profile: storeproc.Fast})
 	t.Cleanup(d.cleanup)
-	var err error
-	if d.clockConn, err = d.st.Conn("rl_fixture"); err != nil {
+	cc, err := d.st.Conn("rl_fixture")
+	if err != nil {
 		t.Fatalf("driver: clock connection: %v", err)
 	}
+	d.clockConn = &swapConn{c: cc}
 	if d.admin, err = d.st.Conn("rl_admin"); err != nil {
 		t.Fatalf("driver: admin connection: %v", err)
 	}
@@ -303,7 +307,8 @@ func (d *Driver) AddInstance(spec InstanceSpec) (int, error) {
 
 // build makes instance i from spec, with a fresh store wrapper (in front of which the driver
 // records each acquire's response and each refund attempt, and behind which each refund's
-// response before the faults), signer wrapper, send observer, refund listener (last, so it is
+// response, each cleanup step result and each due_entries page before the faults), signer
+// wrapper, send observer, refund listener (last, so it is
 // the one the limiter keeps) and, unless spec has a key reader, the index's canary as the
 // signing key.
 func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
@@ -320,7 +325,7 @@ func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
 	opts := slices.Concat(spec.Options, []limitertest.Option{
 		limitertest.WithControlledClock(),
 		limitertest.WithStoreWrapper(func(a limitertest.Adapter) limitertest.Adapter {
-			return recorder{Adapter: inst.sw.Wrap(inner{Adapter: a}), d: d, inst: inst}
+			return recorder{Adapter: inst.sw.Wrap(inner{Adapter: a, d: d, inst: inst}), d: d, inst: inst}
 		}),
 		limitertest.WithSignerWrapper(inst.sg.Wrap),
 		limitertest.WithSendObserver(inst.observe),
@@ -421,29 +426,80 @@ func (d *Driver) WaitReady(i int, within time.Duration) error {
 	}
 }
 
-// Kill stops instance i at once (limitertest.Kill).
+// Kill stops instance i at once (limitertest.Kill), within killWait (killBounded).
 func (d *Driver) Kill(i int) {
 	if in := d.current(i); in != nil {
-		limitertest.Kill(in.l)
+		d.killBounded(in)
 	}
 }
 
-// Close closes instance i gracefully.
+// Close closes instance i gracefully, within its drain timeout plus closeSlack (closeBounded).
 func (d *Driver) Close(i int) {
 	if in := d.current(i); in != nil {
-		in.l.Close()
+		d.closeBounded(d.t, in)
+	}
+}
+
+const (
+	// closeSlack is what the driver allows a Close beyond the instance's drain timeout, and
+	// killWait bounds a Kill, which drains nothing (plan choice): past the drain, both only
+	// stop the instance's goroutines, whose store calls end within D, and close its
+	// connections.
+	closeSlack = 5 * time.Second
+	killWait   = 5 * time.Second
+)
+
+// closeBounded closes in and reports, with tb.Errorf, a Close that does not return within the
+// instance's drain timeout (Health's DrainTimeoutNs, below 0 being 0 as for Close) plus
+// closeSlack, such as one waiting for a goroutine of the instance that never stops (§A5.2).
+// The stuck Close is left behind and the caller goes on, so the test's teardown and the
+// store's stop still run.
+func (d *Driver) closeBounded(tb testing.TB, in *instance) {
+	tb.Helper()
+	drain := min(max(in.l.Health().Instance.DrainTimeoutNs, 0), math.MaxInt64-int64(closeSlack))
+	bound := time.Duration(drain) + closeSlack
+	if !returnsWithin(bound, func() { in.l.Close() }) {
+		tb.Errorf("instance %d: Close did not return within %v (its drain timeout plus %v)", in.index, bound, closeSlack)
+	}
+}
+
+// killBounded kills in (limitertest.Kill) and fails the test when Kill does not return within
+// killWait; the stuck Kill is left behind, as in closeBounded.
+func (d *Driver) killBounded(in *instance) {
+	d.t.Helper()
+	if !returnsWithin(killWait, func() { limitertest.Kill(in.l) }) {
+		d.t.Errorf("driver: instance %d: Kill did not return within %v", in.index, killWait)
+	}
+}
+
+// returnsWithin runs f on a goroutine of its own and reports whether f returned within bound.
+// An f that did not keeps running on that goroutine: a call that never returns, which the
+// caller reports as a failure.
+func returnsWithin(bound time.Duration, f func()) bool {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f()
+	}()
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
 	}
 }
 
 // Restart replaces instance i with a new one of the same spec, fresh wrappers and a fresh key
-// reader (InstanceSpec.KeyReader), killing the old one first if it still runs, and returns
-// New's error. It does not wait for the new instance to join (WaitReady).
+// reader (InstanceSpec.KeyReader), killing the old one first if it still runs (killBounded),
+// and returns New's error. It does not wait for the new instance to join (WaitReady).
 func (d *Driver) Restart(i int) error {
 	old := d.current(i)
 	if old == nil {
 		return fmt.Errorf("driver: no instance %d", i)
 	}
-	limitertest.Kill(old.l)
+	d.killBounded(old)
 	inst, err := d.build(i, old.spec)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -720,32 +776,38 @@ func (d *Driver) Info(section string) map[string]string {
 	return storeproc.ParseInfo(r.Str)
 }
 
-// script runs s as rl_admin on the driver's admin connection: EVALSHA, and after NOSCRIPT one
-// SCRIPT LOAD and one resend. The reply must pass store.Decode against its §A4.9 layout; any
-// failure fails the test and reports false.
+// script runs s as rl_admin on the driver's admin connection (scriptOn).
 func (d *Driver) script(s scripts.Script, ks, args []string) (store.Reply, bool) {
 	d.t.Helper()
 	d.adminMu.Lock()
 	defer d.adminMu.Unlock()
+	return d.scriptOn(d.admin, "rl_admin", s, ks, args)
+}
+
+// scriptOn runs s on c, a connection authenticated as user: EVALSHA, and after NOSCRIPT one
+// SCRIPT LOAD and one resend. The reply must pass store.Decode against its §A4.9 layout; any
+// failure fails the test and reports false. The caller owns c for the call.
+func (d *Driver) scriptOn(c *storeproc.Client, user string, s scripts.Script, ks, args []string) (store.Reply, bool) {
+	d.t.Helper()
 	cmd := append([]string{"EVALSHA", s.SHA, strconv.Itoa(len(ks))}, ks...)
 	cmd = append(cmd, args...)
-	r, err := d.admin.Do(cmd...)
+	r, err := c.Do(cmd...)
 	if err == nil && r.Kind == '-' && strings.HasPrefix(r.Str, "NOSCRIPT") {
 		var lr storeproc.Reply
-		if lr, err = d.admin.Do("SCRIPT", "LOAD", s.Text); err == nil && (lr.Kind == '-' || lr.Str != s.SHA) {
+		if lr, err = c.Do("SCRIPT", "LOAD", s.Text); err == nil && (lr.Kind == '-' || lr.Str != s.SHA) {
 			err = fmt.Errorf("SCRIPT LOAD replied %s", lr)
 		}
 		if err == nil {
-			r, err = d.admin.Do(cmd...)
+			r, err = c.Do(cmd...)
 		}
 	}
 	if err != nil {
-		d.t.Fatalf("driver: %s as rl_admin: %v", s.Name, err)
+		d.t.Fatalf("driver: %s as %s: %v", s.Name, user, err)
 		return store.Reply{}, false
 	}
 	rep, err := store.Decode(s.Name, toValue(r), store.LimitsFor(d.policy))
 	if err != nil {
-		d.t.Fatalf("driver: %s as rl_admin: %v (reply %s)", s.Name, err, r)
+		d.t.Fatalf("driver: %s as %s: %v (reply %s)", s.Name, user, err, r)
 		return store.Reply{}, false
 	}
 	return rep, true
@@ -898,7 +960,10 @@ func (d *Driver) cleanup() {
 		_ = d.fixture.c.Close()
 	}
 	d.fixMu.Unlock()
-	for _, c := range []*storeproc.Client{d.clockConn, d.admin, d.ops} {
+	if d.clockConn != nil {
+		_ = d.clockConn.Close()
+	}
+	for _, c := range []*storeproc.Client{d.admin, d.ops} {
 		if c != nil {
 			_ = c.Close()
 		}

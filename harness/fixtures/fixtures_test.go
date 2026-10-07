@@ -5,8 +5,10 @@ package fixtures_test
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -880,5 +882,231 @@ func TestSignerCorruptField(t *testing.T) {
 	}
 	if !s.Verify(signed) {
 		t.Error("corrupt fault with Count 1, second Verify: false, want true (the fault was used up)")
+	}
+}
+
+// batchRec is a store adapter that answers every request with an OK reply and records the
+// budget key (ARGV 3) of each request of each inner CallBatch, batch by batch, and when each
+// batch came.
+type batchRec struct {
+	mu      sync.Mutex
+	batches [][]string
+	at      []time.Time // when each inner CallBatch came
+	calls   []string    // the key of each Call
+}
+
+func (b *batchRec) Call(_ context.Context, req store.Request) store.Response {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.calls = append(b.calls, argKey(req))
+	return store.Response{Outcome: store.OK, Sent: true, SentCommands: 1}
+}
+
+func (b *batchRec) CallBatch(_ context.Context, reqs []store.Request) []store.Response {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var batch []string
+	out := make([]store.Response, len(reqs))
+	for i, r := range reqs {
+		batch = append(batch, argKey(r))
+		out[i] = store.Response{Outcome: store.OK, Sent: true, SentCommands: 1}
+	}
+	b.batches = append(b.batches, batch)
+	b.at = append(b.at, time.Now())
+	return out
+}
+
+func (*batchRec) Do(context.Context, store.Kind, ...string) (resp.Value, store.Response) {
+	return resp.Value{}, store.Response{Outcome: store.OK, Sent: true, SentCommands: 1}
+}
+
+func (*batchRec) ReadyConns(store.Kind) int { return 1 }
+
+func (*batchRec) Close() {}
+
+// sent returns the batches and calls so far.
+func (b *batchRec) sent() ([][]string, []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.batches), slices.Clone(b.calls)
+}
+
+// sentAt returns, by key, when the inner CallBatch that carried the key's request came (the
+// last one for a key sent more than once).
+func (b *batchRec) sentAt() map[string]time.Time {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := map[string]time.Time{}
+	for i, batch := range b.batches {
+		for _, k := range batch {
+			out[k] = b.at[i]
+		}
+	}
+	return out
+}
+
+// argKey is the budget key of an acquire, refund or cleanup_entry request (ARGV 3, the enc,
+// decoded), or "-" for any other request.
+func argKey(req store.Request) string {
+	switch req.Script.Name {
+	case scripts.Acquire.Name, scripts.Refund.Name, scripts.CleanupEntry.Name:
+	default:
+		return "-"
+	}
+	if len(req.Args) < 3 || !keys.IsEnc(req.Args[2]) {
+		return "-"
+	}
+	b, err := base64.RawURLEncoding.DecodeString(req.Args[2])
+	if err != nil {
+		return "-"
+	}
+	return string(b)
+}
+
+// stepReq is a cleanup_entry request for key, and keyed returns one of script s for key: the
+// enc is ARGV 3 of acquire, refund and cleanup_entry alike (§A4.1).
+func stepReq(t *testing.T, key string) store.Request { return keyed(t, scripts.CleanupEntry, key) }
+
+func keyed(t *testing.T, s scripts.Script, key string) store.Request {
+	t.Helper()
+	enc, err := keys.Encode(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store.Request{Kind: store.Maintenance, Script: s, Args: []string{"0123456789abcdef0123456789abcdef", "fp", enc}}
+}
+
+// TestBatchFaultsPerKey (DESIGN §B6 Barriers; plan S7 step 11): a fault armed with a Key acts
+// on the requests for that budget key alone. In a CallBatch of cleanup_entry steps for a, b and
+// c, a before_send barrier with Key b holds b alone while a and c go out together as one batch,
+// and b goes out alone after Release; a refusal with Key c refuses c alone (unavailable, never
+// sent). A Key fault matches an acquire or a refund of its key too (the enc is ARGV 3 of all
+// three), and nothing else: not another key's step, not a script without an enc (due_entries),
+// not a Do. A Key that is no valid budget key is refused at Arm.
+func TestBatchFaultsPerKey(t *testing.T) {
+	rec := &batchRec{}
+	w := fixtures.NewStoreWrapper()
+	a := w.Wrap(rec)
+	t.Cleanup(a.Close)
+	arm := func(f fixtures.Fault) {
+		t.Helper()
+		if err := w.Arm(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	arm(fixtures.Fault{Mode: fixtures.Barrier, Match: "cleanup_entry", Key: "b", Count: 1, At: fixtures.BeforeSend, Name: "b"})
+	ch := make(chan []store.Response, 1)
+	go func() {
+		ch <- a.CallBatch(t.Context(), []store.Request{stepReq(t, "a"), stepReq(t, "b"), stepReq(t, "c")})
+	}()
+	select {
+	case <-w.Reached("b"):
+	case <-time.After(5 * time.Second):
+		t.Fatal("b's step did not reach the barrier within 5s")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if batches, _ := rec.sent(); len(batches) == 1 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if batches, _ := rec.sent(); !slices.EqualFunc(batches, [][]string{{"a", "c"}}, slices.Equal[[]string]) {
+		t.Errorf("while b is held: batches %q, want only [a c]", batches)
+	}
+	select {
+	case rs := <-ch:
+		t.Fatalf("the batch returned %+v before Release", rs)
+	case <-time.After(50 * time.Millisecond):
+	}
+	w.Release("b")
+	var rs []store.Response
+	select {
+	case rs = <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the batch did not return within 5s of Release")
+	}
+	if len(rs) != 3 || rs[0].Outcome != store.OK || rs[1].Outcome != store.OK || rs[2].Outcome != store.OK {
+		t.Errorf("after Release: %+v, want 3 OK responses in order", rs)
+	}
+	if batches, _ := rec.sent(); !slices.EqualFunc(batches, [][]string{{"a", "c"}, {"b"}}, slices.Equal[[]string]) {
+		t.Errorf("after Release: batches %q, want [a c] then [b] alone", batches)
+	}
+
+	arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "cleanup_entry", Key: "c", Count: 1})
+	rs = a.CallBatch(t.Context(), []store.Request{stepReq(t, "a"), stepReq(t, "c"), stepReq(t, "b")})
+	if len(rs) != 3 || rs[0].Outcome != store.OK || rs[1].Outcome != store.Unavailable || rs[1].Sent || rs[2].Outcome != store.OK {
+		t.Errorf("refusal of c: %+v, want a OK, c unavailable and not sent, b OK", rs)
+	}
+	if batches, _ := rec.sent(); len(batches) != 3 || !slices.Equal(batches[2], []string{"a", "b"}) {
+		t.Errorf("refusal of c: batches %q, want a third batch [a b]", batches)
+	}
+
+	// The Key matches acquire and refund calls of its key, and nothing else.
+	arm(fixtures.Fault{Mode: fixtures.Refuse, Key: "k"})
+	due := store.Request{Kind: store.Maintenance, Script: scripts.DueEntries, Args: []string{"0123456789abcdef0123456789abcdef", "fp", "1000", "0", "0", "0"}}
+	for _, c := range []struct {
+		name    string
+		req     store.Request
+		refused bool
+	}{
+		{"acquire of k", keyed(t, scripts.Acquire, "k"), true},
+		{"refund of k", keyed(t, scripts.Refund, "k"), true},
+		{"cleanup_entry of k", stepReq(t, "k"), true},
+		{"acquire of k2", keyed(t, scripts.Acquire, "k2"), false},
+		{"cleanup_entry of a", stepReq(t, "a"), false},
+		{"due_entries", due, false},
+	} {
+		if r := a.Call(t.Context(), c.req); (r.Outcome == store.Unavailable) != c.refused {
+			t.Errorf("%s with a refusal keyed k: outcome %v, refused %v", c.name, r.Outcome, c.refused)
+		}
+	}
+	if _, r := a.Do(t.Context(), store.Maintenance, "SCAN", "0"); r.Outcome != store.OK {
+		t.Errorf("SCAN with a refusal keyed k: outcome %v, want ok", r.Outcome)
+	}
+	if _, calls := rec.sent(); !slices.Equal(calls, []string{"k2", "a", "-"}) {
+		t.Errorf("calls that reached the adapter: %q, want [k2 a -]", calls)
+	}
+	w.Disarm()
+
+	for _, bad := range []string{"\xff", strings.Repeat("x", 257)} {
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Key: bad}); err == nil {
+			t.Errorf("Arm with Key %q: no error, want the key refused", bad)
+		}
+	}
+}
+
+// TestBatchDelaysStartAtEntry (DESIGN §B6 delay; plan S7 step 11): in a CallBatch the wait of
+// every delayed request starts when the batch enters the wrapper. In a batch of cleanup_entry
+// steps for a, b and c, with one Delay fault of 400 ms keyed to a and one keyed to c, b goes to
+// the store at once, and a and c both at least Delay after the call but before 2 × Delay: one
+// wait after the other would hand c over at 2 × Delay or later.
+func TestBatchDelaysStartAtEntry(t *testing.T) {
+	rec := &batchRec{}
+	w := fixtures.NewStoreWrapper()
+	a := w.Wrap(rec)
+	t.Cleanup(a.Close)
+	const delay = 400 * time.Millisecond
+	for _, k := range []string{"a", "c"} {
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.Delay, Match: "cleanup_entry", Key: k, Count: 1, Delay: delay}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	start := time.Now()
+	rs := a.CallBatch(t.Context(), []store.Request{stepReq(t, "a"), stepReq(t, "b"), stepReq(t, "c")})
+	if len(rs) != 3 || rs[0].Outcome != store.OK || rs[1].Outcome != store.OK || rs[2].Outcome != store.OK {
+		t.Errorf("batch with a and c delayed: %+v, want 3 OK responses", rs)
+	}
+	at := rec.sentAt()
+	if b, ok := at["b"]; !ok || b.Sub(start) >= delay {
+		t.Errorf("b handed to the store %v after the call (sent: %v), want at once, before the %v delay", b.Sub(start), ok, delay)
+	}
+	for _, k := range []string{"a", "c"} {
+		sent, ok := at[k]
+		if el := sent.Sub(start); !ok || el < delay || el >= 2*delay {
+			t.Errorf("%s handed to the store %v after the call (sent: %v), want at least %v and below %v: each delayed request's wait starts at the batch's entry",
+				k, el, ok, delay, 2*delay)
+		}
 	}
 }

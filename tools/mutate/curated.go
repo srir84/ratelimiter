@@ -69,6 +69,16 @@ func curatedEntries() []curatedEntry {
 			To:   "redis.call('ZADD', K.ix, 'GT', expiry_us, enc)",
 		},
 		{
+			ID: "PB9", File: "internal/scripts/cleanup_entry.lua", Tests: []string{"TestCleanupEntry_*"},
+			From: "if u == cap_units and b.x <= t and #rest == 0 then -- STA-4 eligibility", // removes a bucket that is not full (STA-4)
+			To:   "if b.x <= t and #rest == 0 then -- STA-4 eligibility",
+		},
+		{
+			ID: "PB10", File: "internal/scripts/due_entries.lua", Tests: []string{"TestDueEntries_*"},
+			From: "write_hwm()", // a page does not store hwm = T0 (§A4.5 cutoff, CLK-4)
+			To:   "",
+		},
+		{
 			ID: "PB11", File: "internal/store/classify.go", Tests: []string{"TestClassifyErrorReplies"},
 			From: "return Unavailable, false", // LOADING/BUSY → outcome_unknown (API-22)
 			To:   "return OutcomeUnknown, false",

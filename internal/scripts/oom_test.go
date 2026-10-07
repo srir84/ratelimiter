@@ -73,3 +73,82 @@ func TestOOMRefusal(t *testing.T) {
 		t.Errorf("maxmemory after the test: %s, want %s", got, old.Arr[1].Str)
 	}
 }
+
+// TestMaintenanceScriptsUnderOOM (plan S7, L2; DESIGN §A4.8 rule 1, §C2 bullet 2): with used
+// memory above maxmemory under noeviction (filler under rl:fill:), the store refuses acquire and
+// refund (plain #!lua) before they run: capacity_error with an OOM store error, the store
+// unchanged. The allow-oom maintenance scripts run and free memory: due_entries returns the due
+// key and stores hwm, cleanup_entry removes its eligible bucket, and reclaim unlinks 100
+// old-epoch keys of 10 KB each, so used_memory drops by at least 0.5 MB. maxmemory is restored
+// afterwards.
+func TestMaintenanceScriptsUnderOOM(t *testing.T) {
+	p := testPolicy()
+	e := newEnv(t, p)
+	e.record(healthy(e.fp))
+	e.clock(now0)
+	e.fullKey(encA, pastX) // eligible at now0
+
+	value := strings.Repeat("f", 10_000)
+	for i := range 200 {
+		e.do("SET", fmt.Sprintf("%s%03d", scriptrun.FillerPrefix, i), value)
+	}
+	old := make([]string, 100) // an old epoch's buckets, 10 KB each
+	for i := range old {
+		enc, err := keys.Encode(fmt.Sprintf("old-%03d", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		old[i] = keys.BucketKey(otherID, enc)
+		e.do("HSET", old[i], "u", value)
+	}
+	ops := dial(t, e.h, "rl_ops")
+	maxmem := mustDo(t, ops, "CONFIG", "GET", "maxmemory")
+	if maxmem.Kind != '*' || len(maxmem.Arr) != 2 {
+		t.Fatalf("CONFIG GET maxmemory: %s", maxmem)
+	}
+	restore := func() {
+		if _, err := ops.Do("CONFIG", "SET", "maxmemory", maxmem.Arr[1].Str); err != nil {
+			t.Errorf("restoring maxmemory: %v", err)
+		}
+	}
+	t.Cleanup(restore) // before the teardown audit, which Store registered earlier
+	usedMemory := func() int64 {
+		t.Helper()
+		used, err := strconv.ParseInt(storeproc.ParseInfo(mustDo(t, ops, "INFO", "memory").Str)["used_memory"], 10, 64)
+		if err != nil {
+			t.Fatalf("used_memory: %v", err)
+		}
+		return used
+	}
+	full := usedMemory()
+	if full < 3_000_000 {
+		t.Fatalf("used_memory %d, want at least the 3 MB of filler and old-epoch data", full)
+	}
+	mustDo(t, ops, "CONFIG", "SET", "maxmemory", strconv.FormatInt(full/2, 10))
+
+	before := e.snap()
+	for _, req := range []store.Request{acquireReq(p, e.fp, encB), refundReq(p, e.fp, encA, gen0, 2, now0+1_000_000)} {
+		r := scriptrun.Run(t, e.la, req)
+		if r.Outcome != store.CapacityError || !strings.HasPrefix(r.StoreError, "OOM") {
+			t.Errorf("%s under OOM: outcome %v, store error %q; want capacity_error with an OOM store error", req.Script.Name, r.Outcome, r.StoreError)
+		}
+	}
+	e.checkUnchanged("acquire and refund under OOM", before)
+
+	checkReply(t, "due_entries", e.run(e.la, dueReq(e.fp, 10, 0)), rep(0, now0, "", pastX, encA))
+	checkReply(t, "cleanup_entry", e.step(encA), rep(30, now0, "", 0))
+	checkReply(t, "reclaim", e.run(e.la, reclaimReq(old...)), rep(40, 0, "", len(old)))
+	if freed := full - usedMemory(); freed < 500_000 {
+		t.Errorf("the maintenance scripts freed %d bytes of used_memory, want at least 500,000", freed)
+	}
+	want := removedState(t, before, encA, now0)
+	for _, k := range old {
+		delete(want, k)
+	}
+	checkState(t, "the maintenance scripts under OOM", e.snap(), want)
+
+	restore()
+	if got := mustDo(t, ops, "CONFIG", "GET", "maxmemory"); len(got.Arr) != 2 || got.Arr[1].Str != maxmem.Arr[1].Str {
+		t.Errorf("maxmemory after the test: %s, want %s", got, maxmem.Arr[1].Str)
+	}
+}

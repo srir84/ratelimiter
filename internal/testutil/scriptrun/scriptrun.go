@@ -160,6 +160,19 @@ type Caller interface {
 	Call(ctx context.Context, req store.Request) store.Response
 }
 
+// Audited reports which variant Run calls (plan S7 step 12): true in the discipline run
+// (RL_SCRIPT_AUDIT=1), where each script is the instrumented variant Instrument builds, and
+// false in the plain run. A test that records script timings records them only when it is
+// false, since the instrumented scripts are slower (see EvidenceRun).
+func Audited() bool { return os.Getenv(AuditEnv) == "1" }
+
+// EvidenceRun reports whether a test may write run evidence such as script timings under
+// .out/ (plan S7 step 12): only in the plain run (not Audited) whose replies go to
+// .out/replies-l2.jsonl, that is with RL_REPLIES_FILE unset. bin/mutate sets RL_REPLIES_FILE
+// for every go test it starts (its test output never reaches .out/*.json), so a run of mutated
+// scripts or code never overwrites the plain run's evidence.
+func EvidenceRun() bool { return !Audited() && os.Getenv(RepliesEnv) == "" }
+
 // Run calls req's script through a, with t's context. With RL_SCRIPT_AUDIT=1 it calls
 // Instrument(req.Script) instead, and an error reply holding AUDIT fails the test with
 // t.Errorf, which is safe from any goroutine; so does a script Instrument cannot rewrite,
@@ -169,7 +182,7 @@ type Caller interface {
 // with O_APPEND|O_CREATE, its directory created when missing; one write per line).
 func Run(t testing.TB, a Caller, req store.Request) store.Response {
 	t.Helper()
-	if os.Getenv(AuditEnv) == "1" {
+	if Audited() {
 		s, err := Instrument(req.Script)
 		if err != nil {
 			t.Errorf("%s: the script discipline run failed: %v", req.Script.Name, err)

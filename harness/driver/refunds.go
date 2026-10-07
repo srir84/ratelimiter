@@ -160,13 +160,21 @@ func (c *refundCall) get() (store.Response, bool) {
 
 // inner sits between an instance's store wrapper and its store adapter: it hands the
 // adapter's response to a refund call, before any fault acts on it, to the capture in the
-// call's context (the wrapper passes the context on).
-type inner struct{ store.Adapter }
+// call's context (the wrapper passes the context on), and each due_entries page and cleanup
+// step result to the driver's op log (cleanup.go).
+type inner struct {
+	store.Adapter
+	d    *Driver
+	inst *instance
+}
 
 func (a inner) Call(ctx context.Context, req store.Request) store.Response {
 	res := a.Adapter.Call(ctx, req)
 	if c, ok := ctx.Value(refundKey{}).(*refundCall); ok {
 		c.set(res)
+	}
+	if a.d != nil && req.Script.Name == scripts.DueEntries.Name {
+		a.d.logScan(res)
 	}
 	return res
 }

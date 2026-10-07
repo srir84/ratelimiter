@@ -43,24 +43,29 @@ type Limiter struct {
 	storeMu  sync.Mutex
 	storeErr string // Health.StoreError
 
-	stop      context.CancelFunc // ends the lifetime context: the watch and the connections
-	wg        sync.WaitGroup     // the watch goroutine
+	passLock      chan struct{}  // capacity 1, held while a cleanup pass runs (cleanup.go)
+	reclaimCursor string         // the reclaimer's SCAN cursor, kept across passes; guarded by passLock
+	cleanupDraw   func() float64 // the cleanup runner's jitter draws (hookSet.cleanupDraw): jitterDraw outside package tests
+
+	stop      context.CancelFunc // ends the lifetime context: the watch, the cleanup runner and the connections
+	wg        sync.WaitGroup     // the watch and cleanup runner goroutines
 	closeOnce sync.Once
 }
 
 // New is production construction (DESIGN §A5.2; limiter.New wraps it): no test hooks, so
-// ClockSource = Controlled is settings_invalid (CMP-9, §A5.12). It never returns nil.
+// ClockSource = Controlled is settings_invalid (CMP-9, §A5.12), and the production jitter
+// draw. It never returns nil.
 func New(p Policy, in Instance, st StoreOptions, opts ...Option) (*Limiter, error) {
-	return newLimiter(p, in, st, hookSet{}, opts)
+	return newLimiter(p, in, st, hookSet{cleanupDraw: jitterDraw}, opts)
 }
 
 // newLimiter builds a limiter for New and NewWithHooks (DESIGN §A5.2): it validates the
 // settings (CFG-4, §A3.1, RCP-8, §A5.6), generates the signing key from crypto/rand or the
 // hook reader (RCP-4), computes the fingerprint (§A5.9), starts the store adapter (§A5.4), the
-// refund listener's dispatcher (§A5.11), the refund workers (§A5.6) and the epoch watch
-// (§A5.7). Any failure gives a non-nil limiter that is permanently not ready
-// (settings_invalid) and opens no connection, plus the error for the host to log. The error
-// names the failed rule, never a setting's value or the store password.
+// refund listener's dispatcher (§A5.11), the refund workers (§A5.6), the epoch watch (§A5.7)
+// and the cleanup runner (§A5.8). Any failure gives a non-nil limiter that is permanently not
+// ready (settings_invalid) and opens no connection, plus the error for the host to log. The
+// error names the failed rule, never a setting's value or the store password.
 func newLimiter(p Policy, in Instance, st StoreOptions, h hookSet, opts []Option) (*Limiter, error) {
 	born := time.Now() // the origin of the refund events' monotonic times (plan S6 step 6)
 	var o options
@@ -72,7 +77,8 @@ func newLimiter(p Policy, in Instance, st StoreOptions, h hookSet, opts []Option
 	reg := metrics.NewRegistry()
 	l := &Limiter{
 		p: p, in: in, fixtures: h.fixtures, reg: reg,
-		slots: newSlots(in.MaxHeldReceipts, in.MaxPendingRefunds, reg),
+		slots:    newSlots(in.MaxHeldReceipts, in.MaxPendingRefunds, reg),
+		passLock: make(chan struct{}, 1), reclaimCursor: "0", cleanupDraw: h.cleanupDraw,
 	}
 	l.epoch.Store(&epochState{state: wsNoEpoch})
 	if err := settings.Validate(p, in, h.controlledClock); err != nil {
@@ -141,10 +147,14 @@ func newLimiter(p Policy, in Instance, st StoreOptions, h hookSet, opts []Option
 		attempt:        l.refundAttempt,
 	}, life)
 	l.refunds.startWorkers(in.RefundWorkers)
-	l.wg.Add(1)
+	l.wg.Add(2)
 	go func() {
 		defer l.wg.Done()
 		l.watch.run(life)
+	}()
+	go func() {
+		defer l.wg.Done()
+		l.runCleanup(life)
 	}()
 	return l, nil
 }
@@ -165,9 +175,9 @@ func newSigner(keyReader io.Reader, wrap func(receipt.Signer) receipt.Signer) (r
 	return s, nil
 }
 
-// shutdown marks the instance closing, ends the lifetime context, waits for the watch and
-// closes the adapter, which fails the calls in flight and waits for its goroutines. Close
-// (close.go) runs it after the drain, Kill at once.
+// shutdown marks the instance closing, ends the lifetime context, waits for the watch and the
+// cleanup runner, and then closes the adapter, which fails the calls in flight and waits for
+// its goroutines. Close (close.go) runs it after the drain, Kill at once.
 func (l *Limiter) shutdown() {
 	l.closing.Store(true)
 	l.closeOnce.Do(func() {

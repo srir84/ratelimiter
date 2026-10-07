@@ -172,6 +172,23 @@ local function dec_counter(f, n)
   E[f] = string.format('%d', tonumber(E[f]) - d)
 end
 
+-- hdel_chunked deletes the fields in list from the hash key, one HDEL per CHUNK fields at most
+-- (§A4.8 rule 3, §A3.0 row 11). The caller builds list before its first write; an empty list
+-- sends nothing.
+local function hdel_chunked(key, list)
+  for i = 1, #list, CHUNK do
+    redis.call('HDEL', key, unpack(list, i, math.min(i + CHUNK - 1, #list))) -- lint:chunked(500)
+  end
+end
+
+-- zrem_chunked removes the members in list from the sorted set key, one ZREM per CHUNK members
+-- at most, as hdel_chunked does.
+local function zrem_chunked(key, list)
+  for i = 1, #list, CHUNK do
+    redis.call('ZREM', key, unpack(list, i, math.min(i + CHUNK - 1, #list))) -- lint:chunked(500)
+  end
+end
+
 -- assert_keys: the per-key KEYS, and the shared ix and q, belong to the epoch and enc (§A4.1).
 local function assert_keys(enc)
   local ns = 'rl:e:' .. E.id .. ':'

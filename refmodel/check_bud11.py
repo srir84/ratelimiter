@@ -5,9 +5,16 @@ Times are nanoseconds. Known credits are times (one token each), or
 (start, end) intervals, each worth one token. A violation names its closed window.
 Sorting costs O(n log n); the sweep after sorting is O(n).
 DECISIONS clarification: a policy leaves the previous epoch current until the
-next epoch record. Records without a previous epoch are malformed. Allows,
+next epoch record. Charged/error acquires need a current epoch. G2 neutral
+acquires, including state_integrity_error, and validation_error are legal
+anywhere, even before an epoch, and G5 requires empty deduction_id and epoch_id.
+Integrity refusals change no budget or hwm, need no model comparison and add
+no charge or credit to any BUD-11a window. Allows,
 credits and unknown intervals belong to their own epoch_id, regardless of log
 position, validated against all epoch records and each epoch's preceding policy.
+DECISIONS S7: cleanup_scan {t_us} records each pass page's due-entry read,
+whose reply T0 stores the CLK-4 budget time. Scans require a current epoch and
+bounded microsecond time; scans and cleanup steps change no BUD-11a window.
 """
 
 import sys
@@ -17,6 +24,7 @@ from pathlib import Path
 from refmodel import RecordError
 from refmodel.model import Policy
 from refmodel.replay import (
+    NEUTRAL,
     NUMBERS,
     RESULTS,
     UNSENT_CODES,
@@ -26,6 +34,8 @@ from refmodel.replay import (
     refund_attempts,
     shape,
     string,
+    validate_cleanup,
+    validate_cleanup_scan,
     validate_finish,
 )
 
@@ -135,6 +145,16 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
             t = integer(record, "value_ns", line)
             if t < 0 or t % 1000:
                 raise RecordError(f"line {line}", "value_ns", "expected microsecond time")
+        elif kind == "cleanup":
+            validate_cleanup(record, line)
+            if not current:
+                raise RecordError(f"line {line}", "epoch", "needs current epoch")
+            # STA-4 removes only full buckets whose possible credits expired;
+            # STA-3 removes only expired markers. Neither changes BUD-11a.
+        elif kind == "cleanup_scan":
+            validate_cleanup_scan(record, line)
+            if not current:
+                raise RecordError(f"line {line}", "epoch", "needs current epoch")
         elif kind == "acquire":
             shape(
                 record,
@@ -150,10 +170,7 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
                 integer(record, field, line)
             deduction = string(record, "deduction_id", line)
             epoch = string(record, "epoch_id", line)
-            if (
-                result in {"allowed", "receipt_error", "limited", "capacity_error", "clock_error"}
-                and not current
-            ):
+            if result not in NEUTRAL | {"validation_error"} and not current:
                 raise RecordError(f"line {line}", "epoch_id", "needs current epoch")
             if result in {"allowed", "receipt_error"}:
                 if (result == "allowed" and (not epoch or not deduction)) or (

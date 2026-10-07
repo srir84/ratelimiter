@@ -4,12 +4,14 @@ package spectest
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
 	"ratelimiter/harness/driver"
 	"ratelimiter/harness/fixtures"
 	"ratelimiter/internal/keys"
+	"ratelimiter/internal/store"
 	"ratelimiter/limiter"
 )
 
@@ -296,4 +298,124 @@ func TestT_RCP_7(t *testing.T) {
 		}
 		check(bad, "state_integrity_error", bad.Acquire(0, "rcp7g-i"), limiter.StateIntegrityError)
 	})
+}
+
+// dropThenHold arms, on instance 0's store wrapper, a drop of the next refund call's reply and
+// a before_send barrier named name on the refund call after it: a permit released next has
+// its first refund applied at the store with the reply lost, and its retry held.
+func dropThenHold(t *testing.T, d *driver.Driver, name string) {
+	t.Helper()
+	arm(t, d, 0, fixtures.Fault{Mode: fixtures.DropReply, Match: "refund", Count: 1})
+	arm(t, d, 0, fixtures.Fault{Mode: fixtures.Barrier, Match: "refund", Count: 1, At: fixtures.BeforeSend, Name: name})
+}
+
+// appliedUnseen checks that op's only refund attempt so far was applied at the store (E_APPLIED
+// behind the wrapper) while the limiter got outcome_unknown.
+func appliedUnseen(t *testing.T, d *driver.Driver, what string, op driver.Op) {
+	t.Helper()
+	as := d.RefundAttempts(op)
+	if len(as) != 1 || as[0].Response.Outcome != store.OutcomeUnknown || !as[0].Reached ||
+		as[0].Store.Outcome != store.OK || as[0].Store.Reply.Code != 3 {
+		t.Fatalf("%s: refund attempts %+v, want one applied at the store with its reply lost", what, as)
+	}
+}
+
+// TestT_RCP_3 (SPEC T-RCP-3; RCP-5, RCP-6, API-16): R1, R2 and R3 on K are issued at a frozen
+// t0 and expire at E = t0 + 6 s. At E − 1 µs, R1's release is applied once (one attempt). R2's
+// and R3's first refunds are applied too, their replies dropped, and each retry is held at a
+// before_send barrier: K holds the 3 markers, all expiring at E. At E, R2's retry is
+// receipt_expired though its marker exists (still 3 markers). At E + 1 s a pass removes K with
+// its 3 markers (step 30, markers_removed 3); then R3's retry is receipt_expired too. With the
+// scripts loaded first, R1's event counts 1 attempt and R2's and R3's 2.
+func TestT_RCP_3(t *testing.T) {
+	d := fastDriver(t, 1, nil)
+	d.LoadScripts() // no NOSCRIPT round adds an attempt
+	const key = "rcp3"
+	r1, r2, r3 := allowed(t, d, 0, key), allowed(t, d, 0, key), allowed(t, d, 0, key)
+	eUs := expiryOf(r1)
+	if expiryOf(r2) != eUs || expiryOf(r3) != eUs {
+		t.Fatalf("expiries %d, %d, %d; want one E", eUs, expiryOf(r2), expiryOf(r3))
+	}
+	setClock(t, d, eUs*1000-1000)
+	if ev := releaseApplied(t, d, r1); ev.Attempts != 1 {
+		t.Errorf("R1 at E − 1 µs: %+v, want applied once, 1 attempt", ev)
+	}
+	for _, c := range []struct {
+		name string
+		op   driver.Op
+	}{{"r2", r2}, {"r3", r3}} {
+		dropThenHold(t, d, c.name)
+		d.Release(c.op)
+		reached(t, d, 0, c.name)
+		appliedUnseen(t, d, c.name, c.op)
+	}
+	if in := d.Inspect(key); in.MC != 3 || !slices.Equal(in.Expiries, []int64{eUs, eUs, eUs}) {
+		t.Fatalf("K before E: %+v, want 3 markers expiring at %d", in, eUs)
+	}
+
+	setClock(t, d, eUs*1000)
+	d.StoreWrapper(0).Release("r2")
+	if ev := event(t, d, r2); ev.Result != limiter.ReceiptExpired || ev.Attempts != 2 {
+		t.Errorf("R2's retry at E: %+v, want receipt_expired after 2 attempts", ev)
+	}
+	if in := d.Inspect(key); in.MC != 3 {
+		t.Errorf("K after R2's retry: %+v, want its 3 markers kept", in)
+	}
+
+	setClock(t, d, eUs*1000+1_000_000_000)
+	if rep := passOK(t, d, 0); rep.Removed != 1 {
+		t.Errorf("pass at E + 1 s: %+v, want Removed 1", rep)
+	}
+	if steps := d.StepsFor(key); len(steps) != 1 || steps[0].Code != 30 || steps[0].Markers != 3 {
+		t.Fatalf("K's steps %+v, want one 30 removing 3 markers", steps)
+	}
+	d.StoreWrapper(0).Release("r3")
+	if ev := event(t, d, r3); ev.Result != limiter.ReceiptExpired || ev.Attempts != 2 {
+		t.Errorf("R3's retry after the markers' removal: %+v, want receipt_expired after 2 attempts", ev)
+	}
+}
+
+// TestT_RCP_4 (SPEC T-RCP-4; RCP-2, STA-4, API-2a): at a frozen t0, 5 allows on K, generation
+// g1; P, the first, is kept OPEN and the rest done. Past eligibility (t0 + 6 s) a pass removes
+// K, and K returns with 5 allows on a generation g2 ≠ g1 (s 1 … 5 again); release(P) is
+// receipt_expired; the 10 deduction_ids across both generations are distinct. The op log
+// matches the reference model.
+func TestT_RCP_4(t *testing.T) {
+	d := fastDriver(t, 1, nil)
+	const key = "rcp4"
+	t0 := d.Clock().NowNs()
+	var gen1, gen2 []driver.Op
+	for range 5 {
+		gen1 = append(gen1, allowed(t, d, 0, key))
+	}
+	p := gen1[0]
+	doneAll(gen1[1:])
+	setClock(t, d, t0+d.Policy().ReceiptLifetimeNs)
+	if rep := passOK(t, d, 0); rep.Removed != 1 {
+		t.Errorf("pass past eligibility: %+v, want Removed 1", rep)
+	}
+	for k := range 5 {
+		op := allowed(t, d, 0, key)
+		if s := op.Reply.Elems[5].Int; s != int64(k+1) {
+			t.Errorf("recreated K, allow %d: s %d, want %d", k+1, s, k+1)
+		}
+		gen2 = append(gen2, op)
+	}
+	if g1, g2 := p.Reply.Elems[4].Int, gen2[0].Reply.Elems[4].Int; g1 == g2 {
+		t.Errorf("recreated K: generation %d, want one other than %d", g2, g1)
+	}
+	doneAll(gen2)
+	releaseExpired(t, d, p)
+	seen := map[string]bool{}
+	for _, op := range append(gen1, gen2...) {
+		id := op.Permit.DeductionID()
+		if seen[id] {
+			t.Errorf("deduction_id %s repeats", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != 10 {
+		t.Errorf("%d distinct deduction_ids, want 10", len(seen))
+	}
+	d.CheckRefModel(t)
 }

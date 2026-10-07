@@ -29,8 +29,10 @@ const (
 )
 
 // teardownChecks closes every instance the driver built (Close does nothing for a closed or
-// killed one), then runs the allowed-commands check, the refund-sends check, the store audit
-// and the BUD-11 check, reporting each violation with tb.Errorf.
+// killed one), each within its drain timeout plus closeSlack (closeBounded: a Close that does
+// not return by then is reported and left behind, and the checks go on, so the store is still
+// stopped after them), then runs the allowed-commands check, the refund-sends check, the store
+// audit and the BUD-11 check, reporting each violation with tb.Errorf.
 func (d *Driver) teardownChecks(tb testing.TB) {
 	tb.Helper()
 	if d.st == nil {
@@ -41,7 +43,7 @@ func (d *Driver) teardownChecks(tb testing.TB) {
 	d.mu.Unlock()
 	for _, in := range all {
 		if in != nil && in.l != nil {
-			in.l.Close()
+			d.closeBounded(tb, in)
 		}
 	}
 	d.checkCommands(tb, all)
@@ -242,7 +244,8 @@ func (d *Driver) searchAOF(tb testing.TB, canaries [][]byte) {
 }
 
 // checkBud11 is the teardown BUD-11 check (DESIGN §C4; plan S6 step 13): when the test logged
-// ops, it writes the op log and runs python3 -m refmodel.check_bud11 on it; a non-zero exit,
+// ops (acquire, release, done, cleanup or cleanup_scan records), it writes the op log and runs
+// python3 -m refmodel.check_bud11 on it; a non-zero exit,
 // or no python3, fails the test (as in CheckRefModel). A test that wrote through Fixture
 // (a declared key, or FLUSHALL/FLUSHDB) is exempt: it asserts its refusals directly.
 func (d *Driver) checkBud11(tb testing.TB) {

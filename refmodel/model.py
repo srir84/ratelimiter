@@ -1,4 +1,4 @@
-"""Token bucket and receipt refunds, derived from BUD-13 and CLK-4."""
+"""Token buckets, receipt refunds and cleanup, derived from SPEC."""
 
 from dataclasses import dataclass
 
@@ -48,6 +48,7 @@ class Bucket:
     time_ns: int
     generation: int
     sequence: int
+    latest_expiry_ns: int
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,13 @@ class RefundDecision:
     result: str
     decision_ns: int = 0
     credited: int = 0
+
+
+@dataclass(frozen=True)
+class CleanupDecision:
+    code: int | str
+    decision_ns: int = 0
+    time_known: bool = True
 
 
 class Model:
@@ -68,6 +76,7 @@ class Model:
         self.markers: dict[tuple[bytes, int, int], tuple[int, int]] = {}
         self.mutant = ""
         self.quarantined: set[bytes] = set()
+        self.cleanup_due: dict[bytes, int] = {}
 
     def acquire(self, key_bytes: bytes, clock_ns: int) -> Decision:
         if not isinstance(key_bytes, bytes):
@@ -121,7 +130,9 @@ class Model:
             return Decision("limited", time_ns, retry, units)
         units -= p.rate_period_ns
         sequence += 1
-        self.buckets[key_bytes] = Bucket(units, time_ns, generation, sequence)
+        expiry_ns = time_ns + p.receipt_lifetime_ns
+        self.buckets[key_bytes] = Bucket(units, time_ns, generation, sequence, expiry_ns)
+        self.cleanup_due[key_bytes] = expiry_ns
         self.generation = max(self.generation, generation)
         self.hwm = time_ns
         return Decision(
@@ -131,7 +142,7 @@ class Model:
             units,
             generation,
             sequence,
-            (time_ns + p.receipt_lifetime_ns) // 1000,
+            expiry_ns // 1000,
         )
 
     def refund(
@@ -194,6 +205,84 @@ class Model:
             credited = min(p.rate_period_ns, cap - bucket.units)
         if self.mutant == "credit_uncapped":
             credited = p.rate_period_ns
-        self.buckets[key_bytes] = Bucket(units + credited, t, g, bucket.sequence)
+        self.buckets[key_bytes] = Bucket(
+            units + credited, t, g, bucket.sequence, bucket.latest_expiry_ns
+        )
         self.markers[identity] = (t, expiry_us)
         return RefundDecision("applied", t, credited)
+
+    def cleanup_step(self, key_bytes: bytes, clock_ns: int) -> CleanupDecision:
+        """Re-check one key's due entries atomically (STA-3 through STA-5).
+
+        Bucket deadlines start at the latest receipt expiry, a conservative
+        selection time. A moved step reschedules for full refill; marker
+        deadlines remain independent so active buckets lose expired markers.
+        """
+        if not isinstance(key_bytes, bytes):
+            raise RecordError("cleanup", "key_bytes", "expected bytes")
+        if not 1 <= len(key_bytes) <= 256:
+            raise RecordError("cleanup", "key_bytes", "expected 1-256 UTF-8 bytes")
+        try:
+            key_bytes.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise RecordError("cleanup", "key_bytes", "expected UTF-8") from error
+        if type(clock_ns) is not int or clock_ns < 0 or clock_ns % 1000:
+            raise RecordError("cleanup", "clock_ns", "expected bounded microsecond time")
+        if clock_ns >= TBOUND:
+            return CleanupDecision("clock_error")
+        t = max(clock_ns, self.hwm)
+        due = self.cleanup_due.get(key_bytes)
+        # Cleanup passes select index members only; a missing member is gone.
+        if due is None:
+            return CleanupDecision(33, t)
+        bucket = self.buckets.get(key_bytes)
+        markers = {k: v for k, v in self.markers.items() if k[0] == key_bytes}
+        # A quarantine moves the key's deadline, retaining all evidence of loss.
+        if key_bytes not in self.quarantined and markers:
+            marker_due = min(expiry_us * 1000 for _, expiry_us in markers.values())
+            due = min(due, marker_due)
+        if due > t:
+            return CleanupDecision(33, t)
+        self.hwm = t
+        if key_bytes in self.quarantined:
+            self.cleanup_due[key_bytes] = t + self.policy.receipt_lifetime_ns
+            return CleanupDecision(31, t)
+        if bucket is None:
+            self.quarantined.add(key_bytes)
+            self.cleanup_due[key_bytes] = t + self.policy.receipt_lifetime_ns
+            return CleanupDecision(32, t)
+
+        for identity, (_, expiry_us) in markers.items():
+            expired = (
+                t > expiry_us * 1000 if self.mutant == "expiry_strict" else t >= expiry_us * 1000
+            )
+            if expired:
+                del self.markers[identity]
+        p = self.policy
+        cap = p.capacity * p.rate_period_ns
+        units = (
+            bucket.units + (t - bucket.time_ns) * p.rate_tokens
+            if self.mutant == "refill_uncapped"
+            else min(cap, bucket.units + (t - bucket.time_ns) * p.rate_tokens)
+        )
+        latest_expired = (
+            t > bucket.latest_expiry_ns
+            if self.mutant == "expiry_strict"
+            else t >= bucket.latest_expiry_ns
+        )
+        remaining = [v[1] * 1000 for k, v in self.markers.items() if k[0] == key_bytes]
+        if units == cap and latest_expired and not remaining:
+            del self.buckets[key_bytes]
+            del self.cleanup_due[key_bytes]
+            return CleanupDecision(30, t)
+
+        self.buckets[key_bytes] = Bucket(
+            units, t, bucket.generation, bucket.sequence, bucket.latest_expiry_ns
+        )
+        refill_us = (max(0, cap - units) + p.rate_tokens * 1000 - 1) // (p.rate_tokens * 1000)
+        bucket_due = max(bucket.latest_expiry_ns, t + refill_us * 1000, max(remaining, default=0))
+        # The strict-expiry mutant keeps an equality deadline for one more us.
+        if self.mutant == "expiry_strict" and bucket_due <= t:
+            bucket_due = t + 1000
+        self.cleanup_due[key_bytes] = bucket_due
+        return CleanupDecision(31, t)

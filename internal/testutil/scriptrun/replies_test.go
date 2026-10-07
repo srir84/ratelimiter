@@ -86,3 +86,41 @@ func TestRunRepliesFile(t *testing.T) {
 		}
 	})
 }
+
+// TestAudited (plan S7 step 12): Audited reports the discipline run exactly when
+// RL_SCRIPT_AUDIT is "1", the value Run instruments on; any other value, or none, is the
+// plain run.
+func TestAudited(t *testing.T) {
+	for _, c := range []struct {
+		value string
+		want  bool
+	}{{"1", true}, {"", false}, {"0", false}, {"true", false}, {" 1", false}} {
+		t.Setenv(scriptrun.AuditEnv, c.value)
+		if got := scriptrun.Audited(); got != c.want {
+			t.Errorf("%s=%q: Audited() = %v, want %v", scriptrun.AuditEnv, c.value, got, c.want)
+		}
+	}
+}
+
+// TestEvidenceRun (plan S7 step 12): EvidenceRun is true only in the plain run whose replies go
+// to .out/replies-l2.jsonl: RL_SCRIPT_AUDIT not "1" and RL_REPLIES_FILE unset (empty). The
+// discipline run, and any run that sends its replies elsewhere, as every bin/mutate run does,
+// is no evidence run.
+func TestEvidenceRun(t *testing.T) {
+	for _, c := range []struct {
+		audit, replies string
+		want           bool
+	}{
+		{"", "", true},
+		{"0", "", true},
+		{"1", "", false},
+		{"", "/tmp/mutate-go-1/replies-l2.jsonl", false},
+		{"1", "/tmp/mutate-go-1/replies-l2.jsonl", false},
+	} {
+		t.Setenv(scriptrun.AuditEnv, c.audit)
+		t.Setenv(scriptrun.RepliesEnv, c.replies)
+		if got := scriptrun.EvidenceRun(); got != c.want {
+			t.Errorf("%s=%q, %s=%q: EvidenceRun() = %v, want %v", scriptrun.AuditEnv, c.audit, scriptrun.RepliesEnv, c.replies, got, c.want)
+		}
+	}
+}

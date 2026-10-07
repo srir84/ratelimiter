@@ -212,7 +212,7 @@ func TestCloseRefundsAndListener(t *testing.T) {
 	p, in := lifecycleSettings()
 	in.DrainTimeoutNs = 100_000_000
 	sink := &eventSink{}
-	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{WithRefundListener(sink.listen)})
+	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap, cleanupDraw: jitterDraw}, []Option{WithRefundListener(sink.listen)})
 	t.Cleanup(func() { l.Close() })
 	if err != nil {
 		t.Fatalf("newLimiter: %v", err)
@@ -280,7 +280,7 @@ func TestCloseRefundsAndListener(t *testing.T) {
 func TestCloseStopsWatchThenAdapter(t *testing.T) {
 	p, in := lifecycleSettings()
 	a := newStubAdapter()
-	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: a.wrap}, nil)
+	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: a.wrap, cleanupDraw: jitterDraw}, nil)
 	t.Cleanup(func() { l.Close() })
 	if err != nil {
 		t.Fatalf("newLimiter: %v", err)
@@ -321,13 +321,13 @@ func TestNewAppliesOptions(t *testing.T) {
 	p, in := lifecycleSettings()
 	var applied []string
 	opt := func(name string) Option { return func(*options) { applied = append(applied, name) } }
-	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{opt("a")})
+	l, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap, cleanupDraw: jitterDraw}, []Option{opt("a")})
 	t.Cleanup(func() { l.Close() })
 	if err != nil || !slices.Equal(applied, []string{"a"}) {
 		t.Fatalf("one Option: err %v, applied %q; want no error, [a]", err, applied)
 	}
 	applied = nil
-	l2, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap}, []Option{nil, opt("b"), nil, opt("c"), nil})
+	l2, err := newLimiter(p, in, StoreOptions{}, hookSet{storeWrapper: newStubAdapter().wrap, cleanupDraw: jitterDraw}, []Option{nil, opt("b"), nil, opt("c"), nil})
 	t.Cleanup(func() { l2.Close() })
 	if err != nil || !slices.Equal(applied, []string{"b", "c"}) {
 		t.Fatalf("Options with nil ones between: err %v, applied %q; want no error, [b c]", err, applied)
