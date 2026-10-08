@@ -1,0 +1,30 @@
+# harness.toml — base file; each run uses the merged runs/<id>/config.toml (§B5)
+[policy]                       # fingerprinted
+rate_tokens = 10
+rate_period_ns = 1_000_000_000
+capacity = 20
+failure_mode = "closed"
+max_tracked_buckets = 100_000
+max_live_markers = 50_000
+max_markers_per_key = 1_000
+receipt_lifetime_ns = 60_000_000_000
+refund_deadline_ns = 30_000_000_000
+outage_tolerance_ns = 5_000_000_000
+cleanup_interval_ns = 5_000_000_000
+clock_source = "store"
+
+[instance]                     # per instance, same values on every hitapi; absent keys keep DefaultInstance(policy)
+max_release_delay_ns = 5_000_000_000   # P
+margin_ns = 1_000_000_000
+max_held_receipts = 1152
+max_pending_refunds = 1152
+refund_workers = 128
+
+[store]
+addr = "127.0.0.1:6390"        # user rl_lib, password from RL_LIB_PASSWORD
+
+[api]
+max_in_flight = 512            # HAR-14; no queue: full -> ERR-7
+limiter_enabled = true         # HAR-17 baseline switch
+refuse_after_acquire_bp = 0    # ERR-15 refusals per 10,000 requests (§B3); scenarios override
+db_dsn = "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conns=64"

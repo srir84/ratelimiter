@@ -55,6 +55,17 @@ func Kill(l *Limiter) {
 	l.shutdown()
 }
 
+// ListenerQueueLen returns how many refund events wait in l's listener queue, not yet taken by
+// the dispatcher (limitertest.ListenerQueueLen, for hitapi's /health listener_queue_len in
+// test builds); 0 for a nil limiter or one without a listener. Health stays as §A5.11
+// defines it.
+func ListenerQueueLen(l *Limiter) int {
+	if l == nil || l.lis == nil {
+		return 0
+	}
+	return len(l.lis.ch)
+}
+
 // PermitEpoch returns the epoch_id of an allowed permit's receipt in lowercase hex, and ""
 // for a degraded or nil permit (limitertest.PermitEpoch, for the driver's op log).
 func PermitEpoch(p *Permit) string {

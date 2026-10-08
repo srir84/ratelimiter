@@ -107,6 +107,16 @@ test-scripts: bin/trace
 test-integration: bin/trace build
 	$(TRACE) gotest -o .out/test-integration.json -- -tags rltest -race -count=1 -timeout 30m ./limiter/... ./limitertest/... ./internal/core/... ./harness/fixtures/... ./harness/driver/... ./harness/spectest/...
 
+# L4 end-to-end (DESIGN §C1, §C5; IMPLEMENTATION_PLAN H1 step 13): the HARNESS tests against the
+# bin/test binaries, built first, and the harness PostgreSQL, one package at a time (-p 1: they
+# share the hits table). A missing binary or PostgreSQL fails the test, never skips it. Later
+# slices append their packages to E2E_PKGS.
+E2E_PKGS = ./harness/dbclient/ ./harness/e2e/ ./harness/httpapi/
+
+.PHONY: test-e2e
+test-e2e: bin/trace build
+	$(TRACE) gotest -o .out/test-e2e.json -- -tags rltest -p 1 -count=1 -timeout 60m $(E2E_PKGS)
+
 # The Python tests (DESIGN §C1; IMPLEMENTATION_PLAN S5 step 13), shuffled by the root
 # conftest.py; run_evidence tests need a finished run and stay out (make test-report).
 .PHONY: test-py

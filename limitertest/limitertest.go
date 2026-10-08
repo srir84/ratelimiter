@@ -111,6 +111,11 @@ func With(opts ...limiter.Option) Option {
 // Health reports closing.
 func Kill(l *limiter.Limiter) { core.Kill(l) }
 
+// ListenerQueueLen returns how many refund events wait in l's listener queue, not yet taken
+// by its dispatcher; 0 without a listener. hitapi's test build serves it on /health as
+// listener_queue_len (IMPLEMENTATION_PLAN H1 step 9); limiter.Health is unchanged.
+func ListenerQueueLen(l *limiter.Limiter) int { return core.ListenerQueueLen(l) }
+
 // PermitEpoch returns the epoch_id (lowercase hex) of an allowed permit's receipt, for the
 // driver's op log (plan choice); "" for a degraded or nil permit.
 func PermitEpoch(p *limiter.Permit) string { return core.PermitEpoch(p) }

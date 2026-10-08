@@ -5,6 +5,7 @@ package fixtures
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -171,6 +172,21 @@ func (w *StoreWrapper) Reached(name string) <-chan struct{} {
 func (w *StoreWrapper) Release(name string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.barrierLocked(name).open()
+}
+
+// DisarmBarrier removes every Barrier fault named name, then releases that barrier, so the
+// calls blocked at it go on (as do calls that took one of its faults and have yet to reach
+// it). Unlike Release, which leaves the faults armed (each still takes its matching calls,
+// letting them pass), later calls no longer meet the barrier, so a fault armed afterwards on
+// the same calls takes effect (hitapi's POST /_test/barrier/release, whose barriers have no
+// count).
+func (w *StoreWrapper) DisarmBarrier(name string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.faults = slices.DeleteFunc(w.faults, func(a *armed) bool {
+		return a.f.Mode == Barrier && a.f.Name == name
+	})
 	w.barrierLocked(name).open()
 }
 
