@@ -86,22 +86,36 @@ type barrier struct {
 	isReached, isReleased bool
 }
 
+// maxStoreFaults is how many armed store faults may wait at once, and maxBarriers how many
+// barrier names the wrapper holds at once (plan choice: the database wrapper's cap of 64,
+// maxDBFaults; AGENTS.md §1 Queues). Arm refuses a fault past either cap, and DisarmBarrier
+// never adds a name, so hitapi's POST /_test/faults and /_test/barrier routes cannot grow
+// either without bound.
+const (
+	maxStoreFaults = 64
+	maxBarriers    = 64
+)
+
 // StoreWrapper stands between the limiter and its store adapter (DESIGN §A5.12, §B6) and
-// applies the armed faults. It also counts, as the store adapter reported them, the responses
-// that came back with NoScript set, for the driver's allowed-commands check, and the refund
-// responses the store refused with LOADING or BUSY, for its refund-sends check (§C4). One
-// wrapper serves one limiter; it is safe for concurrent use.
+// applies the armed faults: at most maxStoreFaults at once, under at most maxBarriers barrier
+// names. It also counts, as the store adapter reported them, the responses that came back
+// with NoScript set, for the driver's allowed-commands check, and the refund responses the
+// store refused with LOADING or BUSY, for its refund-sends check (§C4). One wrapper serves
+// one limiter; it is safe for concurrent use.
 type StoreWrapper struct {
 	mu       sync.Mutex
-	faults   []*armed
+	faults   []*armed // at most maxStoreFaults
 	barriers map[string]*barrier
+	// pending counts, per barrier name, the calls that took one of its faults and have yet to
+	// reach the barrier, so a name is never dropped while a call is on its way to it.
+	pending  map[string]int
 	noScript int
 	notReady int // refund responses refused with LOADING or BUSY
 }
 
 // NewStoreWrapper returns a wrapper with no fault armed.
 func NewStoreWrapper() *StoreWrapper {
-	return &StoreWrapper{barriers: map[string]*barrier{}}
+	return &StoreWrapper{barriers: map[string]*barrier{}, pending: map[string]int{}}
 }
 
 // Wrap returns inner behind the wrapper; limitertest.WithStoreWrapper takes it.
@@ -110,7 +124,11 @@ func (w *StoreWrapper) Wrap(inner store.Adapter) store.Adapter {
 }
 
 // Arm arms f. It fails on an unknown mode, a negative count or time, a barrier without a
-// name or position, a delay without a wait, and a Key that is no valid budget key (API-1).
+// name or position, a delay without a wait, and a Key that is no valid budget key (API-1). It
+// also refuses f while maxStoreFaults faults are armed (a fault used up, disarmed or past its
+// Duration frees its slot), and a Barrier fault under a new name while maxBarriers names are
+// held: a name is dropped first once it is finished, that is released, named by no armed
+// fault, and with no call on its way to it. A refused fault arms nothing.
 func (w *StoreWrapper) Arm(f Fault) error {
 	if f.Count < 0 || f.Duration < 0 || f.Delay < 0 {
 		return fmt.Errorf("fixtures: fault %q: negative count or time", f.Mode)
@@ -141,13 +159,68 @@ func (w *StoreWrapper) Arm(f Fault) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	w.dropEndedLocked(time.Now())
+	if len(w.faults) >= maxStoreFaults {
+		return fmt.Errorf("fixtures: fault %q refused: %d faults are armed already, the most that may wait", f.Mode, maxStoreFaults)
+	}
 	if f.Mode == Barrier {
-		if b, ok := w.barriers[f.Name]; !ok || b.isReleased {
+		b, ok := w.barriers[f.Name]
+		if !ok && !w.roomForBarrierLocked() {
+			return fmt.Errorf("fixtures: barrier %q refused: %d barrier names are held already, the most at once", f.Name, maxBarriers)
+		}
+		if !ok || b.isReleased {
 			w.barriers[f.Name] = newBarrier()
 		}
 	}
 	w.faults = append(w.faults, a)
 	return nil
+}
+
+// Armed returns how many faults are armed: those not yet used up, disarmed or past their
+// Duration.
+func (w *StoreWrapper) Armed() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, a := range w.faults {
+		if !a.ended(now) {
+			n++
+		}
+	}
+	return n
+}
+
+// ended reports whether the fault's Duration has passed at now.
+func (a *armed) ended(now time.Time) bool {
+	return !a.until.IsZero() && !now.Before(a.until)
+}
+
+// dropEndedLocked removes the faults whose Duration has passed; w.mu is held.
+func (w *StoreWrapper) dropEndedLocked(now time.Time) {
+	w.faults = slices.DeleteFunc(w.faults, func(a *armed) bool { return a.ended(now) })
+}
+
+// roomForBarrierLocked reports whether a new barrier name fits under maxBarriers, after
+// dropping every finished name: released, named by no armed fault, and with no call on its way
+// to it (pending). Such a barrier has nothing left to block or release; a later Reached or
+// Arm under its name starts a new one. w.mu is held.
+func (w *StoreWrapper) roomForBarrierLocked() bool {
+	if len(w.barriers) < maxBarriers {
+		return true
+	}
+	named := make(map[string]bool, len(w.faults))
+	for _, a := range w.faults {
+		if a.f.Mode == Barrier {
+			named[a.f.Name] = true
+		}
+	}
+	for name, b := range w.barriers {
+		if b.isReleased && !named[name] && w.pending[name] == 0 {
+			delete(w.barriers, name)
+		}
+	}
+	return len(w.barriers) < maxBarriers
 }
 
 // Disarm removes every armed fault and releases every barrier.
@@ -180,14 +253,17 @@ func (w *StoreWrapper) Release(name string) {
 // it). Unlike Release, which leaves the faults armed (each still takes its matching calls,
 // letting them pass), later calls no longer meet the barrier, so a fault armed afterwards on
 // the same calls takes effect (hitapi's POST /_test/barrier/release, whose barriers have no
-// count).
+// count). A name with no barrier is left without one: DisarmBarrier never adds a name, so the
+// route cannot grow the names past maxBarriers.
 func (w *StoreWrapper) DisarmBarrier(name string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.faults = slices.DeleteFunc(w.faults, func(a *armed) bool {
 		return a.f.Mode == Barrier && a.f.Name == name
 	})
-	w.barrierLocked(name).open()
+	if b, ok := w.barriers[name]; ok {
+		b.open()
+	}
 }
 
 // NoScripts returns how many responses came back with NoScript set.
@@ -232,18 +308,14 @@ func (b *barrier) open() {
 }
 
 // take returns the first armed fault matching name and enc (the call's budget key, encoded;
-// "" for a call without one, keyOf) and uses up one of its calls, or nil.
+// "" for a call without one, keyOf) and uses up one of its calls, or nil. A Barrier fault it
+// returns counts its call as on its way to the barrier (pending) until the call reaches it
+// (arrive).
 func (w *StoreWrapper) take(name, enc string) *Fault {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	now := time.Now()
-	for i := 0; i < len(w.faults); i++ {
-		a := w.faults[i]
-		if !a.until.IsZero() && !now.Before(a.until) {
-			w.faults = append(w.faults[:i], w.faults[i+1:]...)
-			i--
-			continue
-		}
+	w.dropEndedLocked(time.Now())
+	for i, a := range w.faults {
 		if a.f.Match != "" && !strings.EqualFold(a.f.Match, name) {
 			continue
 		}
@@ -254,6 +326,9 @@ func (w *StoreWrapper) take(name, enc string) *Fault {
 			if a.left--; a.left == 0 {
 				w.faults = append(w.faults[:i], w.faults[i+1:]...)
 			}
+		}
+		if a.f.Mode == Barrier {
+			w.pending[a.f.Name]++
 		}
 		f := a.f
 		return &f
@@ -278,10 +353,16 @@ func (w *StoreWrapper) saw(script string, r store.Response) {
 	}
 }
 
-// arrive marks the barrier name reached and returns its release channel.
+// arrive marks the barrier name reached by a call that took one of its faults (take), so that
+// call is no longer on its way to it, and returns the barrier's release channel.
 func (w *StoreWrapper) arrive(name string) <-chan struct{} {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if n := w.pending[name]; n > 1 {
+		w.pending[name] = n - 1
+	} else {
+		delete(w.pending, name)
+	}
 	b := w.barrierLocked(name)
 	if !b.isReached {
 		b.isReached = true

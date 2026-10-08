@@ -49,7 +49,10 @@ const (
 )
 
 // testRoutes registers the /_test routes (DESIGN §B6; IMPLEMENTATION_PLAN H1 step 11). Each
-// takes POST only and answers 403 to a remote address that is not loopback.
+// takes POST only and answers 403 to a remote address that is not loopback. The fixtures hold
+// at most 64 armed faults each, and the store wrapper at most 64 barrier names (plan choice,
+// AGENTS.md §1 Queues): a fault or barrier past a cap is refused, and the route answers the
+// refusal with 400 like any other.
 func (s *Server) testRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/_test/faults", s.testFaults)
 	mux.HandleFunc("/_test/barrier", s.testBarrier)

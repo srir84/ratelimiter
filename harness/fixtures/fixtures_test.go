@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -1109,4 +1110,280 @@ func TestBatchDelaysStartAtEntry(t *testing.T) {
 				k, el, ok, delay, 2*delay)
 		}
 	}
+}
+
+// TestStoreWrapper_FaultCap: at most 64 store faults wait at once, under at most 64 barrier
+// names (the database wrapper's cap; plan choice, AGENTS.md §1 Queues). The 64th fault is
+// armed and the 65th refused, arming nothing; once a call has used up a fault, or a barrier was
+// disarmed, one more is armed and the one after it refused again. With 64 names held, a barrier
+// under a new name is refused even while fault slots are free, until one of the names is
+// finished (released, named by no armed fault, no call on its way to it); a name with a call on
+// its way to it is kept, so that call still meets the released barrier and goes on, and with
+// two calls on their way it is kept until both have arrived; a name released with Release,
+// whose fault stays armed, is kept too, so the calls that fault takes still pass. Disarming a
+// barrier that was never armed leaves no barrier behind.
+func TestStoreWrapper_FaultCap(t *testing.T) {
+	inner := stubAdapter{resp: func(store.Request) store.Response {
+		return store.Response{Outcome: store.OK, Sent: true, SentCommands: 1}
+	}}
+	// sentOK reports whether r is the stub store's answer: the call went through unchanged.
+	sentOK := func(r store.Response) bool { return r.Outcome == store.OK && r.Sent && r.SentCommands == 1 }
+	acquire := store.Request{Kind: store.Call, Script: scripts.Acquire}
+	refund := store.Request{Kind: store.Refund, Script: scripts.Refund}
+	barrier := func(name, match string, count int) fixtures.Fault {
+		return fixtures.Fault{Mode: fixtures.Barrier, Match: match, Count: count, At: fixtures.BeforeSend, Name: name}
+	}
+	// passes calls req on another goroutine and wants it back, unheld, within 5 s.
+	passes := func(t *testing.T, a store.Adapter, req store.Request, what string) {
+		t.Helper()
+		done := make(chan store.Response, 1)
+		go func() { done <- a.Call(t.Context(), req) }()
+		select {
+		case r := <-done:
+			if !sentOK(r) {
+				t.Errorf("%s = %+v, want it passed through: OK after a send", what, r)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s has not returned within 5s", what)
+		}
+	}
+
+	t.Run("faults", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		for i := range 64 {
+			if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "acquire", Count: 1}); err != nil {
+				t.Fatalf("Arm %d of 64: %v", i+1, err)
+			}
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.DropReply, Match: "refund"}); err == nil {
+			t.Error("the 65th Arm succeeded, want it refused while 64 faults wait")
+		}
+		if n := w.Armed(); n != 64 {
+			t.Errorf("Armed() = %d after the refused Arm, want 64", n)
+		}
+		passes(t, a, refund, "a refund call after the refused drop_reply on refunds")
+		if r := a.Call(t.Context(), acquire); r.Outcome != store.Unavailable || r.Sent {
+			t.Errorf("an acquire call = %+v, want the oldest refusal: unavailable, not sent", r)
+		}
+		if n := w.Armed(); n != 63 {
+			t.Errorf("Armed() = %d once a call used up a fault, want 63", n)
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.DropReply, Match: "refund", Count: 1}); err != nil {
+			t.Errorf("Arm once a call used up a fault: %v, want it armed", err)
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.DropReply, Match: "refund"}); err == nil {
+			t.Error("an Arm with 64 faults waiting again succeeded, want it refused")
+		}
+		if r := a.Call(t.Context(), refund); r.Outcome != store.OutcomeUnknown || !r.Sent {
+			t.Errorf("a refund call = %+v, want the drop_reply armed after the slot freed: outcome_unknown after a send", r)
+		}
+		// A fault whose Duration has passed frees its slot too.
+		w.Disarm()
+		for i := range 63 {
+			if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "acquire"}); err != nil {
+				t.Fatalf("Arm %d of 63 after Disarm: %v", i+1, err)
+			}
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "refund", Duration: 20 * time.Millisecond}); err != nil {
+			t.Fatalf("the 64th Arm, with a duration: %v", err)
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "refund"}); err == nil {
+			t.Error("the 65th Arm succeeded while the 64th fault's duration runs, want it refused")
+		}
+		time.Sleep(50 * time.Millisecond)
+		if n := w.Armed(); n != 63 {
+			t.Errorf("Armed() = %d once the 64th fault's duration passed, want 63", n)
+		}
+		if err := w.Arm(fixtures.Fault{Mode: fixtures.Refuse, Match: "refund"}); err != nil {
+			t.Errorf("Arm once a fault's duration passed: %v, want it armed", err)
+		}
+	})
+
+	t.Run("barrier names", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		// 64 barriers armed: both caps reached.
+		for i := range 64 {
+			if err := w.Arm(barrier(fmt.Sprintf("b%d", i), "refund", 0)); err != nil {
+				t.Fatalf("barrier %d of 64: %v", i+1, err)
+			}
+		}
+		if err := w.Arm(barrier("b64", "acquire", 0)); err == nil {
+			t.Error("a 65th barrier succeeded, want it refused while 64 wait")
+		}
+		passes(t, a, acquire, "an acquire call after the refused acquire barrier")
+		w.DisarmBarrier("b0")
+		if err := w.Arm(barrier("b64", "acquire", 1)); err != nil {
+			t.Errorf("a barrier once b0 was disarmed: %v, want it armed", err)
+		}
+		if err := w.Arm(barrier("b65", "acquire", 0)); err == nil {
+			t.Error("a barrier with 64 waiting again succeeded, want it refused")
+		}
+
+		// 64 names held and no fault armed: a new name is still refused.
+		w = fixtures.NewStoreWrapper()
+		a = w.Wrap(inner)
+		t.Cleanup(a.Close)
+		for i := range 64 {
+			_ = w.Reached(fmt.Sprintf("n%d", i)) // a name taken before its barrier is armed
+		}
+		if err := w.Arm(barrier("new", "acquire", 0)); err == nil {
+			t.Error("a barrier under a new name succeeded with 64 names held, want it refused")
+		}
+		if n := w.Armed(); n != 0 {
+			t.Errorf("Armed() = %d after the refused barrier, want 0", n)
+		}
+		passes(t, a, acquire, "an acquire call after the refused barrier")
+		if err := w.Arm(barrier("n5", "acquire", 1)); err != nil {
+			t.Errorf("a barrier under a held name: %v, want it armed (it takes no new name)", err)
+		}
+		w.Release("n0") // finished: released, no fault names it, no call on its way
+		if err := w.Arm(barrier("new", "refund", 0)); err != nil {
+			t.Errorf("a barrier under a new name once n0 was released: %v, want it armed", err)
+		}
+		if err := w.Arm(barrier("new2", "refund", 0)); err == nil {
+			t.Error("a barrier under another new name succeeded with 64 names held again, want it refused")
+		}
+	})
+
+	t.Run("a name with a call on its way is kept", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		if err := w.Arm(barrier("x", "acquire", 1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Arm(barrier("y", "refund", 1)); err != nil {
+			t.Fatal(err)
+		}
+		// The batch takes both faults at its entry, then waits at x before it goes on to y.
+		done := make(chan []store.Response, 1)
+		go func() { done <- a.CallBatch(t.Context(), []store.Request{acquire, refund}) }()
+		select {
+		case <-w.Reached("x"):
+		case <-time.After(5 * time.Second):
+			t.Fatal("the batch did not reach barrier x within 5s")
+		}
+		w.DisarmBarrier("y") // released, no fault left, but the refund is on its way to it
+		for i := range 62 {
+			_ = w.Reached(fmt.Sprintf("n%d", i))
+		}
+		if err := w.Arm(barrier("z", "acquire", 0)); err == nil {
+			t.Error("a barrier under a new name succeeded with 64 names held, one with a call on its way, want it refused")
+		}
+		w.Release("x")
+		select {
+		case rs := <-done:
+			if len(rs) != 2 || !sentOK(rs[0]) || !sentOK(rs[1]) {
+				t.Errorf("the batch = %+v, want both requests sent: the refund met the released barrier y", rs)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the batch did not return within 5s of x's release: its refund met a new barrier y")
+		}
+		if err := w.Arm(barrier("z", "acquire", 0)); err != nil {
+			t.Errorf("a barrier under a new name once x and y were finished: %v, want it armed", err)
+		}
+	})
+
+	t.Run("a released name an armed fault names is kept", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		if err := w.Arm(barrier("k", "acquire", 0)); err != nil {
+			t.Fatal(err)
+		}
+		w.Release("k") // released with Release, so its fault stays armed and takes every acquire call
+		for i := range 63 {
+			_ = w.Reached(fmt.Sprintf("n%d", i))
+		}
+		if err := w.Arm(barrier("new", "refund", 0)); err == nil {
+			t.Error("a barrier under a new name succeeded with 64 names held, k released but named by an armed fault, want it refused")
+		}
+		passes(t, a, acquire, "an acquire call that takes k's fault after k's release")
+	})
+
+	t.Run("a name with two calls on their way is kept until both arrive", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		// Each batch takes, at its entry, a barrier fault for its acquire and y's for its
+		// refund, then waits at its acquire's barrier before it goes on to y.
+		start := func(name string) <-chan []store.Response {
+			t.Helper()
+			done := make(chan []store.Response, 1)
+			go func() { done <- a.CallBatch(t.Context(), []store.Request{acquire, refund}) }()
+			select {
+			case <-w.Reached(name):
+			case <-time.After(5 * time.Second):
+				t.Fatalf("a batch did not reach barrier %s within 5s", name)
+			}
+			return done
+		}
+		returns := func(done <-chan []store.Response, what string) {
+			t.Helper()
+			select {
+			case rs := <-done:
+				if len(rs) != 2 || !sentOK(rs[0]) || !sentOK(rs[1]) {
+					t.Errorf("%s = %+v, want both requests sent: its refund met the released barrier y", what, rs)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s did not return within 5s: its refund met a new barrier y", what)
+			}
+		}
+		if err := w.Arm(barrier("x2", "acquire", 1)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Arm(barrier("y", "refund", 2)); err != nil {
+			t.Fatal(err)
+		}
+		second := start("x2")
+		if err := w.Arm(barrier("x1", "acquire", 0)); err != nil { // stays armed, so x1 is never finished
+			t.Fatal(err)
+		}
+		first := start("x1")
+		w.Release("y") // y's fault is used up, and both refunds are on their way to it
+		for i := range 61 {
+			_ = w.Reached(fmt.Sprintf("n%d", i))
+		}
+		w.Release("x1")
+		returns(first, "the first batch")
+		if err := w.Arm(barrier("z", "acquire", 0)); err == nil {
+			t.Error("a barrier under a new name succeeded with 64 names held while the second refund was still on its way to y, want it refused")
+		}
+		w.Release("x2")
+		returns(second, "the second batch")
+		if err := w.Arm(barrier("z", "acquire", 0)); err != nil {
+			t.Errorf("a barrier under a new name once both refunds passed y: %v, want it armed", err)
+		}
+	})
+
+	t.Run("disarming an unknown barrier leaves none", func(t *testing.T) {
+		w := fixtures.NewStoreWrapper()
+		a := w.Wrap(inner)
+		t.Cleanup(a.Close)
+		w.DisarmBarrier("never")
+		reached := w.Reached("never")
+		if err := w.Arm(barrier("never", "acquire", 1)); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan store.Response, 1)
+		go func() { done <- a.Call(t.Context(), acquire) }()
+		select {
+		case <-reached:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the channel Reached returned did not close when the call reached the barrier armed after it")
+		}
+		w.Release("never")
+		select {
+		case r := <-done:
+			if !sentOK(r) {
+				t.Errorf("the released call = %+v, want OK after a send", r)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the released call did not return within 5s")
+		}
+	})
 }

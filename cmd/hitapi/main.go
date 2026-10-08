@@ -51,7 +51,10 @@ const (
 	minNofile = 1024
 
 	// Server timeouts (plan choices): a /hit answers within P from just before its acquire,
-	// plus its last steps, so writes get P + writeSlack.
+	// plus its last steps, so writes get P + writeSlack. idleTimeout is coupled to hitgen's
+	// idleConnTimeout (cmd/hitgen/main.go), which must stay below it: hitgen never resends a
+	// /hit request, so one written to a connection hitapi is just closing would fail
+	// (cmd/hitgen TestClient_IdleTimeout).
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 10 * time.Second
 	idleTimeout       = 60 * time.Second

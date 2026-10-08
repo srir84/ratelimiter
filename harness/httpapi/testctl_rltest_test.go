@@ -828,3 +828,71 @@ func TestTestctl_DBFaultCap(t *testing.T) {
 	checkResponse(t, arm(), http.StatusOK, "")
 	checkResponse(t, arm(), http.StatusBadRequest, errInvalidRequest)
 }
+
+// TestTestctl_StoreFaultCap: POST /_test/faults (target store) and POST /_test/barrier arm at
+// most 64 store faults at once, under at most 64 barrier names (the store wrapper's caps, the
+// database wrapper's 64; plan choice, AGENTS.md §1 Queues): the 64th is accepted, the 65th
+// answers 400 invalid_request and arms nothing, and once a call has used up a fault, or a
+// barrier was released, the route accepts one more, then refuses the next.
+func TestTestctl_StoreFaultCap(t *testing.T) {
+	post := func(cs *ctlServer, path, body string) *httptest.ResponseRecorder {
+		return cs.control(t.Context(), local, http.MethodPost, path, body)
+	}
+
+	t.Run("store faults", func(t *testing.T) {
+		cs := newCtlServer(t, testConfig(), &fakeDB{hit: committed()})
+		refusal := `{"target":"store","mode":"refuse","match":"acquire","count":1}`
+		for i := range 64 {
+			if rec := post(cs, "/_test/faults", refusal); rec.Code != http.StatusOK {
+				t.Fatalf("store fault %d of 64: %d %s, want 200", i+1, rec.Code, rec.Body)
+			}
+		}
+		checkResponse(t, post(cs, "/_test/faults", `{"target":"store","mode":"drop_reply","match":"refund"}`),
+			http.StatusBadRequest, errInvalidRequest)
+		if n := cs.fix.Store.Armed(); n != 64 {
+			t.Errorf("Armed() = %d after the refused request, want 64", n)
+		}
+		if r := cs.call(t.Context(), "refund"); r.Outcome != store.OK {
+			t.Errorf("a refund call after the refused drop_reply = %+v, want it passed through: nothing armed on refunds", r)
+		}
+		if r := cs.call(t.Context(), "acquire"); r.Outcome != store.Unavailable || r.Sent {
+			t.Errorf("an acquire call = %+v, want the oldest refusal: unavailable, not sent", r)
+		}
+		checkResponse(t, post(cs, "/_test/faults", refusal), http.StatusOK, "")
+		checkResponse(t, post(cs, "/_test/faults", refusal), http.StatusBadRequest, errInvalidRequest)
+		checkResponse(t, post(cs, "/_test/barrier", `{"name":"b1","at":"before_send","match":"refund"}`),
+			http.StatusBadRequest, errInvalidRequest)
+	})
+
+	t.Run("barriers", func(t *testing.T) {
+		cs := newCtlServer(t, testConfig(), &fakeDB{hit: committed()})
+		barrier := func(name string) *httptest.ResponseRecorder {
+			return post(cs, "/_test/barrier", `{"name":"`+name+`","at":"before_send","match":"refund"}`)
+		}
+		for i := range 64 {
+			if rec := barrier(fmt.Sprintf("b%d", i)); rec.Code != http.StatusOK {
+				t.Fatalf("barrier %d of 64: %d %s, want 200", i+1, rec.Code, rec.Body)
+			}
+		}
+		checkResponse(t, barrier("b64"), http.StatusBadRequest, errInvalidRequest)
+		checkResponse(t, post(cs, "/_test/faults", `{"target":"store","mode":"refuse","match":"acquire","count":1}`),
+			http.StatusBadRequest, errInvalidRequest)
+		if n := cs.fix.Store.Armed(); n != 64 {
+			t.Errorf("Armed() = %d after the refused requests, want 64", n)
+		}
+		if r := cs.call(t.Context(), "acquire"); r.Outcome != store.OK {
+			t.Errorf("an acquire call after the refused refusal = %+v, want it passed through: nothing armed on acquires", r)
+		}
+		checkResponse(t, post(cs, "/_test/barrier/release", `{"name":"b0"}`), http.StatusOK, "")
+		checkResponse(t, barrier("b64"), http.StatusOK, "")
+		checkResponse(t, barrier("b65"), http.StatusBadRequest, errInvalidRequest)
+		// Releasing names that were never armed answers 200 and holds no slot: once b1's
+		// release frees one, b65 takes it and b66 is refused.
+		for i := range 100 {
+			checkResponse(t, post(cs, "/_test/barrier/release", fmt.Sprintf(`{"name":"never%d"}`, i)), http.StatusOK, "")
+		}
+		checkResponse(t, post(cs, "/_test/barrier/release", `{"name":"b1"}`), http.StatusOK, "")
+		checkResponse(t, barrier("b65"), http.StatusOK, "")
+		checkResponse(t, barrier("b66"), http.StatusBadRequest, errInvalidRequest)
+	})
+}

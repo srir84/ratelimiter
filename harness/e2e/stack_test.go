@@ -405,12 +405,18 @@ func freePort(ctx context.Context) (int, error) {
 	return port, nil
 }
 
-// startChild starts bin with args and exactly env, its output going to <dir>/<name>.out,
-// records it in .out/procs/<pid> right after Start, and reaps it in a goroutine that deletes
-// the record once Wait returns. The child outlives the test's context until a helper stops
-// it (AGENTS.md §2).
+// startChild starts bin with args and exactly env, its output going to <s.Dir>/<name>.out,
+// recorded in .out/procs/<pid> (startProcess).
 func (s *Stack) startChild(t testing.TB, bin string, args, env []string, name string) (*child, error) {
-	outPath := filepath.Join(s.Dir, name+".out")
+	return startProcess(t, s.root, s.Dir, bin, args, env, name)
+}
+
+// startProcess starts bin with args and exactly env, its output going to <dir>/<name>.out,
+// records it in <root>/.out/procs/<pid> right after Start, and reaps it in a goroutine that
+// deletes the record once Wait returns. The child outlives the test's context until a helper
+// stops it (AGENTS.md §2).
+func startProcess(t testing.TB, root, dir, bin string, args, env []string, name string) (*child, error) {
+	outPath := filepath.Join(dir, name+".out")
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("output file: %w", err)
@@ -428,7 +434,7 @@ func (s *Stack) startChild(t testing.TB, bin string, args, env []string, name st
 		PID:     cmd.Process.Pid,
 		Out:     outPath,
 		cmd:     cmd,
-		record:  filepath.Join(s.root, ".out", "procs", strconv.Itoa(cmd.Process.Pid)),
+		record:  filepath.Join(root, ".out", "procs", strconv.Itoa(cmd.Process.Pid)),
 		done:    make(chan struct{}),
 	}
 	if err := writeRecord(c.record, c.Cmdline); err != nil {

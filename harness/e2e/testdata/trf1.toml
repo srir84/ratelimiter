@@ -1,0 +1,18 @@
+# T-TRF-1 (HARNESS §8; IMPLEMENTATION_PLAN H2): one instance and six users; the one step plans
+# no aggregate arrivals, so every entry comes from the users' own 2/s streams over the 2 s run.
+# Seed 1 gives each user 3 or 4 entries.
+name = "trf1"
+seed = 1
+run_kind = "test"
+instances = 1
+
+[[steps]]
+rate_per_s = 0
+duration_s = 2
+
+[users]
+count = 6
+
+[[streams]]
+users = [0, 5]
+rate_per_s = 2

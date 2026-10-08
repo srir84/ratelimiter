@@ -2,8 +2,8 @@
 // §9.2): GET /hit runs arrival time, header checks, the in-flight cap, the limiter, the
 // refusal after acquire and the database work, in the §B3 order, and maps every outcome
 // through the HARNESS ERR table; /health and /metrics report without touching the limiter's
-// budget or the database (HAR-16). Every response carries Cache-Control: no-store (HTTP-8).
-// Each /hit writes its run-log records (§B8) through the run-log writer, and the refund
+// budget or the database (HAR-16). Every response the handler writes carries Cache-Control:
+// no-store (HTTP-8); Server.Handler names the few that net/http writes itself. Each /hit writes its run-log records (§B8) through the run-log writer, and the refund
 // listener hands the limiter's refund events to the same writer (HOST-8).
 //
 // The limiter, its permits and the database are small interfaces (plan choice), so the
@@ -140,8 +140,14 @@ func New(cfg Config, lim Limiter, db DB, log RunLog) (*Server, error) {
 // the JSON 404 not_found, the requests the mux would answer outside the ERR table (HTTP-7):
 // the request URI "*" (a bare 400) and a path that is not clean (a redirect to the cleaned
 // path), neither of which names a route. cmd/hitapi's server passes "OPTIONS *" on to it
-// (DisableGeneralOptionsHandler). Requests net/http cannot parse get its own plain-text 400
-// before any handler runs.
+// (DisableGeneralOptionsHandler).
+//
+// Some requests never reach a handler: net/http's server answers them itself while reading
+// the request, so their responses carry neither Cache-Control: no-store nor a JSON body, and
+// no handler can change that. They are the plain-text 400s for a request it cannot parse (a
+// malformed request line, header or Host), the 431 for headers larger than MaxHeaderBytes,
+// the 417 (empty body) for an Expect header other than 100-continue, and the plain-text 501
+// and 505 for an unsupported transfer coding or protocol version.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/hit", s.hit)
