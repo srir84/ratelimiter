@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -298,4 +299,70 @@ func passSettled(t *testing.T, d *driver.Driver, i int) limiter.CleanupReport {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// s9DepNs is the dependency deadline D of the S9 SPEC tests unless a test states another (plan
+// S9 Tests (b) choice): 500 ms.
+const s9DepNs = 500_000_000
+
+// hourNs is an hour in ns: an epoch re-read interval or cleanup interval that never comes
+// during a test, so an instance writes only the test's own commands (plan choice, as in
+// TestDesign_PipelinedTimeout).
+const hourNs = 3_600_000_000_000
+
+// s9Driver returns a driver of n instances on the harness policy and instance settings
+// (driver.DefaultPolicy, driver.DefaultInstance) with failure_mode mode and D = 500 ms, then edit
+// (when not nil) applied to both, and specs for the first instances. The §A5.6 inequality holds
+// at D = 500 ms: 1 + 1 + (⌈1152 / 128⌉ + 3) × 0.5 = 8 s ≤ 30 s.
+func s9Driver(t *testing.T, n int, mode limiter.FailureMode, edit func(*limiter.Policy, *limiter.Instance), specs ...driver.InstanceSpec) *driver.Driver {
+	t.Helper()
+	p := driver.DefaultPolicy()
+	p.FailureMode = mode
+	in := driver.DefaultInstance(p)
+	in.DependencyDeadlineNs = s9DepNs
+	if edit != nil {
+		edit(&p, &in)
+	}
+	return driver.New(t, driver.Options{Instances: n, Policy: p, Instance: in, PerInstance: specs})
+}
+
+// s9BothModes runs f in one subtest per failure mode, each on its own s9Driver.
+func s9BothModes(t *testing.T, n int, edit func(*limiter.Policy, *limiter.Instance), specs []driver.InstanceSpec,
+	f func(t *testing.T, d *driver.Driver, mode limiter.FailureMode)) {
+	t.Helper()
+	for _, m := range modes() {
+		t.Run(m.String(), func(t *testing.T) { f(t, s9Driver(t, n, m, edit, specs...), m) })
+	}
+}
+
+// quiet sets the epoch re-read interval and the cleanup interval to an hour: the epoch is read
+// once at startup and no timed pass runs, so the instances write only the test's acquires.
+func quiet(p *limiter.Policy, in *limiter.Instance) {
+	p.CleanupIntervalNs, in.EpochRereadIntervalNs = hourNs, hourNs
+}
+
+// notSentRefusal reports whether op is the failure-mode result of an acquire whose command was
+// not sent (API-11, API-20a, API-20b): unavailable in closed mode; in open mode degraded with a
+// permit that carries no deduction_id (API-5). Either way nothing was sent (SentCommands 0).
+func notSentRefusal(op driver.Op, mode limiter.FailureMode) bool {
+	if op.SentCommands != 0 {
+		return false
+	}
+	if mode == limiter.Open {
+		return op.Kind == limiter.Degraded && op.Permit != nil && op.Permit.DeductionID() == ""
+	}
+	return op.Kind == limiter.Unavailable && op.Permit == nil
+}
+
+// finishDegraded finishes a degraded permit (a no-op, API-5), so no permit is left open.
+func finishDegraded(op driver.Op) {
+	if op.Kind == limiter.Degraded && op.Permit != nil {
+		op.Permit.Done()
+	}
+}
+
+// firstWord is the first space-delimited word of an error reply's text.
+func firstWord(s string) string {
+	w, _, _ := strings.Cut(s, " ")
+	return w
 }

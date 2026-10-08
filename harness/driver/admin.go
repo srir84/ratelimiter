@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf16"
 
 	"ratelimiter/harness/fixtures"
 	"ratelimiter/internal/fingerprint"
@@ -58,9 +60,10 @@ type AdminResult struct {
 	Args []string // the arguments after the binary, as run (--json and --policy added)
 	Code int      // the exit code: 0 ok, 2 refused, 3 store or integrity problem, 4 clock_error
 	// Stdout and Stderr are the output as rladmin printed it, for the test's own checks (T-ADM-1
-	// scans them for passwords, a backstop). A caller never gets an output that holds a password:
-	// the driver ends the test first (checkNoPassword). Its own failure messages show the output
-	// redacted (adminFatalf).
+	// scans them for passwords, a backstop). A caller never gets an output that holds a password,
+	// raw or, once decoded, through JSON escapes: the driver ends the test first
+	// (checkNoPassword, on the raw output and on decodedOutput). Its own failure messages show
+	// the output redacted (adminFatalf).
 	Stdout string // with --json, one JSON object on success
 	Stderr string // "rladmin: <message>" on failure
 	// JSON is Stdout's one object, numbers kept exact (json.Number); nil when a run that did
@@ -101,15 +104,21 @@ func (d *Driver) RLAdmin(args ...string) AdminResult {
 // os.Environ, and it is killed after adminWait. It returns the exit code and the output; an
 // output that holds one of the store's passwords ends the test at once however the run ended,
 // before any other check and before the caller sees the output (§A6: never print a password;
-// checkNoPassword); a run that exits 0 without printing exactly one JSON object, nothing after
-// it, is a test failure (AGENTS.md §1: every input is validated); a failure message that shows
-// the output shows it with each password replaced (adminFatalf). A run that exits 0 writes
-// its op-log records: a start-epoch the policy record of p and the epoch record {epoch_id,
-// origin_ns = t_us × 1000} (adding p to the epoch policies the audit chooses from), a restore
-// its restore record and a clear its clear record, each adding the key's k:<enc> in the
-// expected epoch to the audit's Restored list. A refused or failed run changed nothing and
-// writes nothing (orchestrator decision, S8 task 3). Call it from the test's goroutine: a run
-// that cannot start, or whose --json output does not parse, fails the test at once.
+// checkNoPassword), and so does an output that spells one with JSON escapes such as \u00XX,
+// which the raw scan cannot see: right after the raw scan, before anything else reads the
+// output, the decoded object included, the driver scans every string a JSON decoder reads
+// from it (a duplicate key's first value, a second object, an object before other text) and
+// the whole text with its escapes decoded, which covers text that is not JSON
+// (decodedOutput); a run that exits 0 without printing
+// exactly one JSON object, nothing after it, is a test failure (AGENTS.md §1: every input is
+// validated); a failure message that shows the output shows it with each password replaced
+// (adminFatalf). A run that exits 0 writes its op-log records: a start-epoch the policy record
+// of p and the epoch record {epoch_id, origin_ns = t_us × 1000} (adding p to the epoch
+// policies the audit chooses from), a restore its restore record and a clear its clear
+// record, each adding the key's k:<enc> in the expected epoch to the audit's Restored list. A
+// refused or failed run changed nothing and writes nothing (orchestrator decision, S8 task 3).
+// Call it from the test's goroutine: a run that cannot start, or whose --json output does not
+// parse, fails the test at once.
 func (d *Driver) RLAdminPolicy(p limiter.Policy, args ...string) AdminResult {
 	d.t.Helper()
 	return d.rladmin(p, args)
@@ -152,7 +161,12 @@ func (d *Driver) rladmin(p limiter.Policy, args []string) AdminResult {
 	r := AdminResult{Args: argv}
 	err = cmd.Run()
 	r.Stdout, r.Stderr = stdout.String(), stderr.String()
-	if !d.checkNoPassword("rladmin "+sub, r.Stdout+r.Stderr) { // on every path, an abnormal exit's too
+	// On every path, an abnormal exit's too, and before anything else reads the output: the raw
+	// output, then the output with its JSON escapes decoded.
+	if !d.checkNoPassword("the output of rladmin "+sub, r.Stdout+r.Stderr) {
+		return r
+	}
+	if !d.checkNoPassword("the decoded JSON output of rladmin "+sub, decodedOutput(r.Stdout, r.Stderr)) {
 		return r
 	}
 	var exit *exec.ExitError
@@ -207,16 +221,17 @@ func takesPolicy(sub string) bool {
 }
 
 // checkNoPassword reports whether text is free of the store's four passwords, in every form
-// redactPasswords replaces. When it is not, it reports each user whose password text holds,
-// never the password, and ends the test at once (FailNow), so no caller's diagnostic can show
-// the output (review R2); the caller returns right after (recTB's FailNow returns).
+// redactPasswords replaces. When it is not, it reports "<what> holds the <user> password" for
+// each user whose password text holds, never the password, and ends the test at once
+// (FailNow), so no caller's diagnostic can show the output (review R2); the caller returns
+// right after (recTB's FailNow returns).
 func (d *Driver) checkNoPassword(what, text string) bool {
 	d.t.Helper()
 	clean := true
 	for _, u := range passwordUsers(d.st.PW) {
 		for _, f := range passwordForms(u.pw) {
 			if strings.Contains(text, f) {
-				d.t.Errorf("driver: the output of %s holds the %s password", what, u.user)
+				d.t.Errorf("driver: %s holds the %s password", what, u.user)
 				clean = false
 				break
 			}
@@ -228,10 +243,137 @@ func (d *Driver) checkNoPassword(what, text string) bool {
 	return clean
 }
 
+// decodedOutput returns rladmin's outputs as a JSON decoder reads them, for checkNoPassword (S8
+// review round 2): JSON escapes such as \u00XX can spell a password that the raw output never
+// shows, and decoding turns them back into it. For each output it holds every string and
+// number token a json.Decoder reads (jsonTokens: every object key and value, a duplicate key's
+// too, through every value, up to the first syntax error), and the whole output with every
+// JSON escape decoded wherever it stands (unescapeJSON), which also covers text that is not
+// JSON, such as a line after the object or an unterminated string. Each is its own line, so
+// no match spans two of them.
+func decodedOutput(outputs ...string) string {
+	var texts []string
+	for _, s := range outputs {
+		texts = append(texts, jsonTokens(s)...)
+		texts = append(texts, unescapeJSON(s))
+	}
+	return strings.Join(texts, "\n")
+}
+
+// jsonTokens returns the string tokens, object keys among them, and the number tokens that a
+// json.Decoder reads from s, value after value, until the end of s or the first syntax error.
+// Token reports each key as it reads it, so a key given twice shows both of its values, which
+// decoding into a map would not.
+func jsonTokens(s string) []string {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.UseNumber()
+	var out []string
+	for {
+		tok, err := dec.Token()
+		if err != nil { // io.EOF, or text that is not JSON: what was read before it is kept
+			return out
+		}
+		switch v := tok.(type) {
+		case string:
+			out = append(out, v)
+		case json.Number:
+			out = append(out, v.String())
+		}
+	}
+}
+
+// unescapeJSON returns s with every JSON string escape decoded wherever it stands, read left to
+// right as encoding/json reads a string (RFC 8259 §7): \" \\ \/ \b \f \n \r \t, and \uXXXX,
+// where a high surrogate followed by an escaped low surrogate is one character and any other
+// surrogate is U+FFFD. So \\u0061 is a backslash and "u0061". A backslash that starts no escape
+// stays as it is.
+func unescapeJSON(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] != '\\' || i+1 == len(s) {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if c, ok := shortEscape(s[i+1]); ok {
+			b.WriteByte(c)
+			i += 2
+			continue
+		}
+		r, ok := escapedUnit(s, i)
+		if !ok {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		i += 6
+		if utf16.IsSurrogate(r) {
+			if low, ok := escapedUnit(s, i); ok {
+				if pair := utf16.DecodeRune(r, low); pair != unicode.ReplacementChar {
+					b.WriteRune(pair)
+					i += 6
+					continue
+				}
+			}
+			r = unicode.ReplacementChar
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// shortEscape returns the character that the two-character JSON escape \c stands for.
+func shortEscape(c byte) (byte, bool) {
+	switch c {
+	case '"', '\\', '/':
+		return c, true
+	case 'b':
+		return '\b', true
+	case 'f':
+		return '\f', true
+	case 'n':
+		return '\n', true
+	case 'r':
+		return '\r', true
+	case 't':
+		return '\t', true
+	}
+	return 0, false
+}
+
+// escapedUnit reads the escape \uXXXX at s[i:], four hex digits of either case, as one UTF-16
+// code unit.
+func escapedUnit(s string, i int) (rune, bool) {
+	if i+6 > len(s) || s[i] != '\\' || s[i+1] != 'u' {
+		return 0, false
+	}
+	var r rune
+	for _, c := range []byte(s[i+2 : i+6]) {
+		var v byte
+		switch {
+		case '0' <= c && c <= '9':
+			v = c - '0'
+		case 'a' <= c && c <= 'f':
+			v = c - 'a' + 10
+		case 'A' <= c && c <= 'F':
+			v = c - 'A' + 10
+		default:
+			return 0, false
+		}
+		r = r<<4 | rune(v)
+	}
+	return r, true
+}
+
 // adminFatalf fails the test with a message that may show rladmin's output (AGENTS.md §1
 // Secrets): every form of the store's passwords is replaced in each string argument and again
-// in the message, so neither the output nor its quoted rendering shows one. checkNoPassword
-// has already ended the test on any password the output held.
+// in the message, so neither the output nor its quoted rendering shows one, and an argument
+// whose JSON escapes spell one is withheld (redactPasswords). checkNoPassword has already
+// ended the test on any password the output held, raw or once decoded (decodedOutput).
 func (d *Driver) adminFatalf(format string, args ...any) {
 	d.t.Helper()
 	for i, a := range args {
@@ -264,8 +406,8 @@ func passwordForms(pw string) []string {
 }
 
 // redactPasswords returns text with every form of each password (passwordForms) replaced by
-// "<user password>", naming its user; a text in which a replacement re-forms one is withheld
-// whole.
+// "<user password>", naming its user; a text in which a replacement re-forms one, or whose
+// JSON escapes, once decoded (unescapeJSON), still spell one, is withheld whole.
 func redactPasswords(text string, pw storeproc.Passwords) string {
 	users := passwordUsers(pw)
 	for _, u := range users {
@@ -273,9 +415,10 @@ func redactPasswords(text string, pw storeproc.Passwords) string {
 			text = strings.ReplaceAll(text, f, "<"+u.user+" password>")
 		}
 	}
+	decoded := unescapeJSON(text)
 	for _, u := range users {
 		for _, f := range passwordForms(u.pw) {
-			if strings.Contains(text, f) {
+			if strings.Contains(text, f) || strings.Contains(decoded, f) {
 				return "<withheld: it holds a store password>"
 			}
 		}

@@ -71,7 +71,7 @@ func TestPickDecides(t *testing.T) {
 	if !open.add(ready) {
 		t.Fatal("adding a ready connection to an open set failed")
 	}
-	open.dialFailed(time.Now().Add(time.Minute)) // another slot's dial failed meanwhile
+	open.dialFailed(time.Now().Add(time.Minute), "") // another slot's dial failed meanwhile
 	if pc, err := pick(open, t.Context(), 2, "a pick with a connection ready"); pc != ready || err != nil || ready.load.Load() != 2 {
 		t.Fatalf("a pick of 2 with a connection ready = %v, %v, %d reserved; want that connection, no error, 2", pc, err, ready.load.Load())
 	}
@@ -502,7 +502,10 @@ func TestCancelledBeforeSend(t *testing.T) {
 // answers AUTH) is unavailable when its dependency deadline, start + D, comes first, even with
 // the host's deadline only microseconds later, and cancelled when the host's own deadline or
 // cancellation comes first (SPEC API-1; plan S3 step 8). Per case, 201 concurrent calls, a
-// third each through Call, CallBatch (2 requests) and Do, each from its own start.
+// third each through Call, CallBatch (2 requests) and Do, each from its own start. No slot
+// dials before every call has taken its start (Options.Start): a failed dial wakes the
+// waiting calls to fail fast (DESIGN §A5.4), so each AUTH timeout, D after its dial began,
+// comes after every call's start + D, and only the two deadlines decide.
 func TestNotSentHostOrDependency(t *testing.T) {
 	cases := []struct {
 		name string
@@ -521,18 +524,21 @@ func TestNotSentHostOrDependency(t *testing.T) {
 			e := newEnv(t)
 			e.srv.HangAuth() // no connection becomes ready: every call waits until a deadline
 			sc := e.script("acquire", echoAcquire)
-			e.start()
+			gate := make(chan struct{}) // closed once every call has taken its start
+			e.start(func(o *Options) { o.Start = gate })
 			type ended struct {
 				rs []Response
 				el time.Duration
 			}
 			res := make([]ended, 201)
-			var wg sync.WaitGroup
+			var wg, started sync.WaitGroup
+			started.Add(len(res))
 			for i := range res {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					start := time.Now()
+					started.Done()
 					ctx, cancel := tc.host(t.Context(), start)
 					defer cancel()
 					var rs []Response
@@ -548,6 +554,8 @@ func TestNotSentHostOrDependency(t *testing.T) {
 					res[i] = ended{rs, time.Since(start)}
 				}()
 			}
+			started.Wait()
+			close(gate) // the slots dial from now on, after every call's start
 			wg.Wait()
 			for k, entry := range entries {
 				outcomes := map[Outcome]int{}
@@ -949,34 +957,83 @@ func TestLifetimeEnds(t *testing.T) {
 	}
 }
 
+// TestCallSecondsObserved (plan S3 Tests (a), S9 step 2; DESIGN §A5.11): the count of
+// rl_store_call_seconds{script="acquire"} rises by exactly N after N calls; then one call of
+// each of the 7 scripts rl_lib runs (§A2), each on its production kind and answered with a
+// valid reply (the §A4.9 shapes of TestDecodeLayouts), raises its own series' count by exactly
+// 1 and leaves the other six unchanged, so no script is observed under another's label.
 func TestCallSecondsObserved(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	const fp = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	constant := func(v resp.Value) fakeresp.Handler { return func(_, _ []string) resp.Value { return v } }
+	rows := []struct {
+		label string // the script label value, as DESIGN §A5.11 lists it
+		kind  Kind
+		sc    scripts.Script
+		h     fakeresp.Handler
+	}{
+		{"acquire", Call, scripts.Acquire, echoAcquire},
+		{"refund", Refund, scripts.Refund, constant(rep(3, tNow, "", 1_000_000_000))},
+		{"due_entries", Maintenance, scripts.DueEntries, constant(rep(0, tNow, "", 0))},
+		{"cleanup_entry", Maintenance, scripts.CleanupEntry, constant(rep(30, tNow, "", 0))},
+		{"reclaim", Maintenance, scripts.Reclaim, constant(rep(40, 0, "", 1))},
+		{"read_epoch", Call, scripts.ReadEpoch, constant(rep(0, 0, "", id, fp, tNow, 3, tNow+7, 10, 2, 0))},
+		{"hold", Call, scripts.Hold, constant(rep(40, 0, "", 0))},
+	}
 	e := newEnv(t)
-	sc := e.script("acquire", echoAcquire)
+	for _, r := range rows {
+		e.srv.Load(r.sc.Text)
+		e.srv.Handle(r.sc.SHA, r.h)
+	}
 	e.start()
 	e.warm(8, 2)
-	count := func() uint64 {
+	counts := func() map[string]uint64 {
+		out := map[string]uint64{}
 		for _, f := range e.reg.Snapshot().Families {
 			if f.Name != "rl_store_call_seconds" {
 				continue
 			}
 			for _, s := range f.Series {
-				if s.LabelValue == "acquire" {
-					return s.Count
-				}
+				out[s.LabelValue] = s.Count
 			}
 		}
-		t.Fatal("no rl_store_call_seconds{script=\"acquire\"} series")
-		return 0
+		for _, r := range rows {
+			if _, ok := out[r.label]; !ok {
+				t.Fatalf("no rl_store_call_seconds{script=%q} series", r.label)
+			}
+		}
+		return out
 	}
-	const n = 7
-	before := count()
-	for i := range n {
-		if r := e.a.Call(t.Context(), acquireReq(sc, i+1)); r.Outcome != OK {
-			t.Fatalf("call %d = %v, want ok", i+1, r.Outcome)
+	// rose checks that between before and after the series label rose by n and every other
+	// series of the 7 stayed put.
+	rose := func(what string, before, after map[string]uint64, label string, n uint64) {
+		t.Helper()
+		for _, r := range rows {
+			want := uint64(0)
+			if r.label == label {
+				want = n
+			}
+			if got := after[r.label] - before[r.label]; got != want {
+				t.Errorf("%s: rl_store_call_seconds{script=%q} count rose by %d, want %d", what, r.label, got, want)
+			}
 		}
 	}
-	if got := count() - before; got != n {
-		t.Errorf("rl_store_call_seconds{script=\"acquire\"} count rose by %d after %d calls, want %d", got, n, n)
+
+	const n = 7
+	before := counts()
+	for i := range n {
+		if r := e.a.Call(t.Context(), Request{Kind: Call, Script: scripts.Acquire, Args: []string{strconv.Itoa(i + 1)}}); r.Outcome != OK || r.Reply.Elems[4].Int != int64(i+1) {
+			t.Fatalf("call %d = %v, want ok with its own reply", i+1, r.Outcome)
+		}
+	}
+	rose(strconv.Itoa(n)+" acquire calls", before, counts(), "acquire", n)
+
+	for _, r := range rows {
+		before := counts()
+		if got := e.a.Call(t.Context(), Request{Kind: r.kind, Script: r.sc, Args: []string{"1"}}); got.Outcome != OK || got.SentCommands != 1 {
+			t.Fatalf("%s call = %v, SentCommands %d; want ok, 1", r.label, got.Outcome, got.SentCommands)
+		}
+		rose("one "+r.label+" call", before, counts(), r.label, 1)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,11 +32,13 @@ func apiInterim() map[string]string {
 // of the §A5.2 Go listing (code and comments), §A5.11, §A5.12 and every Build item of the
 // plan; and the declarations of the §A5.2 listing.
 type apiDocs struct {
-	words   map[string]bool
-	types   []string                     // every type the listing declares, in order
-	structs map[string][]string          // struct name → its "Name Type" fields
-	funcs   map[string]string            // function name → signature
-	methods map[string]map[string]string // receiver type → method name → signature
+	words    map[string]bool
+	types    []string                     // every type the listing declares, in order
+	structs  map[string][]string          // struct name → its "Name Type" fields
+	funcs    map[string]string            // function name → signature
+	methods  map[string]map[string]string // receiver type → method name → signature
+	notes    map[string][]string          // "Struct.Field" → the exported names its comment gives (apiCommentNames)
+	wrappers []string                     // the thin wrappers §A5.2 says package limiter holds
 }
 
 // apiWordRe matches a word of the docs: a Go identifier or a snake_case setting name.
@@ -55,10 +58,16 @@ func apiNorm(s string) string { return strings.ToLower(strings.ReplaceAll(s, "_"
 //   - every struct and function the §A5.2 listing declares must match it exactly once it
 //     exists: the (name, type) set of the exported fields, and the signature; a type the
 //     listing declares methods on carries exactly those exported methods;
-//   - an item that does not exist yet passes, except under --complete (S9, D1).
+//   - an item that does not exist yet passes, except under --complete (S9, D1);
+//   - under --complete, also (aliases, wrappers, constants): every module type that a listed
+//     field or signature uses has an exported limiter alias of that very type; every thin
+//     wrapper the §A5.2 text names exists as a limiter function; and every constant the
+//     listing's comment on an enum-typed field names exists in limiter with that field's type
+//     (Closed and Open, Store and Controlled, the 14 result kinds, the refund results and the
+//     unresolved reasons).
 //
 // It passes while limiter/ does not exist, and fails closed: a package that does not load or
-// type-check, or docs without the §A5.2 listing, fail it.
+// type-check, or docs without the §A5.2 listing or its list of thin wrappers, fail it.
 func checkAPI(ctx context.Context, e *env, args []string) (report, error) {
 	fs := flag.NewFlagSet("api", flag.ContinueOnError)
 	complete := fs.Bool("complete", false, "also fail when a §A5.2 item is missing (end of the build)")
@@ -96,6 +105,11 @@ func checkAPI(ctx context.Context, e *env, args []string) (report, error) {
 	}
 	nLim := c.names(lim)
 	missing := c.listing(lim)
+	if c.complete {
+		c.aliases(lim)
+		c.wrappers(lim)
+		c.constants(lim)
+	}
 	nTest := 0
 	if isDir(filepath.Join(e.root, "limitertest")) {
 		lt, err := newAPILoader(ctx, e.root, module, []string{"rltest"}, fset, std).load(module + "/limitertest")
@@ -152,7 +166,8 @@ func readAPIDocs(ctx context.Context, root string) (*apiDocs, error) {
 	if len(build) == 0 {
 		return nil, errors.New("IMPLEMENTATION_PLAN.md has no - **Build:** item")
 	}
-	d := &apiDocs{words: map[string]bool{}, structs: map[string][]string{}, funcs: map[string]string{}, methods: map[string]map[string]string{}}
+	d := &apiDocs{words: map[string]bool{}, structs: map[string][]string{}, funcs: map[string]string{}, methods: map[string]map[string]string{},
+		notes: map[string][]string{}}
 	for _, part := range [][]string{listing, a511, a512, build} {
 		for _, line := range part {
 			for _, w := range apiWordRe.FindAllString(line, -1) {
@@ -163,7 +178,40 @@ func readAPIDocs(ctx context.Context, root string) (*apiDocs, error) {
 	if err := d.parseListing(strings.Join(listing, "\n")); err != nil {
 		return nil, err
 	}
+	m := apiWrappersRe.FindStringSubmatch(strings.Join(a52, " "))
+	if m == nil {
+		return nil, errors.New("DESIGN.md §A5.2 names no thin wrappers (…)")
+	}
+	d.wrappers = apiWordRe.FindAllString(m[1], -1)
 	return d, nil
+}
+
+// apiWrappersRe finds the list of thin wrappers in the §A5.2 text: "thin wrappers (`New`, …)".
+var apiWrappersRe = regexp.MustCompile(`thin wrappers \(([^)]*)\)`)
+
+// apiCommentNames returns the exported Go identifiers a listing comment names outside
+// parentheses, in order: "Closed (default) | Open" gives Closed and Open, and "Closed,
+// Retention, Expired (Unresolved only)" gives Closed, Retention and Expired.
+func apiCommentNames(comment string) []string {
+	var b strings.Builder
+	depth := 0
+	for _, r := range comment {
+		switch {
+		case r == '(':
+			depth++
+		case r == ')' && depth > 0:
+			depth--
+		case depth == 0:
+			b.WriteRune(r)
+		}
+	}
+	var out []string
+	for _, w := range apiWordRe.FindAllString(b.String(), -1) {
+		if token.IsExported(w) {
+			out = append(out, w)
+		}
+	}
+	return out
 }
 
 // docSection returns the lines of the section whose heading starts with prefix, up to the
@@ -234,13 +282,16 @@ func buildItems(plan []string) []string {
 }
 
 // parseListing records the types, struct fields, functions and methods the §A5.2 listing
-// declares. The listing is Go source; its functions have no bodies, which Go's parser
-// accepts.
+// declares, and the names each struct field's comment gives (notes): the comment on the
+// field's line and on the comment-only lines right after it (Result.Kind's runs over three).
+// The listing is Go source; its functions have no bodies, which Go's parser accepts.
 func (d *apiDocs) parseListing(src string) error {
-	f, err := parser.ParseFile(token.NewFileSet(), "DESIGN.md §A5.2", src, parser.SkipObjectResolution)
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "DESIGN.md §A5.2", src, parser.SkipObjectResolution)
 	if err != nil {
 		return fmt.Errorf("parsing the DESIGN §A5.2 listing: %w", err)
 	}
+	lines := strings.Split(src, "\n")
 	for _, decl := range f.Decls {
 		switch dl := decl.(type) {
 		case *ast.GenDecl:
@@ -255,6 +306,15 @@ func (d *apiDocs) parseListing(src string) error {
 				d.types = append(d.types, ts.Name.Name)
 				if st, ok := ts.Type.(*ast.StructType); ok && !ts.Assign.IsValid() {
 					d.structs[ts.Name.Name] = astFields(st.Fields)
+					for _, fld := range st.Fields.List {
+						names := apiCommentNames(fieldComment(lines, fset.Position(fld.Pos()).Line))
+						if len(names) == 0 {
+							continue
+						}
+						for _, n := range fld.Names {
+							d.notes[ts.Name.Name+"."+n.Name] = names
+						}
+					}
 				}
 			}
 		case *ast.FuncDecl:
@@ -274,6 +334,26 @@ func (d *apiDocs) parseListing(src string) error {
 		return errors.New("the DESIGN §A5.2 listing declares no struct, function or method")
 	}
 	return nil
+}
+
+// fieldComment returns the comment of the field on line (1-based) of lines: the text after
+// "//" on that line, then that of each comment-only line right after it.
+func fieldComment(lines []string, line int) string {
+	if line < 1 || line > len(lines) {
+		return ""
+	}
+	_, text, ok := strings.Cut(lines[line-1], "//")
+	if !ok {
+		return ""
+	}
+	for _, next := range lines[line:] {
+		rest, isComment := strings.CutPrefix(strings.TrimSpace(next), "//")
+		if !isComment {
+			break
+		}
+		text += " " + rest
+	}
+	return text
 }
 
 // astFields returns a struct's fields as "Name Type", one per name; an embedded field is
@@ -560,6 +640,186 @@ func (c *apiChecker) listing(pkg *types.Package) []string {
 		}
 	}
 	return missing
+}
+
+// aliases is --complete's first rule: every type of the module that the fields of a listed
+// struct or the signature of a listed function or method uses (a method's receiver
+// included) has an exported limiter alias of that very type (DESIGN §A5.2: package limiter
+// re-exports them as type aliases). Items that do not exist are listing's to report.
+func (c *apiChecker) aliases(pkg *types.Package) {
+	scope := pkg.Scope()
+	uses := map[*types.TypeName][]string{}
+	for _, name := range sortedKeys(c.docs.structs) {
+		if st := structOf(scope.Lookup(name)); st != nil {
+			for i := range st.NumFields() {
+				if f := st.Field(i); f.Exported() {
+					c.typesIn(f.Type(), name+"."+f.Name(), uses)
+				}
+			}
+		}
+	}
+	for _, name := range sortedKeys(c.docs.funcs) {
+		if fn, ok := scope.Lookup(name).(*types.Func); ok {
+			c.typesIn(fn.Type(), name, uses)
+		}
+	}
+	for _, recv := range sortedKeys(c.docs.methods) {
+		named := namedOf(scope.Lookup(recv))
+		if named == nil {
+			continue
+		}
+		ms := types.NewMethodSet(types.NewPointer(named))
+		for _, m := range sortedKeys(c.docs.methods[recv]) {
+			if sel := ms.Lookup(nil, m); sel != nil {
+				c.typesIn(named, recv+"."+m, uses)
+				c.typesIn(sel.Obj().Type(), recv+"."+m, uses)
+			}
+		}
+	}
+	objs := make([]*types.TypeName, 0, len(uses))
+	for obj := range uses {
+		objs = append(objs, obj)
+	}
+	sort.Slice(objs, func(i, j int) bool {
+		if objs[i].Name() != objs[j].Name() {
+			return objs[i].Name() < objs[j].Name()
+		}
+		return objs[i].Pkg().Path() < objs[j].Pkg().Path()
+	})
+	for _, obj := range objs {
+		where := strings.Join(sortedSet(uses[obj]), ", ")
+		got := scope.Lookup(obj.Name())
+		if got == nil {
+			c.problems = append(c.problems, fmt.Sprintf("limiter: §A5.2 type %s, used in %s, has no exported limiter alias (--complete)", obj.Name(), where))
+			continue
+		}
+		if tn, ok := got.(*types.TypeName); !ok || !tn.IsAlias() || !types.Identical(types.Unalias(tn.Type()), obj.Type()) {
+			c.problem(got.Pos(), "limiter.%s is not an alias of the %s used in %s (--complete)", obj.Name(), obj.Name(), where)
+		}
+	}
+}
+
+// typesIn records use for every named type of the module in t, through pointers, slices,
+// arrays, maps, channels, signatures and struct literals; aliases resolve to their type.
+func (c *apiChecker) typesIn(t types.Type, use string, uses map[*types.TypeName][]string) {
+	switch t := t.(type) {
+	case *types.Alias:
+		c.typesIn(types.Unalias(t), use, uses)
+	case *types.Named:
+		if p := t.Obj().Pkg(); p != nil && (p.Path() == c.module || strings.HasPrefix(p.Path(), c.module+"/")) {
+			uses[t.Obj()] = append(uses[t.Obj()], use)
+		}
+	case *types.Pointer:
+		c.typesIn(t.Elem(), use, uses)
+	case *types.Slice:
+		c.typesIn(t.Elem(), use, uses)
+	case *types.Array:
+		c.typesIn(t.Elem(), use, uses)
+	case *types.Map:
+		c.typesIn(t.Key(), use, uses)
+		c.typesIn(t.Elem(), use, uses)
+	case *types.Chan:
+		c.typesIn(t.Elem(), use, uses)
+	case *types.Signature:
+		for i := range t.Params().Len() {
+			c.typesIn(t.Params().At(i).Type(), use, uses)
+		}
+		for i := range t.Results().Len() {
+			c.typesIn(t.Results().At(i).Type(), use, uses)
+		}
+	case *types.Struct:
+		for i := range t.NumFields() {
+			c.typesIn(t.Field(i).Type(), use, uses)
+		}
+	}
+}
+
+// wrappers is --complete's second rule: every thin wrapper the §A5.2 text names is a limiter
+// function. Those the listing declares are listing's to report.
+func (c *apiChecker) wrappers(pkg *types.Package) {
+	for _, name := range c.docs.wrappers {
+		if _, listed := c.docs.funcs[name]; listed {
+			continue
+		}
+		switch obj := pkg.Scope().Lookup(name); obj.(type) {
+		case nil:
+			c.problems = append(c.problems, fmt.Sprintf("limiter: §A5.2 wrapper %s is missing (--complete)", name))
+		case *types.Func:
+		default:
+			c.problem(obj.Pos(), "limiter.%s: §A5.2 names a wrapper function, this is a %s (--complete)", name, objKind(obj))
+		}
+	}
+}
+
+// constants is --complete's third rule: for each field of a listed struct whose type is an
+// enum of the module (a defined type over a basic type), every name the listing's comment on
+// the field gives is an exported limiter constant of that type, named as given or after a
+// leading part of the type's name (plan S5 step 8: UnresolvedReason's Closed is
+// UnresolvedClosed, since Closed is FailureMode's).
+func (c *apiChecker) constants(pkg *types.Package) {
+	scope := pkg.Scope()
+	for _, key := range sortedKeys(c.docs.notes) {
+		structName, field, _ := strings.Cut(key, ".")
+		st := structOf(scope.Lookup(structName))
+		if st == nil {
+			continue
+		}
+		var enum *types.Named
+		for i := range st.NumFields() {
+			if f := st.Field(i); f.Name() == field {
+				enum, _ = types.Unalias(f.Type()).(*types.Named)
+			}
+		}
+		if enum == nil || enum.Obj().Pkg() == nil || !strings.HasPrefix(enum.Obj().Pkg().Path()+"/", c.module+"/") {
+			continue
+		}
+		if _, basic := enum.Underlying().(*types.Basic); !basic {
+			continue
+		}
+		var consts []string
+		for _, name := range scope.Names() {
+			if k, ok := scope.Lookup(name).(*types.Const); ok && k.Exported() && types.Identical(types.Unalias(k.Type()), enum) {
+				consts = append(consts, name)
+			}
+		}
+		var absent []string
+		for _, w := range c.docs.notes[key] {
+			if !slices.ContainsFunc(consts, func(name string) bool { return constFor(name, w, enum.Obj().Name()) }) {
+				absent = append(absent, w)
+			}
+		}
+		if len(absent) > 0 {
+			c.problems = append(c.problems, fmt.Sprintf("limiter: §A5.2 constants of %s named in the listing's comment on %s are missing: %s (--complete)",
+				enum.Obj().Name(), key, strings.Join(absent, ", ")))
+		}
+	}
+}
+
+// constFor reports whether a constant named name stands for the listing's word w of the enum
+// typeName: the word itself, or the word after a non-empty leading part of the type's name.
+func constFor(name, w, typeName string) bool {
+	if name == w {
+		return true
+	}
+	prefix, ok := strings.CutSuffix(name, w)
+	return ok && prefix != "" && strings.HasPrefix(typeName, prefix)
+}
+
+// structOf returns the struct behind a type name, through aliases; nil for anything else.
+func structOf(obj types.Object) *types.Struct {
+	named := namedOf(obj)
+	if named == nil {
+		return nil
+	}
+	st, _ := named.Underlying().(*types.Struct)
+	return st
+}
+
+// sortedSet returns xs sorted, each value once.
+func sortedSet(xs []string) []string {
+	out := slices.Clone(xs)
+	sort.Strings(out)
+	return slices.Compact(out)
 }
 
 // objKind names an object's kind for messages.

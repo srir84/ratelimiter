@@ -32,7 +32,11 @@ func Handshake(c net.Conn, user, pass string, deadline time.Time, obs func(cmd s
 		return fmt.Errorf("reading the AUTH reply: %w", err)
 	}
 	if v.Kind != Simple || v.Str != "OK" {
-		return fmt.Errorf("AUTH as %s refused: %s", user, redact(v, pass))
+		red := redact(v, pass)
+		if red.Kind == Error {
+			return fmt.Errorf("AUTH as %s refused: %w", user, &ReplyError{Text: red.Str})
+		}
+		return fmt.Errorf("AUTH as %s refused: %s", user, red)
 	}
 	if r.br.Buffered() > 0 {
 		return protoErr("data after the AUTH reply")
@@ -42,6 +46,14 @@ func Handshake(c net.Conn, user, pass string, deadline time.Time, obs func(cmd s
 	}
 	return nil
 }
+
+// ReplyError is the error reply that refused a handshake (Handshake wraps it): Text is the
+// reply's text without its leading "-", with the password redacted as in the error, so a
+// caller can keep it as the store's error text (plan S9 step 1) without ever holding the
+// password. Its Error is the reply as Value.String writes it.
+type ReplyError struct{ Text string }
+
+func (e *ReplyError) Error() string { return Value{Kind: Error, Str: e.Text}.String() }
 
 // redacted stands in for the password wherever a reply repeats it.
 const redacted = "<password>"

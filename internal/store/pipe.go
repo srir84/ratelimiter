@@ -26,6 +26,17 @@ const (
 	errDependencyDeadline connError = "the dependency deadline passed"
 )
 
+// refusedError is the fail-fast error (errFailFast, which it wraps) of a kind whose last dial
+// the store refused with an error reply: reply is that reply's text, its password redacted,
+// which the call's Response carries as StoreError (plan S9 step 1).
+type refusedError struct{ reply string }
+
+func (e *refusedError) Error() string {
+	return string(errFailFast) + "; the store refused it: " + e.reply
+}
+
+func (e *refusedError) Unwrap() error { return errFailFast }
+
 // result is what a written command got: its reply, or the error that ended the wait.
 type result struct {
 	v   resp.Value
@@ -193,6 +204,14 @@ func (pc *pipeConn) setHeadDeadline(writtenAt time.Time) {
 	}
 	// A failure means the connection is broken; the reader then fails and closes it.
 	_ = pc.conn.SetReadDeadline(dl)
+}
+
+// isClosed reports whether close has begun: it marks the connection closed and empties the
+// FIFO in one step, before it closes the socket, so a write that close cut short sees it.
+func (pc *pipeConn) isClosed() bool {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+	return pc.closed
 }
 
 // readLoop matches replies to the FIFO in order until the connection fails. A read timeout

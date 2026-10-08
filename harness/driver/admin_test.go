@@ -4,6 +4,7 @@ package driver
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -209,19 +210,53 @@ func TestDriverAdmin(t *testing.T) {
 // rl_admin password ($RL_ADMIN_PASSWORD, from the child's explicit environment) on stdout, or
 // the rl_ops password on stderr of a refused run, is reported naming the user, never the
 // password, and ends the test at once (FailNow) with no other report, also when that output is
-// malformed or the run was killed by a signal (review R2). While the recTB's Fatal methods end
-// the calling goroutine, as testing.T's do, such a run stops at the driver's report: the
-// caller's code after it, a diagnostic that would show the raw output, never runs, and no
-// report holds the password. No run of status writes an op-log record, and the driver's
-// teardown reports nothing. redactPasswords replaces each user's password in its raw,
-// JSON-escaped and Go-quoted forms, and adminFatalf shows output with each password replaced,
-// as is and Go-quoted.
+// malformed or the run was killed by a signal (review R2). So is an output that spells a
+// password with \u00XX escapes, which the raw scan cannot see (S8 review round 2): the rl_admin
+// password in a string value, in a nested object key, in the first of two values of one key
+// (decoding into a map keeps only the second), in an object followed by a line or by a second
+// object, or in text that is not JSON, and the rl_ops password on stderr of a refused run.
+// Once decoded the output holds the password, so the driver reports that the decoded output
+// holds it, before the exit code or the JSON are looked at, and hands out no decoded object.
+// While the recTB's Fatal methods end the calling goroutine, as testing.T's do, such a run
+// stops at the driver's report: the caller's code after it, a diagnostic that would show the
+// raw output, never runs, and no report holds the password, raw or escaped. No run of status
+// writes an op-log record, and the driver's teardown reports nothing. redactPasswords replaces
+// each user's password in its raw, JSON-escaped and Go-quoted forms and withholds a text
+// whose JSON escapes, once decoded, spell one (\u00XX escapes in either case, one escaped
+// character among plain ones, a surrogate pair), and adminFatalf shows output with each
+// password replaced, as is and Go-quoted, or withheld. This test's own diagnostics show the
+// driver's reports and the decoded output redacted too, so a driver that regressed could not
+// print a password through them.
 func TestDriverAdminChecks(t *testing.T) {
 	pws := storeproc.Passwords{Lib: `l"ib`, Admin: `ad\min`, Fixture: "fix<ture", Ops: "9f9f9f"}
 	text := `l"ib l\"ib ad\min ad\\min fix<ture fix\u003cture 9f9f9f`
 	if got, want := redactPasswords(text, pws), "<rl_lib password> <rl_lib password> <rl_admin password> <rl_admin password> "+
 		"<rl_fixture password> <rl_fixture password> <rl_ops password>"; got != want {
 		t.Errorf("redactPasswords(%q) = %q, want %q", text, got, want)
+	}
+	const withheld = "<withheld: it holds a store password>"
+	for _, c := range []struct {
+		text string
+		pws  storeproc.Passwords
+		want string
+	}{
+		// ad\min is a d \ m i n: U+0061 U+0064 U+005C U+006D U+0069 U+006E.
+		{`printed {"echo":"\u0061\u0064\u005c\u006d\u0069\u006e"}`, pws, withheld},
+		{`printed {"echo":"\u0061\u0064\u005C\u006D\u0069\u006E"}`, pws, withheld},
+		{`a mixed spelling ad\u005cmin`, pws, withheld},
+		{`9f\u0039f9f, the rl_ops password`, pws, withheld},
+		// U+1F600 is the surrogate pair D83D DE00: 0x1F600 - 0x10000 = 0xF600, high 0xD800 +
+		// (0xF600 >> 10) = 0xD83D, low 0xDC00 + (0xF600 & 0x3FF) = 0xDE00.
+		{`pw \ud83d\ude00!`, storeproc.Passwords{Ops: "\U0001F600!"}, withheld},
+		{`pw \uD83D\uDE00!`, storeproc.Passwords{Ops: "\U0001F600!"}, withheld},
+		// A lone high surrogate is U+FFFD, never paired with the text after it; \\u0039 is
+		// a backslash and "u0039", not "9".
+		{`pw \ud83d!`, storeproc.Passwords{Ops: "\U0001F600!"}, `pw \ud83d!`},
+		{`9f\\u0039f9f`, pws, `9f\\u0039f9f`},
+	} {
+		if got := redactPasswords(c.text, c.pws); got != c.want {
+			t.Errorf("redactPasswords(%q) = %q, want %q", c.text, got, c.want)
+		}
 	}
 
 	for _, c := range []struct {
@@ -243,15 +278,45 @@ func TestDriverAdminChecks(t *testing.T) {
 	})
 	d := New(f, Options{NoEpoch: true})
 	pw := d.Store().PW
+	// escapedSpelling is secret as the fake rladmins below print it, every character as a JSON
+	// \u00XX escape in lower-case hex, computed here character by character.
+	escapedSpelling := func(secret string) string {
+		var b strings.Builder
+		for _, c := range secret {
+			fmt.Fprintf(&b, `\u%04x`, c)
+		}
+		return b.String()
+	}
+	// holdsPassword reports whether a report holds one of the store's passwords raw, or spelled
+	// as the fake rladmins print it, as is or Go-quoted (its backslashes doubled), as a report
+	// that shows the output with %q would hold it.
 	holdsPassword := func(reps []string) bool {
 		for _, rep := range reps {
 			for _, secret := range []string{pw.Lib, pw.Admin, pw.Fixture, pw.Ops} {
-				if strings.Contains(rep, secret) {
+				e := escapedSpelling(secret)
+				if strings.Contains(rep, secret) || strings.Contains(rep, e) || strings.Contains(rep, strings.ReplaceAll(e, `\`, `\\`)) {
 					return true
 				}
 			}
 		}
 		return false
+	}
+	// redacted formats a diagnostic of this test with every form of each password replaced, so
+	// one that shows the driver's reports or the decoded output never shows a password, even
+	// from a driver that regressed.
+	redacted := func(format string, args ...any) string { return redactPasswords(fmt.Sprintf(format, args...), pw) }
+	if s := redacted("%q %v", []string{"report " + pw.Ops}, map[string]any{"echo": pw.Admin}); holdsPassword([]string{s}) {
+		t.Error("a diagnostic of this test would show a password")
+	}
+	// escaped is a fake rladmin that puts the password in $<env> into $e, every character as a
+	// JSON \u00XX escape (escapedSpelling), and then runs out, which prints $e.
+	escaped := func(env, out string) string {
+		return `p=$` + env + `; e=''
+while [ -n "$p" ]; do r=${p#?}; c=${p%"$r"}; e="$e$(printf '\\u%04x' "'$c")"; p=$r; done
+` + out
+	}
+	decodedReport := func(user string) []string {
+		return []string{"the decoded JSON output of rladmin status holds the " + user + " password"}
 	}
 	dir := t.TempDir()
 	for i, c := range []struct {
@@ -273,6 +338,20 @@ func TestDriverAdminChecks(t *testing.T) {
 			[]string{"the output of rladmin status holds the rl_admin password"}, []string{"FailNow"}},
 		{"an abnormal exit holding the rl_admin password", `printf 'rladmin: %s\n' "$RL_ADMIN_PASSWORD" >&2; kill -KILL $$`,
 			[]string{"the output of rladmin status holds the rl_admin password"}, []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in a string value", escaped("RL_ADMIN_PASSWORD", `printf '{"echo":"%s"}\n' "$e"`),
+			decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in a nested key", escaped("RL_ADMIN_PASSWORD", `printf '{"a":[{"%s":1}]}\n' "$e"`),
+			decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in a key's first value, the second e1",
+			escaped("RL_ADMIN_PASSWORD", `printf '{"epoch_id":"%s","epoch_id":"e1"}\n' "$e"`), decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in an object followed by a line",
+			escaped("RL_ADMIN_PASSWORD", `printf '{"echo":"%s"}\ntrailing\n' "$e"`), decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in an object followed by a second object",
+			escaped("RL_ADMIN_PASSWORD", `printf '{"echo":"%s"}\n{"x":1}\n' "$e"`), decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_admin password \\u00XX-escaped in text that is not JSON",
+			escaped("RL_ADMIN_PASSWORD", `printf 'not json %s\n' "$e"`), decodedReport("rl_admin"), []string{"FailNow"}},
+		{"the rl_ops password \\u00XX-escaped on stderr of a refused run",
+			escaped("RL_OPS_PASSWORD", `printf 'rladmin: %s\n' "$e" >&2; exit 2`), decodedReport("rl_ops"), []string{"FailNow"}},
 		{"an abnormal exit", `printf 'rladmin: dying\n' >&2; kill -KILL $$`, nil,
 			[]string{"rladmin status did not run to its exit", "signal: killed", "rladmin: dying"}},
 	} {
@@ -292,13 +371,13 @@ func TestDriverAdminChecks(t *testing.T) {
 		}{{"errors", newErrs, c.errs}, {"fatals", newFatals, c.fatals}} {
 			switch {
 			case rc.want == nil && len(rc.got) != 0:
-				t.Errorf("%s: %s %q, want none", c.name, rc.kind, rc.got)
+				t.Error(redacted("%s: %s %q, want none", c.name, rc.kind, rc.got))
 			case rc.want != nil && len(rc.got) != 1:
-				t.Errorf("%s: %s %q, want one holding %q", c.name, rc.kind, rc.got, rc.want)
+				t.Error(redacted("%s: %s %q, want one holding %q", c.name, rc.kind, rc.got, rc.want))
 			case rc.want != nil:
 				for _, w := range rc.want {
 					if !strings.Contains(rc.got[0], w) {
-						t.Errorf("%s: %s report %q lacks %q", c.name, rc.kind, rc.got[0], w)
+						t.Error(redacted("%s: %s report %q lacks %q", c.name, rc.kind, rc.got[0], w))
 					}
 				}
 			}
@@ -310,7 +389,10 @@ func TestDriverAdminChecks(t *testing.T) {
 			t.Errorf("%s: %d op-log records, want none (status writes none)", c.name, n-from)
 		}
 		if c.errs == nil && c.fatals == nil && (r.Code != 0 || r.Str("epoch_id") != "e1") {
-			t.Errorf("%s: exit %d, JSON %v; want 0 and epoch_id e1", c.name, r.Code, r.JSON)
+			t.Error(redacted("%s: exit %d, JSON %v; want 0 and epoch_id e1", c.name, r.Code, r.JSON))
+		}
+		if (c.errs != nil || c.fatals != nil) && r.JSON != nil { // a failed run hands out no decoded object
+			t.Error(redacted("%s: the decoded output %v reached the caller, want none", c.name, r.JSON))
 		}
 	}
 
@@ -323,7 +405,17 @@ func TestDriverAdminChecks(t *testing.T) {
 	if holdsPassword(newFatals) {
 		t.Error("adminFatalf: a report holds a password")
 	} else if len(newFatals) != 1 || !strings.Contains(newFatals[0], "printed not json <rl_admin password> (stderr \"rladmin: <rl_ops password>\\n\")") {
-		t.Errorf("adminFatalf: fatals %q, want one showing the output with each password replaced", newFatals)
+		t.Error(redacted("adminFatalf: fatals %q, want one showing the output with each password replaced", newFatals))
+	}
+	// An argument that spells a password with JSON escapes is withheld, as is and Go-quoted.
+	d.adminFatalf("driver: rladmin status printed %s (stderr %q)", "not json "+escapedSpelling(pw.Admin), "rladmin: "+escapedSpelling(pw.Ops)+"\n")
+	_, fatals = f.reports()
+	newFatals = fatals[seenFatals:]
+	seenFatals = len(fatals)
+	if holdsPassword(newFatals) {
+		t.Error("adminFatalf: a report holds a password spelled with JSON escapes")
+	} else if want := "printed <withheld: it holds a store password> (stderr \"<withheld: it holds a store password>\")"; len(newFatals) != 1 || !strings.Contains(newFatals[0], want) {
+		t.Error(redacted("adminFatalf: fatals %q, want one holding %q", newFatals, want))
 	}
 
 	// The run goes on its own goroutine so f's FailNow can end it, as testing.T's ends a test.
@@ -357,7 +449,7 @@ func TestDriverAdminChecks(t *testing.T) {
 	if holdsPassword(append(newErrs, newFatals...)) {
 		t.Error("a report of the run whose output holds the rl_admin password holds a password")
 	} else if len(newErrs) != 1 || !strings.Contains(newErrs[0], "the output of rladmin status holds the rl_admin password") || !slices.Equal(newFatals, []string{"FailNow"}) {
-		t.Errorf("the run whose output holds the rl_admin password reported %q %q, want the rl_admin password report, then FailNow", newErrs, newFatals)
+		t.Error(redacted("the run whose output holds the rl_admin password reported %q %q, want the rl_admin password report, then FailNow", newErrs, newFatals))
 	}
 }
 

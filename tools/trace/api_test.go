@@ -63,12 +63,19 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("base fixture: out %q\nwant %q", r.out, wantOut)
 	}
 
+	// --complete also reports the base's missing CloseOption alias, WithDrainTimeout wrapper and
+	// 12 of the 14 result kinds (it has Allowed and Limited); RefundEvent's enums go unchecked
+	// while RefundEvent is missing.
 	r = apiRun(t, root, "--complete")
 	wantComplete := []string{
+		"limiter: §A5.2 constants of ResultKind named in the listing's comment on Result.Kind are missing: Degraded, ValidationError, " +
+			"ClockError, Busy, Cancelled, ConfigError, NotReady, StateIntegrityError, CapacityError, Unavailable, OutcomeUnknown, ReceiptError (--complete)",
 		"limiter: §A5.2 item func WithRefundListener is missing (--complete)",
 		"limiter: §A5.2 item method Limiter.RunCleanupPass is missing (--complete)",
 		"limiter: §A5.2 item method Permit.Release is missing (--complete)",
 		"limiter: §A5.2 item type RefundEvent is missing (--complete)",
+		"limiter: §A5.2 type CloseOption, used in Limiter.Close, has no exported limiter alias (--complete)",
+		"limiter: §A5.2 wrapper WithDrainTimeout is missing (--complete)",
 	}
 	got := slices.Clone(r.problems)
 	sort.Strings(got)
@@ -156,6 +163,62 @@ func TestAPI(t *testing.T) {
 	}
 }
 
+// TestAPI_Complete (plan S9 Pass when: every §A5.2 item exists, so the public API is
+// complete): the base fixture with the complete overlay (the rest of §A5.2: RefundEvent, its two
+// enums with their constants, CleanupReport, RunCleanupPass, Release, the 12 other result kinds,
+// the aliases and both wrappers) passes --complete and names nothing missing. Each must-fail
+// overlay on top of it fails --complete with exactly its problem, also through the command line
+// (exit 1), one per rule --complete adds: a type a listed signature uses with no limiter alias
+// (CleanupReport) or with an alias of another type, a thin wrapper missing (WithDrainTimeout),
+// and a constant a listing comment names missing (Degraded). Docs whose §A5.2 names no thin
+// wrappers fail closed.
+func TestAPI_Complete(t *testing.T) {
+	root := apiFixture(t, "complete")
+	if r := apiRun(t, root, "--complete"); len(r.problems) != 0 {
+		t.Fatalf("--complete on the complete fixture fails:\n%s", strings.Join(r.problems, "\n"))
+	}
+	// limiter: 49 top-level names (18 types, 26 constants, 5 functions), plus 5 methods of
+	// Limiter and 3 of Permit, and the fields: 12 of Policy, 17 of Instance, 3 of StoreOptions,
+	// 5 of Result, 3 of Diag, 2 of Health, 1 of MetricsSnapshot, 1 of CleanupReport and 7 of
+	// RefundEvent = 108. limitertest as in TestAPI: 10.
+	want := "api: limiter (108 exported names) and limitertest (10) match DESIGN §A5.2, §A5.11, §A5.12 and the plan"
+	if r := apiRun(t, root); len(r.problems) != 0 || len(r.out) != 1 || r.out[0] != want {
+		t.Fatalf("the complete fixture: out %q, problems %q\nwant out %q", r.out, r.problems, want)
+	}
+	// Docs whose §A5.2 names no thin wrappers fail closed.
+	noWrappers := apiFixture(t, "complete")
+	design, err := readLines(t.Context(), repoRoot(t), "DESIGN.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, noWrappers, "DESIGN.md", strings.ReplaceAll(strings.Join(design, "\n"), "thin wrappers", "wrappers"))
+	if _, err := checkAPI(t.Context(), testEnv(noWrappers), []string{"--complete"}); err == nil || !strings.Contains(err.Error(), "names no thin wrappers") {
+		t.Errorf("docs whose §A5.2 names no thin wrappers: err = %v", err)
+	}
+	for _, c := range []struct{ overlay, want string }{
+		{"noalias", "limiter: §A5.2 type CleanupReport, used in Limiter.RunCleanupPass, has no exported limiter alias (--complete)"},
+		{"wrongalias", "limiter/aliases.go:8: limiter.CleanupReport is not an alias of the CleanupReport used in Limiter.RunCleanupPass (--complete)"},
+		{"nowrapper", "limiter: §A5.2 wrapper WithDrainTimeout is missing (--complete)"},
+		{"noconst", "limiter: §A5.2 constants of ResultKind named in the listing's comment on Result.Kind are missing: Degraded (--complete)"},
+	} {
+		t.Run(c.overlay, func(t *testing.T) {
+			t.Parallel() // each case has its own root and loader; nothing is shared
+			fx := apiFixture(t, "complete", c.overlay)
+			if r := apiRun(t, fx); len(r.problems) != 0 {
+				t.Errorf("without --complete: problems %q, want none (the rule is --complete's)", r.problems)
+			}
+			r := apiRun(t, fx, "--complete")
+			if len(r.problems) != 1 || r.problems[0] != c.want {
+				t.Errorf("problems\n  %s\nwant exactly one\n  %s", strings.Join(r.problems, "\n  "), c.want)
+			}
+			code, stdout, stderr := runIn(t, fx, "api", "--complete")
+			if code != 1 || stdout != "" || !strings.Contains(stderr, "api: "+c.want+"\n") || !strings.Contains(stderr, "api: FAIL, 1 problem(s)\n") {
+				t.Errorf("trace api --complete: exit %d, want 1\nstdout %q\nstderr %q", code, stdout, stderr)
+			}
+		})
+	}
+}
+
 // TestAPI_Docs: the real docs give the §A5.2 declarations and the words the check allows.
 func TestAPI_Docs(t *testing.T) {
 	d, err := readAPIDocs(t.Context(), repoRoot(t))
@@ -199,6 +262,27 @@ func TestAPI_Docs(t *testing.T) {
 	}
 	if !slices.Contains(d.types, "Limiter") {
 		t.Errorf("types %v lack the Limiter alias", d.types)
+	}
+	// --complete's wrappers come from §A5.2's text, and the constants from the comments on the
+	// listing's fields: Result.Kind's runs over three lines; parenthesized words do not count.
+	if want := []string{"New", "DefaultPolicy", "DefaultInstance", "WithRefundListener", "WithDrainTimeout"}; !slices.Equal(d.wrappers, want) {
+		t.Errorf("wrappers %q, want %q", d.wrappers, want)
+	}
+	for key, want := range map[string][]string{
+		"Policy.FailureMode": {"Closed", "Open"},
+		"Policy.ClockSource": {"Store", "Controlled"},
+		"Result.Kind": {"Allowed", "Degraded", "Limited", "ValidationError", "ClockError", "Busy", "Cancelled", "ConfigError",
+			"NotReady", "StateIntegrityError", "CapacityError", "Unavailable", "OutcomeUnknown", "ReceiptError"},
+		"Result.Diag":        {"Scope", "Reason", "StoreError"},
+		"RefundEvent.Result": {"Applied", "AlreadyApplied", "ReceiptInvalid", "ReceiptExpired", "Unresolved"},
+		"RefundEvent.Reason": {"Closed", "Retention", "Expired"},
+	} {
+		if got := d.notes[key]; !slices.Equal(got, want) {
+			t.Errorf("names in the comment on %s: %q, want %q", key, got, want)
+		}
+	}
+	if len(d.notes) != 6 {
+		t.Errorf("%d listing fields have names in their comments (%v), want 6", len(d.notes), sortedKeys(d.notes))
 	}
 	// Words from the listing's comments, §A5.11, §A5.12 and Build items; case and
 	// underscores do not matter.

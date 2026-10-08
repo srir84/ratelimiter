@@ -247,3 +247,43 @@ func TestHandshake(t *testing.T) {
 		}
 	})
 }
+
+// TestHandshakeReplyError (plan S9 step 1: the store adapter keeps the error reply that refused
+// a dial for Diag.StoreError and Health.store_error): an AUTH refused with an error reply gives
+// an error wrapping a *resp.ReplyError whose Text is the reply's text without its "-", with the
+// password it repeats redacted (WRONGPASS from a real refusal, or a refusal that echoes the
+// password); an AUTH answered with any other unexpected reply wraps none.
+func TestHandshakeReplyError(t *testing.T) {
+	pw := newPassword(t)
+	for _, c := range []struct{ name, reply, want string }{
+		{"WRONGPASS", "WRONGPASS invalid username-password pair or user is disabled.", "WRONGPASS invalid username-password pair or user is disabled."},
+		{"refusal echoes the password", pw + " is not accepted: WRONGPASS for " + pw, "<password> is not accepted: WRONGPASS for <password>"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := fakeresp.Start(t, "rl_lib", pw)
+			srv.ReplyError("AUTH", c.reply, 1)
+			err := resp.Handshake(dialServer(t, srv), "rl_lib", pw, time.Now().Add(5*time.Second), nil)
+			var re *resp.ReplyError
+			if !errors.As(err, &re) {
+				t.Fatal("Handshake refused with an error reply: no *resp.ReplyError in its error")
+			}
+			for i := 0; i+8 <= len(pw); i++ { // compared, never printed
+				if strings.Contains(re.Text, pw[i:i+8]) {
+					t.Fatal("ReplyError.Text holds the password, or part of it")
+				}
+			}
+			if re.Text != c.want {
+				t.Errorf("ReplyError.Text = %q, want %q", re.Text, c.want)
+			}
+		})
+	}
+	t.Run("not an error reply", func(t *testing.T) {
+		srv := fakeresp.Start(t, "rl_lib", pw)
+		srv.ReplyValue("AUTH", resp.Value{Kind: resp.Simple, Str: "QUEUED"}, 1)
+		err := resp.Handshake(dialServer(t, srv), "rl_lib", pw, time.Now().Add(5*time.Second), nil)
+		var re *resp.ReplyError
+		if err == nil || errors.As(err, &re) {
+			t.Errorf("Handshake answered +QUEUED: error %v, wraps a *resp.ReplyError %v; want an error wrapping none", err, re != nil)
+		}
+	})
+}

@@ -95,8 +95,10 @@ type Request struct {
 //     command refused with LOADING or BUSY counts as not sent. Callers count API-1d attempts
 //     from it. For Do it counts the one command (plan choice). Sent = SentCommands > 0.
 //   - NoScript is set whenever a NOSCRIPT reply came back, whatever the resend's outcome.
-//   - StoreError is the raw text of the error reply that decided the outcome; Raw is the
-//     reply that failed Decode, for Diag.
+//   - StoreError is the raw text of the error reply that decided the outcome; for a command
+//     not sent because its kind fails fast after the store refused the last dial, the text
+//     of that refusal (the AUTH reply, password redacted). Raw is the reply that failed
+//     Decode, for Diag.
 type Response struct {
 	Outcome      Outcome
 	Reply        Reply
@@ -143,7 +145,9 @@ type Options struct {
 	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// SendObserver, when not nil, hears once per command how many of its bytes were written:
 	// cmd is the script name for EVALSHA ("acquire"), else the command ("SCRIPT LOAD", "AUTH",
-	// "PING"). It runs on the writing goroutine and must not call the adapter.
+	// "PING"). A command that moves to another connection after a write that sent none of it
+	// is heard for each write, with 0 for the first. It runs on the writing goroutine and must
+	// not call the adapter.
 	SendObserver func(cmd string, bytesWritten int)
 	// Metrics receives rl_store_connections and rl_store_call_seconds; nil records nothing.
 	Metrics *metrics.Registry
@@ -412,8 +416,10 @@ type exchanged struct {
 
 // exchange writes cmds as one pipeline on one ready connection of set and waits for their
 // replies until ctx ends (DESIGN §A5.4). A command that never left may move to another
-// connection: when the picked one closes before the write starts, exchange picks again
-// within the same deadline. One that started writing never moves.
+// connection: when the picked one closes before the write starts, or while a write that has
+// sent none of its bytes is under way, exchange picks again within the same deadline, with
+// fresh call records (close answers the ones in its FIFO with errConnLost). Nothing was sent,
+// so nothing is resent (AGENTS.md §6). One that started writing never moves.
 func (a *StoreAdapter) exchange(ctx context.Context, set *connSet, cmds []command) []exchanged {
 	out := make([]exchanged, len(cmds))
 	var buf []byte
@@ -447,6 +453,12 @@ func (a *StoreAdapter) exchange(ctx context.Context, set *connSet, cmds []comman
 			pc.load.Add(-k)
 			continue
 		}
+		if werr != nil && n == 0 && pc.isClosed() {
+			// The connection closed after the calls joined its FIFO and before any byte left:
+			// close took them out, with their load, and answered them with errConnLost.
+			calls = renewed(calls)
+			continue
+		}
 		unsent := werr
 		if werr != nil && ctx.Err() != nil {
 			unsent = context.Cause(ctx) // the call had ended: its cause decides, as before a write
@@ -464,6 +476,16 @@ func (a *StoreAdapter) exchange(ctx context.Context, set *connSet, cmds []comman
 		}
 		return out
 	}
+}
+
+// renewed returns fresh records of calls, with the same labels and byte ranges, for a write
+// on another connection.
+func renewed(calls []*call) []*call {
+	out := make([]*call, len(calls))
+	for i, c := range calls {
+		out[i] = &call{label: c.label, start: c.start, end: c.end, res: make(chan result, 1)}
+	}
+	return out
 }
 
 func notSentAll(out []exchanged, err error) []exchanged {
@@ -490,10 +512,17 @@ func (a *StoreAdapter) settle(host context.Context, dep time.Time, script string
 }
 
 // classify settles a command that was not sent, sent without a reply, or answered with an
-// error reply (the §A5.4 diagram). ok reports that x holds a reply value, still to check.
+// error reply (the §A5.4 diagram). ok reports that x holds a reply value, still to check. A
+// command not sent because the kind fails fast after the store refused its last dial with an
+// error reply keeps that reply's text as StoreError (plan S9 step 1).
 func classify(host context.Context, dep time.Time, script string, x exchanged) (r Response, ok bool) {
 	if !x.sent {
-		return Response{Outcome: notSent(host, dep, x.err)}, false
+		r = Response{Outcome: notSent(host, dep, x.err)}
+		var re *refusedError
+		if errors.As(x.err, &re) {
+			r.StoreError = re.reply
+		}
+		return r, false
 	}
 	r = Response{Outcome: OutcomeUnknown, Sent: true, SentCommands: 1}
 	switch {

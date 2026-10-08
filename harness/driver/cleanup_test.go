@@ -14,6 +14,8 @@ import (
 
 	"ratelimiter/harness/fixtures"
 	"ratelimiter/internal/keys"
+	"ratelimiter/internal/scripts"
+	"ratelimiter/internal/testutil/storeproc"
 	"ratelimiter/limiter"
 )
 
@@ -272,4 +274,63 @@ func TestDriverRestartStore(t *testing.T) {
 		t.Fatalf("acquire after the restart: %v (%+v), want allowed", op.Kind, op.Diag)
 	}
 	d.Done(op)
+}
+
+// dbKeys is db0's key count from INFO keyspace, read as rl_ops.
+func dbKeys(t *testing.T, d *Driver) int {
+	t.Helper()
+	for _, kv := range strings.Split(d.Info("keyspace")["db0"], ",") {
+		if v, ok := strings.CutPrefix(kv, "keys="); ok {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				t.Fatalf("INFO keyspace db0 keys=%q", v)
+			}
+			return n
+		}
+	}
+	return 0
+}
+
+// TestDriverPaddingLoading (plan S9 step 4; DESIGN §C2, §A3.0 row 16): storeproc's LoadPadding
+// writes PaddingA7 hashes as rl_fixture under the driver's filler prefix. After Stop and
+// Restart(false) the store, still loading them, answers an rl_lib EVALSHA read_epoch with
+// LOADING as the first word of its error reply; once it has loaded, it holds every hash (the
+// key count grew by PaddingA7) and the epoch. The driver's teardown audit accepts the padding.
+func TestDriverPaddingLoading(t *testing.T) {
+	d := New(t, Options{Instances: 0})
+	if storeproc.PaddingPrefix != FillerPrefix {
+		t.Fatalf("storeproc.PaddingPrefix %q, want the driver's filler prefix %q", storeproc.PaddingPrefix, FillerPrefix)
+	}
+	epoch := d.ReadEpoch()
+	base := dbKeys(t, d)
+	st := d.Store()
+	if err := st.LoadPadding(storeproc.PaddingA7); err != nil {
+		t.Fatal(err)
+	}
+	if got := dbKeys(t, d); got != base+storeproc.PaddingA7 {
+		t.Fatalf("%d keys after LoadPadding, want %d", got, base+storeproc.PaddingA7)
+	}
+	st.Stop()
+	if err := st.Restart(false); err != nil {
+		t.Fatal(err)
+	}
+	c, err := st.Conn("rl_lib")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := c.Do("EVALSHA", scripts.ReadEpoch.SHA, "3", keys.EpochKey, keys.CtlTimeKey, keys.QuarantinePlaceholder)
+	_ = c.Close() // one exchange: nothing left to read
+	if err != nil {
+		t.Fatal(err)
+	}
+	if word, _, _ := strings.Cut(r.Str, " "); r.Kind != '-' || word != "LOADING" {
+		t.Errorf("the first EVALSHA after Restart(false): %s, want an error reply whose first word is LOADING", r)
+	}
+	d.RestartStore() // waits until loaded, and reconnects the driver's own connections
+	if got := dbKeys(t, d); got != base+storeproc.PaddingA7 {
+		t.Errorf("%d keys once loaded, want %d", got, base+storeproc.PaddingA7)
+	}
+	if e := d.ReadEpoch(); e.ID != epoch.ID {
+		t.Errorf("epoch %q once loaded, want %q", e.ID, epoch.ID)
+	}
 }

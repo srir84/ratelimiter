@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -362,12 +364,25 @@ func TestCloseDuringHandshake(t *testing.T) {
 	}
 }
 
+// TestFailFastDuringBackoff (plan S3 Tests (a); DESIGN §A5.4: while no connection of a kind
+// is ready and the last dial failed within the current backoff, calls fail fast as
+// unavailable): every dial is refused. Once each of the 11 slots' first dials has failed, 100
+// calls all return unavailable, not sent, within 20 ms in total, and the dial count does not
+// grow until the backoff elapses. Fail-fast lasts the whole backoff, not part of it: with Rand
+// 0.99 every first backoff is 49.75 ms, so no slot redials before its failed dial + 49.75 ms,
+// and a call 35 ms after the first dial began, late in the window, still returns unavailable,
+// not sent, in under 10 ms, before any redial.
 func TestFailFastDuringBackoff(t *testing.T) {
 	var dials atomic.Int64
+	var mu sync.Mutex
+	var dialedAt []time.Time // when each dial began, in order
 	a := New(t.Context(), Options{
 		Addr: "127.0.0.1:1", User: "rl_lib", Password: newPassword(t), StoreConns: 8, RefundConns: 2,
 		DependencyDeadline: testD, Limits: testLimits(),
 		Dial: func(context.Context, string, string) (net.Conn, error) {
+			mu.Lock()
+			dialedAt = append(dialedAt, time.Now())
+			mu.Unlock()
 			dials.Add(1)
 			return nil, errors.New("connection refused (test)")
 		},
@@ -397,6 +412,21 @@ func TestFailFastDuringBackoff(t *testing.T) {
 	}
 	if before != 11 || after != 11 {
 		t.Errorf("dials = %d before and %d after the calls, want 11: the count grew within the backoff", before, after)
+	}
+	// Late in the window: 35 ms after the first dial began, more than half of the 49.75 ms
+	// backoff has passed. Every dial failed at or after the first one began, so fail-fast
+	// lasts until at least first + 49.75 ms and no slot redials before then, however far
+	// apart the slots' first dials were.
+	mu.Lock()
+	first := dialedAt[0]
+	mu.Unlock()
+	time.Sleep(time.Until(first.Add(35 * time.Millisecond)))
+	began := time.Now()
+	r := a.Call(t.Context(), acquireReq(sc, 101))
+	took := time.Since(began)
+	if n := dials.Load(); r.Outcome != Unavailable || r.Sent || took >= 10*time.Millisecond || n != 11 {
+		t.Errorf("a call %v after the first dial = %v, Sent %v after %v, with %d dials when it returned; want unavailable, false, under 10 ms, 11 dials (fail fast for the whole backoff, before any redial)",
+			began.Sub(first), r.Outcome, r.Sent, took, n)
 	}
 	waitFor(t, "a redial once the backoff elapsed", 2*time.Second, func() bool { return dials.Load() > 11 })
 }
@@ -539,18 +569,165 @@ func TestCallWaitsForRedial(t *testing.T) {
 	}
 }
 
-// TestBackoffResetsAfterSuccess: a dial that succeeds resets the count of failed dials, so
-// after a long outage a short second one is retried at the first backoff step, not near the
-// 1 s cap (DESIGN §A5.4: min(1 s, 50 ms × 2^n) after n failed dials in a row). Rand 0.99
-// makes the steps 49.75, 99.5, 199, 398 and 796 ms.
+// TestRefusedRedialWakesWaitingCall (DESIGN §A5.4: a call that joins the dial in progress is
+// unavailable when that dial is refused, so calls fail fast instead of each waiting out their
+// deadline): of 1 call connection, dropped on the client side, the slot redials 25 ms after the
+// loss (Rand 0), and every redial is refused. A call started at once, while the slot waits to
+// redial, waits for that dial and returns unavailable, not sent, once it is refused: 25–60 ms
+// after the drop, not at its deadline, start + D = 300 ms. With a 100 ms host deadline the call
+// is still unavailable, not cancelled: the refusal comes first.
+func TestRefusedRedialWakesWaitingCall(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		host time.Duration // the host's deadline after the call's start
+	}{{"5 s host deadline", 5 * time.Second}, {"100 ms host deadline", 100 * time.Millisecond}} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			sc := e.script("acquire", echoAcquire)
+			var refuse atomic.Bool
+			e.start(withConns(1, 1), func(o *Options) {
+				o.Rand = func() float64 { return 0 } // a lost connection is redialed after 25 ms
+				o.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if refuse.Load() {
+						return nil, errors.New("connection refused (test)")
+					}
+					return (&net.Dialer{}).DialContext(ctx, network, addr)
+				}
+			})
+			e.warm(1, 1)
+			refuse.Store(true) // from now on every dial fails; only the dropped connection's slot dials
+			set := e.a.sets[Call]
+			set.mu.Lock()
+			lost := set.ready[0]
+			set.mu.Unlock()
+			dropped := time.Now() // before the drop, so the slot's redial begins 25 ms after this or later
+			if err := lost.conn.Close(); err != nil {
+				t.Fatalf("closing the call connection: %v", err)
+			}
+			waitFor(t, "the call connection to leave the ready list", time.Second, func() bool { return e.a.ReadyConns(Call) == 0 })
+			start := time.Now() // before the host's deadline is set, so it is start + c.host
+			ctx, cancel := context.WithDeadline(t.Context(), start.Add(c.host))
+			defer cancel()
+			var r Response
+			mustWithin(t, "the call", 2*time.Second, func() { r = e.a.Call(ctx, acquireReq(sc, 1)) })
+			el := time.Since(dropped)
+			if r.Outcome != Unavailable || r.Sent || r.SentCommands != 0 {
+				t.Errorf("a call waiting for the redial = %v, Sent %v, SentCommands %d; want unavailable, false, 0", r.Outcome, r.Sent, r.SentCommands)
+			}
+			if el < 25*time.Millisecond || el >= 60*time.Millisecond {
+				t.Errorf("the call returned %v after the drop, want 25–60 ms: once the redial 25 ms after the loss is refused, not at its deadline (D = %v)", el, testD)
+			}
+			if n := e.srv.Count("EVALSHA"); n != 0 {
+				t.Errorf("the server received %d EVALSHA, want 0", n)
+			}
+		})
+	}
+}
+
+// TestRefusedDialKeepsReplyText (plan S9 step 1: keep the last error reply text for
+// Diag.StoreError and Health.store_error; DESIGN §A5.4): once the store answers every redial's
+// AUTH with an error reply, calls fail fast as unavailable, not sent, and each Response carries
+// the reply's text as StoreError, through Call, CallBatch and Do. A refusal that repeats the
+// password carries "<password>" in its place, never the password. Once a later dial fails
+// otherwise (the connect is refused), StoreError is empty again: the text belongs to the
+// kind's last finished dial. Rand 0 keeps the backoff steps at 25, 50, 100 ms ….
+func TestRefusedDialKeepsReplyText(t *testing.T) {
+	const wrongPass = "WRONGPASS invalid username-password pair or user is disabled."
+	for _, c := range []struct {
+		name  string
+		reply func(pw string) string // the store's AUTH refusal
+		want  func(pw string) string // the StoreError it gives
+	}{
+		{"AUTH refused", func(string) string { return wrongPass }, func(string) string { return wrongPass }},
+		{"refusal repeats the password",
+			func(pw string) string { return pw + " is not accepted: WRONGPASS for " + pw },
+			func(string) string { return "<password> is not accepted: WRONGPASS for <password>" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEnv(t)
+			sc := e.script("acquire", echoAcquire)
+			var refuseConnect atomic.Bool
+			e.start(withConns(1, 1), func(o *Options) {
+				o.Rand = func() float64 { return 0 }
+				o.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					if refuseConnect.Load() {
+						return nil, errors.New("connection refused (test)")
+					}
+					return (&net.Dialer{}).DialContext(ctx, network, addr)
+				}
+			})
+			e.warm(1, 1)
+			e.srv.ReplyError("AUTH", c.reply(e.pw), 1000) // every redial's AUTH, for the test's length
+			e.srv.DropConns()
+			set := e.a.sets[Call]
+			waitFor(t, "the call connection's redial to be refused", 2*time.Second, func() bool {
+				set.mu.Lock()
+				defer set.mu.Unlock()
+				return set.failed && len(set.ready) == 0
+			})
+			want := c.want(e.pw)
+			noPassword := func(what string, r Response) { // compared, never printed
+				t.Helper()
+				for i := 0; i+8 <= len(e.pw); i++ {
+					if strings.Contains(r.StoreError, e.pw[i:i+8]) {
+						t.Fatalf("%s: StoreError holds the password, or part of it", what)
+					}
+				}
+			}
+			check := func(what string, r Response, wantText string) {
+				t.Helper()
+				noPassword(what, r)
+				if r.Outcome != Unavailable || r.Sent || r.SentCommands != 0 || r.StoreError != wantText {
+					t.Errorf("%s = %v, Sent %v, SentCommands %d, StoreError %q; want unavailable, false, 0, %q",
+						what, r.Outcome, r.Sent, r.SentCommands, r.StoreError, wantText)
+				}
+			}
+			check("Call", e.a.Call(t.Context(), acquireReq(sc, 1)), want)
+			for i, r := range e.a.CallBatch(t.Context(), []Request{acquireReq(sc, 2), acquireReq(sc, 3)}) {
+				check("CallBatch response "+strconv.Itoa(i+1), r, want)
+			}
+			_, r := e.a.Do(t.Context(), Call, "PING")
+			check("Do", r, want)
+
+			refuseConnect.Store(true) // from the call slot's next dial on, the connect fails before AUTH
+			var last Response
+			waitFor(t, "a call with no reply text once a redial is refused at the connect", 2*time.Second, func() bool {
+				last = e.a.Call(t.Context(), acquireReq(sc, 4))
+				noPassword("a call while the redials fail", last)
+				if last.Outcome != Unavailable || last.Sent || (last.StoreError != "" && last.StoreError != want) {
+					t.Fatalf("a call while the redials fail = %v, Sent %v, StoreError %q; want unavailable, false, %q or empty",
+						last.Outcome, last.Sent, last.StoreError, want)
+				}
+				return last.StoreError == ""
+			})
+			check("Call after a refused connect", last, "")
+			if n := e.srv.Count("EVALSHA") + e.srv.Count("PING"); n != 0 {
+				t.Errorf("the server received %d commands, want none", n)
+			}
+		})
+	}
+}
+
+// TestBackoffResetsAfterSuccess: runSlot's waits follow the count of failed dials in a row
+// (DESIGN §A5.4: min(1 s, 50 ms × 2^n) × U[0.5, 1.0] after n of them). A dial that succeeds
+// resets the count, so after a long outage a short second one is retried at the first backoff
+// step, not near the 1 s cap; a lost connection is redialed only after the first step's wait,
+// never at once. Rand 0.99 makes the steps 49.75, 99.5, 199, 398 and 796 ms. Then, in a
+// subtest, the count grows by one per refused dial up to the cap: with Rand 0 the waits after
+// the 1st to 6th refused dial in a row are at least 25, 50, 100, 200, 400 and 500 ms.
 func TestBackoffResetsAfterSuccess(t *testing.T) {
 	e := newEnv(t)
 	sc := e.script("acquire", echoAcquire)
 	var failing atomic.Int64 // dials still to fail
 	failing.Store(12)        // the first outage: each of the 3 slots fails 4 dials in a row
+	var mu sync.Mutex
+	var dialedAt []time.Time // when each dial began, in order
 	e.start(withConns(1, 1), func(o *Options) {
 		o.Rand = func() float64 { return 0.99 }
 		o.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialedAt = append(dialedAt, time.Now())
+			mu.Unlock()
 			if failing.Add(-1) >= 0 {
 				return nil, errors.New("connection refused (test)")
 			}
@@ -562,6 +739,9 @@ func TestBackoffResetsAfterSuccess(t *testing.T) {
 	// count reset, the slot redials 49.75 ms after the drop, fails, and dials again 49.75 ms
 	// later; without it the second wait would be the fifth step, 796 ms.
 	failing.Store(3)
+	mu.Lock()
+	n0 := len(dialedAt) // the dials before the drop
+	mu.Unlock()
 	dropped := time.Now()
 	e.srv.DropConns()
 	waitFor(t, "the call connection to drop", time.Second, func() bool { return e.a.ReadyConns(Call) == 0 })
@@ -571,6 +751,61 @@ func TestBackoffResetsAfterSuccess(t *testing.T) {
 	if r := e.a.Call(t.Context(), acquireReq(sc, 1)); r.Outcome != OK {
 		t.Errorf("a call %v after the drop = %v, want ok", time.Since(dropped), r.Outcome)
 	}
+	mu.Lock()
+	redials := slices.Clone(dialedAt[n0:])
+	mu.Unlock()
+	if len(redials) == 0 {
+		t.Error("no dial after the drop")
+	} else if d := redials[0].Sub(dropped); d < 49*time.Millisecond {
+		t.Errorf("the first redial came %v after the drop, want at least 49 ms: a lost connection waits the first backoff step, 49.75 ms", d)
+	}
+
+	// Of 1 call, 1 refund and 1 maintenance connection only the call one is lost (closed on the
+	// client side), and from then on every dial is refused, so every dial is the call slot's:
+	// 25 ms after the loss, then after waits of 25, 50, 100, 200, 400 and 500 ms (Rand 0,
+	// min(1 s, 50 ms × 2^n) × 0.5), the 7th ≈ 1.3 s after the loss. A dial begins before it
+	// fails, so each gap between two dials' beginnings is at least the wait between them.
+	t.Run("6 refused dials in a row", func(t *testing.T) {
+		e := newEnv(t)
+		var refuse atomic.Bool
+		var mu sync.Mutex
+		var refused []time.Time // when each refused dial began, in order
+		e.start(withConns(1, 1), func(o *Options) {
+			o.Rand = func() float64 { return 0 }
+			o.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				if refuse.Load() {
+					mu.Lock()
+					refused = append(refused, time.Now())
+					mu.Unlock()
+					return nil, errors.New("connection refused (test)")
+				}
+				return (&net.Dialer{}).DialContext(ctx, network, addr)
+			}
+		})
+		e.warm(1, 1)
+		refuse.Store(true)
+		set := e.a.sets[Call]
+		set.mu.Lock()
+		lost := set.ready[0]
+		set.mu.Unlock()
+		if err := lost.conn.Close(); err != nil {
+			t.Fatalf("closing the call connection: %v", err)
+		}
+		waitFor(t, "7 refused dials in a row", 3*time.Second, func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return len(refused) >= 7
+		})
+		mu.Lock()
+		at := slices.Clone(refused[:7])
+		mu.Unlock()
+		ms := time.Millisecond
+		for k, want := range []time.Duration{25 * ms, 50 * ms, 100 * ms, 200 * ms, 400 * ms, 500 * ms} {
+			if got := at[k+1].Sub(at[k]); got < want {
+				t.Errorf("the wait after refused dial %d was %v, want at least %v", k+1, got, want)
+			}
+		}
+	})
 }
 
 func TestReadyGauge(t *testing.T) {

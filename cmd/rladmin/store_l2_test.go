@@ -43,11 +43,7 @@ func TestStoreInfoAndRewrite(t *testing.T) {
 	env := map[string]string{"RL_STORE_ADDR": st.Addr, "RL_ADMIN_PASSWORD": st.PW.Admin}
 	noSecrets := func(what, out string) {
 		t.Helper()
-		for _, pw := range []string{st.PW.Lib, st.PW.Admin, st.PW.Fixture, st.PW.Ops} {
-			if strings.Contains(out, pw) {
-				t.Errorf("%s holds a store password:\n%s", what, out)
-			}
-		}
+		failOnPassword(t, what, out, st.PW.Lib, st.PW.Admin, st.PW.Fixture, st.PW.Ops)
 	}
 
 	code, stdout, stderr := runWith(t, env, "store-info", "--json")
@@ -186,11 +182,7 @@ func TestStoreRewriteAfterRunning(t *testing.T) {
 
 	env := map[string]string{"RL_STORE_ADDR": st.Addr, "RL_ADMIN_PASSWORD": st.PW.Admin}
 	code, stdout, stderr := runWith(t, env, "store-rewrite")
-	for _, pw := range []string{st.PW.Lib, st.PW.Admin, st.PW.Fixture, st.PW.Ops} {
-		if strings.Contains(stdout+stderr, pw) {
-			t.Errorf("store-rewrite's output holds a store password:\n%s%s", stdout, stderr)
-		}
-	}
+	failOnPassword(t, "store-rewrite", stdout+stderr, st.PW.Lib, st.PW.Admin, st.PW.Fixture, st.PW.Ops)
 	if code != 0 {
 		t.Fatalf("store-rewrite while a rewrite runs: exit %d, want 0\n%s", code, stderr)
 	}

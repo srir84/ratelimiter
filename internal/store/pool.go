@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"slices"
@@ -22,9 +23,10 @@ type connSet struct {
 
 	mu        sync.Mutex
 	ready     []*pipeConn
-	readyCh   chan struct{} // closed and replaced when a connection becomes ready, and at shutdown
+	readyCh   chan struct{} // closed and replaced when a connection becomes ready or a dial fails, and at shutdown
 	failed    bool          // the kind's last finished dial failed …
 	failUntil time.Time     // … and its backoff runs until then
+	refusal   string        // the error reply that refused that dial (its AUTH), or ""
 	dialing   map[net.Conn]struct{}
 	closed    bool
 }
@@ -41,11 +43,13 @@ func newConnSet(kind Kind, life context.Context, m *metrics.Registry) *connSet {
 
 // pick returns the ready connection with the fewest commands in flight and reserves n
 // commands on it, so concurrent picks spread out (DESIGN §A5.4). With none ready it fails
-// fast (errFailFast) while the kind's last dial failed within its backoff; otherwise it
-// waits for a connection to become ready until ctx ends, and returns ctx's cause
-// (context.Cause), which tells the dependency deadline from the host's end. A closed set
-// decides before ctx: after Close every call is unavailable, even with ctx already ended
-// (plan S3 step 8).
+// fast (errFailFast, as a *refusedError when the store refused that dial with an error
+// reply) while the kind's last dial failed within its backoff; otherwise it waits until a
+// connection becomes ready or a dial fails, deciding again at each, until ctx ends, and
+// returns ctx's cause (context.Cause), which tells the dependency deadline from the host's
+// end. So a call that joined the dial in progress fails fast once that dial fails, instead
+// of waiting out its deadline. A closed set decides before ctx: after Close every call is
+// unavailable, even with ctx already ended (plan S3 step 8).
 func (s *connSet) pick(ctx context.Context, n int) (*pipeConn, error) {
 	for {
 		s.mu.Lock()
@@ -69,7 +73,11 @@ func (s *connSet) pick(ctx context.Context, n int) (*pipeConn, error) {
 			return best, nil
 		}
 		if s.failed && time.Now().Before(s.failUntil) {
+			refusal := s.refusal
 			s.mu.Unlock()
+			if refusal != "" {
+				return nil, &refusedError{reply: refusal}
+			}
 			return nil, errFailFast
 		}
 		wait := s.readyCh
@@ -90,7 +98,7 @@ func (s *connSet) add(pc *pipeConn) bool {
 		return false
 	}
 	s.ready = append(s.ready, pc)
-	s.failed = false
+	s.failed, s.refusal = false, ""
 	s.wakeLocked()
 	s.gaugeLocked()
 	return true
@@ -106,12 +114,17 @@ func (s *connSet) remove(pc *pipeConn) {
 	s.gaugeLocked()
 }
 
-// dialFailed records a failed dial whose backoff runs until until.
-func (s *connSet) dialFailed(until time.Time) {
+// dialFailed records a failed dial whose backoff runs until until, with refusal the error
+// reply that refused it ("" for any other failure), and wakes the calls waiting for a
+// connection of the kind: each decides again, so one that joined the dial in progress now
+// fails fast as unavailable instead of waiting out its deadline (DESIGN §A5.4).
+func (s *connSet) dialFailed(until time.Time, refusal string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.failed = true
 	s.failUntil = until
+	s.refusal = refusal
+	s.wakeLocked()
 }
 
 // startDial registers a connection in its handshake, so shutdown can cut it short; it
@@ -216,7 +229,7 @@ func (a *StoreAdapter) runSlot(set *connSet) {
 			}
 			wait := reconnectBackoff(failures, a.rand())
 			failures = min(failures+1, 32)
-			set.dialFailed(time.Now().Add(wait))
+			set.dialFailed(time.Now().Add(wait), refusalText(err))
 			if !a.sleep(wait) {
 				return
 			}
@@ -262,6 +275,16 @@ func (a *StoreAdapter) dial(set *connSet) (*pipeConn, error) {
 		return nil, fmt.Errorf("store handshake: %w", err)
 	}
 	return newPipeConn(c, a.d, a.obs, set.remove), nil
+}
+
+// refusalText is the text of the error reply that refused a dial (resp.ReplyError, the
+// store's answer to AUTH, password redacted), or "" when the dial failed otherwise.
+func refusalText(err error) string {
+	var re *resp.ReplyError
+	if errors.As(err, &re) {
+		return re.Text
+	}
+	return ""
 }
 
 // sleep waits d, or reports false when the adapter's lifetime ends first.

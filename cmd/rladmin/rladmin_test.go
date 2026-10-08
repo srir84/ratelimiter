@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -120,6 +121,58 @@ func runWith(t *testing.T, env map[string]string, args ...string) (code int, std
 	}
 	code = run(t.Context(), args, lookup, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+// failOnPassword ends the test when out, rladmin's output from a run against a real store,
+// holds one of pws, that store's passwords, with a message that names what and never shows
+// the output (S8 review round 2; AGENTS.md §1 Secrets).
+func failOnPassword(tb testing.TB, what, out string, pws ...string) {
+	tb.Helper()
+	for _, pw := range pws {
+		if pw != "" && strings.Contains(out, pw) {
+			tb.Fatalf("%s: the output holds a store password", what)
+			return
+		}
+	}
+}
+
+// fatalRecorder records the Fatal reports of the code under test instead of ending the test.
+type fatalRecorder struct {
+	testing.TB
+	fatals []string
+}
+
+func (r *fatalRecorder) Helper() {}
+func (r *fatalRecorder) Fatalf(f string, args ...any) {
+	r.fatals = append(r.fatals, fmt.Sprintf(f, args...))
+}
+
+// TestFailOnPassword (S8 review round 2): an output holding one of the passwords, anywhere,
+// gets exactly one report, which names the run and shows neither the output nor the
+// password; an output holding none, or only a part of one, gets no report.
+func TestFailOnPassword(t *testing.T) {
+	const pw = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	for _, c := range []struct {
+		name, out string
+		report    bool
+	}{
+		{"the password alone", pw, true},
+		{"the password inside the output", "rladmin: AUTH rl_admin " + pw + " refused\n", true},
+		{"the password twice", pw + "\n" + pw, true},
+		{"a clean output", "rladmin: store-rewrite done\n", false},
+		{"a part of the password", pw[:len(pw)-1], false},
+	} {
+		r := &fatalRecorder{TB: t}
+		failOnPassword(r, "store-rewrite", c.out, "another-password", pw)
+		switch {
+		case !c.report && len(r.fatals) != 0:
+			t.Errorf("%s: %d reports, want none", c.name, len(r.fatals))
+		case c.report && len(r.fatals) != 1:
+			t.Errorf("%s: %d reports, want one", c.name, len(r.fatals))
+		case c.report && (strings.Contains(r.fatals[0], pw) || r.fatals[0] != "store-rewrite: the output holds a store password"):
+			t.Errorf("%s: the report is not the constant message naming the run", c.name)
+		}
+	}
 }
 
 // evalshaArgs returns the arguments of every EVALSHA of s the fake store received.

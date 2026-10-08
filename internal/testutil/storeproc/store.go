@@ -95,6 +95,7 @@ type Store struct {
 	conf   string
 	mu     sync.Mutex
 	proc   *proc // nil once stopped
+	paused bool  // Pause stopped proc with SIGSTOP, and no Resume or halt continued it
 	tailed bool
 }
 
@@ -290,7 +291,9 @@ func (s *Store) removeRecord(pid int) error {
 }
 
 // halt sends sig to the running process, waits up to grace for it to exit, then
-// SIGKILLs it. It returns once the process has exited and its record is gone.
+// SIGKILLs it. It returns once the process has exited and its record is gone. A process
+// that Pause stopped gets SIGCONT right after sig, which a stopped process holds until it
+// continues, so it exits within grace as a running one would.
 func (s *Store) halt(sig syscall.Signal, grace time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -301,6 +304,12 @@ func (s *Store) halt(sig syscall.Signal, grace time.Duration) error {
 	s.proc = nil
 	if err := p.signal(sig); err != nil {
 		return err
+	}
+	if s.paused {
+		s.paused = false
+		if err := p.signal(syscall.SIGCONT); err != nil {
+			return err
+		}
 	}
 	if !p.exitedWithin(grace) {
 		if err := p.signal(syscall.SIGKILL); err != nil {

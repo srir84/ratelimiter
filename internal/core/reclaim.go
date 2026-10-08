@@ -18,7 +18,8 @@ const reclaimScans = 10
 // reclaim.lua in batches of ReclaimBatch, the rest in one last batch, adding the keys each call
 // unlinked to rl_reclaim_keys_total. The kept cursor moves past a SCAN reply only once every
 // candidate up to it is sent, so a key is never skipped. A failed call ends reclaim for this
-// pass and leaves the pass complete (plan choice). reclaim.lua reads rl:epoch again, so a key
+// pass and leaves the pass complete (plan choice); its error reply text, as any store call's,
+// becomes Health.store_error (plan S9 step 1). reclaim.lua reads rl:epoch again, so a key
 // of the current epoch is never unlinked, even when the joined epoch is old. It runs under the
 // pass lock, which guards the cursor.
 func (l *Limiter) reclaim(ctx context.Context, id string) {
@@ -28,6 +29,9 @@ func (l *Limiter) reclaim(ctx context.Context, id string) {
 	for range reclaimScans {
 		next, found, r := store.Scan(ctx, l.adapter, cursor)
 		if r.Outcome != store.OK {
+			if r.StoreError != "" {
+				l.setStoreError(r.StoreError)
+			}
 			return
 		}
 		pending = append(pending, reclaimCandidates(found, id)...)

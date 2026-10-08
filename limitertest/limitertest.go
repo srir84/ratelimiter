@@ -77,10 +77,12 @@ func WithSignerWrapper(f func(Signer) Signer) Option {
 	}
 }
 
-// WithSendObserver has f hear, once per command, how many of its bytes were written: cmd is
-// the script name for EVALSHA ("acquire"), else the command ("SCRIPT LOAD", "AUTH", "PING").
-// f runs on the writing goroutine and must not call the limiter. Observers compose: every
-// one given hears every command, in option order. A nil f adds nothing.
+// WithSendObserver has f hear each write of a command: cmd is the script name for EVALSHA
+// ("acquire"), else the command ("SCRIPT LOAD", "AUTH", "PING"), and bytesWritten is how
+// many of its bytes that write sent. A command has one write, unless it moves to another
+// connection after a write that sent none of it: then f hears it for each write, with 0 for
+// the first. f runs on the writing goroutine and must not call the limiter. Observers
+// compose: every one given hears every write, in option order. A nil f adds nothing.
 func WithSendObserver(f func(cmd string, bytesWritten int)) Option {
 	return func(o *options) {
 		switch prev := o.hooks.SendObserver; {

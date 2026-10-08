@@ -622,6 +622,42 @@ func (s *testStore) runRow(t *testing.T, row fmRow, mode FailureMode) (norm, int
 	return n, calls(), r
 }
 
+// TestAcquireJoinsRefusedRedial (DESIGN §A5.4: a call that joins the dial in progress is
+// unavailable when that dial is refused; SPEC API-20b): an open-mode limiter whose real adapter
+// talks to a fakeresp store joins epoch A, every connection ready; then the store answers every
+// AUTH with WRONGPASS and drops the connections. An acquire with a 100 ms host deadline,
+// started while every slot waits to redial (25–50 ms after its loss), joins the redial and is
+// degraded once it is refused: 25 ms or more after the drop and before the host's deadline, not
+// cancelled at it (D is 2 s).
+func TestAcquireJoinsRefusedRedial(t *testing.T) {
+	ts := newTestStore(t)
+	p := testPolicy(Open)
+	in := testInstance(p)
+	serveEpochA(ts, p)
+	l := ts.ready(t, p, in, nil, Hooks{}, reasonReady)
+	waitWarm(t, l, in)                         // no first dial still in progress takes a refusal
+	ts.srv.ReplyError("AUTH", wrongPass, 1000) // every AUTH for the test's length
+	dropped := time.Now()                      // before the drop, so no redial begins before dropped + 25 ms
+	ts.srv.DropConns()
+	waitFor(t, "every call connection lost", func() bool {
+		return seriesOf(t, l.Metrics(), "rl_store_connections", "call").Value == 0
+	})
+	start := time.Now() // before the host's deadline is set, so it is start + 100 ms
+	ctx, cancel := context.WithDeadline(t.Context(), start.Add(100*time.Millisecond))
+	defer cancel()
+	r := l.Acquire(ctx, "joins-refused-redial")
+	el := time.Since(dropped)
+	if r.Permit != nil {
+		r.Permit.Done()
+	}
+	if r.Kind != Degraded {
+		t.Errorf("an acquire waiting for a redial the store refuses: %v (%+v), want degraded, not cancelled at the host's deadline", r.Kind, r.Diag)
+	}
+	if took := time.Since(start); el < 25*time.Millisecond || took >= 100*time.Millisecond {
+		t.Errorf("the acquire returned %v after the drop and %v after its start, want 25 ms or more after the drop (a redial's refusal) and under its 100 ms host deadline", el, took)
+	}
+}
+
 // TestFailureModeTable (DESIGN §C4, plan S5; S6 adds the refund rows, refundRows): every adapter outcome (OK with each acquire
 // code 1, 2, 20–25 and an out-of-range and an in-range allowed reply; unavailable;
 // cancelled; outcome_unknown; capacity_error) and every local refusal, each in a Closed and an Open limiter (the fake

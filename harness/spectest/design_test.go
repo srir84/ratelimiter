@@ -18,6 +18,7 @@ import (
 	"ratelimiter/harness/driver"
 	"ratelimiter/harness/fixtures"
 	"ratelimiter/internal/keys"
+	"ratelimiter/internal/testutil/storeproc"
 	"ratelimiter/limiter"
 )
 
@@ -190,9 +191,13 @@ func goroutines(t *testing.T) int {
 // same key names. Interleaved sequential traffic matches each driver's own reference model.
 // ReplaceEpoch on A (S8), whose instances join the new epoch within the join tolerance, leaves
 // B's epoch (id, fp) unchanged, B's instances ready in it, and B's further results matching its
-// model. Closing all of A's instances leaves B's results matching its model, and the goroutine
-// count returns to its value just before A's instances were built (A starts with none and
-// adds 3, plan choice), so B's goroutines are untouched.
+// model. While A's store is stopped (plan S9), B's acquires are only allowed or limited and
+// still match B's model, and B's instances stay ready with an empty store_error; A's store then
+// restarts with its data kept, and A's instances are ready with all their connections again
+// (call 8, refund 2, maintenance 1), so A's teardown audit sees a live store. Closing all of
+// A's instances leaves B's results matching its model, and the goroutine count returns to its
+// value just before A's instances were built (A starts with none and adds 3, plan choice), so
+// B's goroutines are untouched.
 func TestDesign_SeparateDeployments(t *testing.T) {
 	pb := driver.DefaultPolicy()
 	pb.Capacity, pb.RateTokens, pb.RatePeriodNs = 40, 3, 7_000_000_000
@@ -243,6 +248,40 @@ func TestDesign_SeparateDeployments(t *testing.T) {
 	}
 	traffic([]*driver.Driver{b}, 30)
 	b.CheckRefModel(t)
+
+	// A's store goes down (plan S9): B serves on, and its health shows no store error.
+	down := true
+	// Registered after both drivers' teardowns, so it runs first: a test that failed while A's
+	// store was down starts it again for A's teardown audit.
+	t.Cleanup(func() {
+		if down {
+			a.RestartStore()
+		}
+	})
+	a.Store().Stop()
+	traffic([]*driver.Driver{b}, 30)
+	b.CheckRefModel(t)
+	for i := range 3 {
+		if h := b.Limiter(i).Health(); h.Status != "ready" || h.StoreError != "" {
+			t.Errorf("B's instance %d while A's store is down: %s/%s, store_error %q; want ready with no store error", i, h.Status, h.Reason, h.StoreError)
+		}
+	}
+	a.RestartStore() // Restart(true): data kept
+	down = false
+	restarted := time.Now()
+	for i := range 3 {
+		if err := a.WaitReady(i, waitMax); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []struct {
+			kind string
+			n    float64
+		}{{"call", 8}, {"refund", 2}, {"maintenance", 1}} {
+			waitMetric(t, a, i, "rl_store_connections", k.kind, time.Until(restarted.Add(waitMax)), "A's instance once its store is back",
+				func(v float64) bool { return v == k.n })
+		}
+	}
+
 	for i := range 3 {
 		a.Close(i)
 	}
@@ -758,5 +797,325 @@ func TestDesign_ReclaimOldEpoch(t *testing.T) {
 	}
 	if reclaimed != float64(aKeys) {
 		t.Errorf("rl_reclaim_keys_total over the instances: %v, want epoch A's %d keys", reclaimed, aKeys)
+	}
+}
+
+// TestDesign_StoreReconnect (DESIGN §A5.4, §A7; plan S9 Tests (a)): one instance at the
+// default instance settings (store_conns 8, refund_conns 2, D 2 s) on a real store; S7's
+// TestDesign_ConnectionBudget covers the counts. Within 1 s of Stop, the ready call
+// connections, rl_store_connections{kind="call"}, drop to 0. Once every slot's first redial
+// has been refused (100 ms after the drop: a slot redials within 50 ms of losing its
+// connection, §A5.4), 100 acquires in a row fail fast during the reconnect backoff: each is
+// unavailable with nothing sent, and the 100 take less than one D together, so not one waited
+// for its deadline. Within 2 s of the restart (data kept), rl_store_connections shows call 8,
+// refund 2 and maintenance 1 again, and an acquire is allowed.
+func TestDesign_StoreReconnect(t *testing.T) {
+	d := driver.New(t, driver.Options{Instances: 1})
+	in := d.Instance()
+	dep := time.Duration(in.DependencyDeadlineNs)
+	if in.StoreConns != 8 || in.RefundConns != 2 || dep != 2*time.Second {
+		t.Fatalf("instance settings: store_conns %d, refund_conns %d, D %v; want the defaults 8, 2 and 2 s", in.StoreConns, in.RefundConns, dep)
+	}
+	kinds := []struct {
+		kind string
+		n    float64
+	}{{"call", 8}, {"refund", 2}, {"maintenance", 1}}
+	for _, k := range kinds {
+		waitMetric(t, d, 0, "rl_store_connections", k.kind, waitMax, "warm-up", func(v float64) bool { return v == k.n })
+	}
+	d.Done(allowed(t, d, 0, "reconnect"))
+
+	down := true
+	// Registered after the driver's teardown, so it runs first: a test that failed while the
+	// store was down starts it again for the teardown.
+	t.Cleanup(func() {
+		if down {
+			d.RestartStore()
+		}
+	})
+	stopped := time.Now()
+	d.Store().Stop()
+	waitMetric(t, d, 0, "rl_store_connections", "call", time.Until(stopped.Add(time.Second)), "within 1 s of Stop",
+		func(v float64) bool { return v == 0 })
+	time.Sleep(100 * time.Millisecond) // every slot's first redial has been refused
+	from := len(d.Sent(0))
+	began := time.Now()
+	for k := range 100 {
+		if op := d.Acquire(0, "reconnect"); op.Kind != limiter.Unavailable || op.SentCommands != 0 {
+			t.Fatalf("acquire %d during the reconnect backoff: %v (SentCommands %d, %+v), want unavailable with nothing sent",
+				k+1, op.Kind, op.SentCommands, op.Diag)
+		}
+	}
+	if el := time.Since(began); el >= dep {
+		t.Errorf("100 acquires during the reconnect backoff took %v, want less than D = %v together (fail fast)", el, dep)
+	}
+	if n := driver.Count(d.Sent(0)[from:], "acquire"); n != 0 {
+		t.Errorf("%d acquire sends while the store was down, want 0", n)
+	}
+
+	restarted := time.Now()
+	d.RestartStore()
+	down = false
+	for _, k := range kinds {
+		waitMetric(t, d, 0, "rl_store_connections", k.kind, time.Until(restarted.Add(2*time.Second)), "within 2 s of the restart",
+			func(v float64) bool { return v == k.n })
+	}
+	d.Done(allowed(t, d, 0, "reconnect")) // the restarted store's empty script cache: one NOSCRIPT reload
+}
+
+// TestDesign_AuthRefusedText (plan S9 step 1: keep the last error reply text for Diag.StoreError
+// and Health.store_error; DESIGN §A5.4, §A5.11): one instance at the default settings on a real
+// store, every connection ready. The store restarts (data kept) with a fresh rl_lib password in
+// its ACL file, so each redial's AUTH gets the store's own refusal, WRONGPASS. Acquires every
+// 50 ms are unavailable with nothing sent, until one carries that text as Diag.StoreError (the
+// first may come while a refused connect during the restart is still the kind's last dial);
+// then Health.store_error is the text too, the instance still ready. The store then restarts
+// with the instance's password again, and every connection comes back within waitMax.
+func TestDesign_AuthRefusedText(t *testing.T) {
+	const wrongPass = "WRONGPASS invalid username-password pair or user is disabled."
+	d := driver.New(t, driver.Options{Instances: 1})
+	in := d.Instance()
+	kinds := []struct {
+		kind string
+		n    float64
+	}{{"call", float64(in.StoreConns)}, {"refund", float64(in.RefundConns)}, {"maintenance", 1}}
+	for _, k := range kinds {
+		waitMetric(t, d, 0, "rl_store_connections", k.kind, waitMax, "warm-up", func(v float64) bool { return v == k.n })
+	}
+	st := d.Store()
+	root, err := storeproc.ModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, aclFile := filepath.Join(root, "deploy", "acl.conf.tmpl"), filepath.Join(st.Dir, "acl.conf")
+	refusing := true
+	// Registered after the driver's teardown, so it runs first: a test that failed while the store
+	// refused the instance, or while its ACL file was being rewritten, gives the store its old ACL
+	// file back for the teardown.
+	t.Cleanup(func() {
+		if !refusing {
+			return
+		}
+		if err := storeproc.RenderACL(tmpl, aclFile, st.PW); err != nil {
+			t.Error(err)
+			return
+		}
+		d.RestartStore()
+	})
+	rotated := st.PW
+	rotated.Lib = storeproc.NewPasswords().Lib // not the instance's
+	if err := storeproc.RenderACL(tmpl, aclFile, rotated); err != nil {
+		t.Fatal(err)
+	}
+	d.RestartStore()
+
+	var tries []driver.Op
+	deadline := time.Now().Add(waitMax)
+	for {
+		op := d.Acquire(0, "auth-refused")
+		tries = append(tries, op)
+		if op.Kind != limiter.Unavailable || op.SentCommands != 0 {
+			t.Fatalf("acquire %d while the store refuses the instance's AUTH: %v (SentCommands %d), want unavailable with nothing sent",
+				len(tries), op.Kind, op.SentCommands)
+		}
+		if op.Diag.StoreError == wrongPass {
+			break
+		}
+		if op.Diag.StoreError != "" {
+			t.Fatalf("acquire %d: Diag.StoreError %q, want %q or empty", len(tries), op.Diag.StoreError, wrongPass)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no acquire with Diag.StoreError %q within %v (%d unavailable)", wrongPass, waitMax, len(tries))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if h := d.Limiter(0).Health(); h.StoreError != wrongPass || h.Status != "ready" {
+		t.Errorf("Health: store_error %q, status %q; want %q, ready", h.StoreError, h.Status, wrongPass)
+	}
+
+	if err := storeproc.RenderACL(tmpl, aclFile, st.PW); err != nil {
+		t.Fatal(err)
+	}
+	d.RestartStore()
+	refusing = false
+	for _, k := range kinds {
+		waitMetric(t, d, 0, "rl_store_connections", k.kind, waitMax, "with the instance's password back", func(v float64) bool { return v == k.n })
+	}
+}
+
+// acquireAsync runs d.Acquire(i, key) on its own goroutine; the channel gets its op.
+func acquireAsync(d *driver.Driver, i int, key string) <-chan driver.Op {
+	ch := make(chan driver.Op, 1)
+	go func() { ch <- d.Acquire(i, key) }()
+	return ch
+}
+
+// opBy waits for the op on ch until deadline.
+func opBy(t *testing.T, ch <-chan driver.Op, deadline time.Time, what string) driver.Op {
+	t.Helper()
+	select {
+	case op := <-ch:
+		return op
+	case <-time.After(time.Until(deadline)):
+		t.Fatalf("%s: no result by its deadline", what)
+		return driver.Op{}
+	}
+}
+
+// waitSends waits until instance i's send records from index from on hold n sends of cmd that
+// wrote bytes, by deadline.
+func waitSends(t *testing.T, d *driver.Driver, i, from int, cmd string, n int, deadline time.Time, what string) {
+	t.Helper()
+	got := 0
+	if !waitUntil(deadline, func() bool { got = driver.Count(d.Sent(i)[from:], cmd); return got >= n }) {
+		t.Fatalf("%s: %d %s sends, want %d", what, got, cmd, n)
+	}
+}
+
+// TestDesign_PipelinedTimeout (DESIGN §C4, §A5.4; plan S9 Tests (a)): one instance with one call
+// connection (StoreConns 1) and D = 300 ms (plan choice), its epoch read once at startup and
+// timed cleanup off (both every hour, plan choice), so nothing but these acquires is written on
+// any connection; a first allowed acquire loads the script.
+//   - Part 1: while the store is paused (SIGSTOP) for 100 ms, three acquires are written to the
+//     one connection, the first with a 10 ms host deadline. It ends outcome_unknown, and the
+//     other two are allowed once the store resumes, after the first's late reply was drained;
+//     no AUTH is written (the connection stays up), and inspect shows the first's late allow
+//     charged: u = (capacity − 1) × rate_period_ns (API-1).
+//   - Part 2: while the store is paused, three acquires are written; the oldest waits D, so the
+//     connection closes (rl_store_connections{kind="call"} 0) and exactly those three, the
+//     acquire sends written before the close (Sent), are outcome_unknown. Calls after the close
+//     send nothing and are unavailable until the store resumes, once 600 ms have passed since
+//     the pause and no call is waiting (plan choice: such a call waits up to D for the redial,
+//     whose AUTH cannot complete while the store is paused, so resuming under a waiting call
+//     could hand it the new connection). After the resume an acquire every 100 ms is allowed
+//     within 2 s, each earlier one unavailable with nothing sent (the redial backoff), over a
+//     new connection: an AUTH written after the close and before the allowed acquire.
+func TestDesign_PipelinedTimeout(t *testing.T) {
+	p := driver.DefaultPolicy()
+	p.CleanupIntervalNs = 3_600_000_000_000
+	in := driver.DefaultInstance(p)
+	in.StoreConns, in.DependencyDeadlineNs, in.EpochRereadIntervalNs = 1, 300_000_000, 3_600_000_000_000
+	dep := 300 * time.Millisecond
+	d := driver.New(t, driver.Options{Instances: 1, Policy: p, Instance: in})
+	st := d.Store()
+	// Registered after the driver's teardown, so it runs first: a test that failed while the
+	// store was paused resumes it for the teardown (Resume of a store not paused does nothing).
+	t.Cleanup(func() { _ = st.Resume() })
+	waitMetric(t, d, 0, "rl_store_connections", "call", waitMax, "warm-up", func(v float64) bool { return v == 1 })
+	d.Done(allowed(t, d, 0, "pipelined-warm"))
+
+	// Part 1: a host deadline after the send ends that call only.
+	from := len(d.Sent(0))
+	if err := st.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	paused := time.Now()
+	short := make(chan driver.Op, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+		defer cancel()
+		short <- d.AcquireContext(ctx, 0, "p1-short")
+	}()
+	waitSends(t, d, 0, from, "acquire", 1, paused.Add(dep), "part 1, the 10 ms acquire")
+	others := []<-chan driver.Op{acquireAsync(d, 0, "p1-b"), acquireAsync(d, 0, "p1-c")}
+	waitSends(t, d, 0, from, "acquire", 3, paused.Add(100*time.Millisecond), "part 1, three acquires written while paused")
+	time.Sleep(time.Until(paused.Add(100 * time.Millisecond)))
+	if err := st.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	if op := opBy(t, short, paused.Add(waitMax), "part 1, the 10 ms acquire"); op.Kind != limiter.OutcomeUnknown || op.SentCommands != 1 {
+		t.Errorf("part 1, the 10 ms acquire: %v (SentCommands %d), want outcome_unknown, sent", op.Kind, op.SentCommands)
+	}
+	for k, ch := range others {
+		op := opBy(t, ch, paused.Add(waitMax), "part 1, another acquire")
+		if op.Kind != limiter.Allowed {
+			t.Errorf("part 1, acquire %d on the same connection: %v (%+v), want allowed", k+2, op.Kind, op.Diag)
+		}
+		d.Done(op)
+	}
+	if n := driver.Count(d.Sent(0)[from:], "AUTH"); n != 0 {
+		t.Errorf("part 1: %d AUTH sends, want none (the connection stays up)", n)
+	}
+	if v := metric(t, d, 0, "rl_store_connections", "call"); v != 1 {
+		t.Errorf("part 1: rl_store_connections{call} = %v, want 1", v)
+	}
+	if got, want := d.Inspect("p1-short"), (p.Capacity-1)*p.RatePeriodNs; got.Present != 1 || got.U != want {
+		t.Errorf("part 1, inspect of the 10 ms acquire's key: present %d, u %d; want 1 and %d (its late allow charged)", got.Present, got.U, want)
+	}
+
+	// Part 2: a command that waits D closes the connection.
+	from = len(d.Sent(0))
+	if err := st.Pause(); err != nil {
+		t.Fatal(err)
+	}
+	paused = time.Now()
+	var inflight []<-chan driver.Op
+	for k := range 3 {
+		inflight = append(inflight, acquireAsync(d, 0, fmt.Sprintf("p2-%d", k)))
+	}
+	waitSends(t, d, 0, from, "acquire", 3, paused.Add(dep), "part 2, three acquires written while paused")
+	for k, ch := range inflight {
+		if op := opBy(t, ch, paused.Add(waitMax), "part 2, an acquire in flight"); op.Kind != limiter.OutcomeUnknown || op.SentCommands != 1 {
+			t.Errorf("part 2, acquire %d in flight: %v (SentCommands %d), want outcome_unknown, sent", k+1, op.Kind, op.SentCommands)
+		}
+	}
+	waitMetric(t, d, 0, "rl_store_connections", "call", time.Second, "part 2, once the oldest command waited D",
+		func(v float64) bool { return v == 0 })
+	var after []driver.Op
+	for len(after) == 0 || time.Since(paused) < 600*time.Millisecond {
+		after = append(after, d.Acquire(0, "p2-after"))
+	}
+	written := driver.Count(d.Sent(0)[from:], "acquire")
+	if err := st.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	resumed := time.Now()
+	t.Logf("part 2: paused %v; %d calls after the close", resumed.Sub(paused), len(after))
+	if written != 3 {
+		t.Errorf("part 2: %d acquire sends while paused, want exactly the 3 written before the close", written)
+	}
+	for k, op := range after {
+		if op.Kind != limiter.Unavailable || op.SentCommands != 0 {
+			t.Errorf("part 2, call %d after the close: %v (SentCommands %d), want unavailable with nothing sent", k+1, op.Kind, op.SentCommands)
+		}
+	}
+	// An acquire every 100 ms from the resume (or at once after one that took longer); the
+	// allowed one must return within 2 s of the resume, measured, not counted in tries.
+	var tries []driver.Op
+	var allowedAt time.Duration
+	for {
+		op := d.Acquire(0, "p2-resumed")
+		el := time.Since(resumed)
+		tries = append(tries, op)
+		if op.Kind == limiter.Allowed {
+			d.Done(op)
+			allowedAt = el
+			break
+		}
+		if op.Kind != limiter.Unavailable || op.SentCommands != 0 {
+			t.Fatalf("part 2, acquire %d after the resume: %v (SentCommands %d), want unavailable with nothing sent until one is allowed",
+				len(tries), op.Kind, op.SentCommands)
+		}
+		if el >= 2*time.Second {
+			t.Fatalf("part 2: no allowed acquire within 2 s of the resume (%d unavailable, the last returned %v after it)", len(tries), el)
+		}
+		time.Sleep(time.Until(resumed.Add(time.Duration(len(tries)) * 100 * time.Millisecond)))
+	}
+	if allowedAt > 2*time.Second {
+		t.Errorf("part 2: the allowed acquire (try %d) returned %v after the resume, want within 2 s", len(tries), allowedAt)
+	}
+	t.Logf("part 2: allowed at try %d, %v after the resume", len(tries), allowedAt)
+	sends := d.Sent(0)[from:]
+	last := -1 // the allowed acquire's send
+	for k, s := range sends {
+		if s.Cmd == "acquire" && s.Bytes > 0 {
+			last = k
+		}
+	}
+	if auth := driver.Count(sends[:max(last, 0)], "AUTH"); last < 0 || auth == 0 {
+		t.Errorf("part 2: %d AUTH sends before the allowed acquire's, want at least 1 (a new connection)", auth)
+	}
+	if v := metric(t, d, 0, "rl_store_connections", "call"); v != 1 {
+		t.Errorf("part 2: rl_store_connections{call} = %v, want 1", v)
 	}
 }

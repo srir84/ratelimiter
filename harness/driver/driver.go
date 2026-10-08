@@ -11,7 +11,8 @@
 // names (StartEpoch, ReadEpoch, Status and Inspect as rl_admin; the clock, Fixture and Tamper as
 // rl_fixture; Dump, StoreKeys, SetHold and the audit as rl_lib; Info as rl_ops), runs rladmin as
 // rl_admin (RLAdmin, ReplaceEpoch, Restore, Clear, LogInspect), restarts the store with its data
-// kept, and at teardown, once every instance is closed or killed and while the store still
+// kept, puts an instance behind its own RESP proxy on request (InstanceSpec.ViaProxy, S9 step
+// 6), and at teardown, once every instance is closed or killed and while the store still
 // runs, checks the commands and refund attempts each instance sent, audits the store and its
 // AOF files, and checks BUD-11 on the op log.
 //
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"ratelimiter/harness/fixtures"
+	"ratelimiter/harness/fixtures/respproxy"
 	"ratelimiter/internal/fingerprint"
 	"ratelimiter/internal/keys"
 	"ratelimiter/internal/scripts"
@@ -110,6 +112,11 @@ type InstanceSpec struct {
 	// nearer the store, and an observer given here hears every send too, so the driver's
 	// recorder, fault wrappers, Sent and teardown checks keep running.
 	Options []limitertest.Option
+	// ViaProxy puts the instance behind a respproxy of its own in front of its store (plan S9
+	// step 6): its StoreOptions.Addr is the proxy's address, and Proxy returns the proxy. Each
+	// build (New, AddInstance, Restart) gets a new proxy; the driver closes every proxy once
+	// every instance is closed or killed.
+	ViaProxy bool
 }
 
 // Send is one send-observer record (§A5.12): the command (the script name for EVALSHA), the
@@ -195,6 +202,7 @@ type Driver struct {
 	attempts map[string][]RefundAttempt // by deduction_id
 	canaries map[int][]byte             // each index's signing-key canary, when the driver chose it
 	steps    []CleanupStep              // every cleanup step captured, in completion order
+	proxies  []*respproxy.Proxy         // every proxy a ViaProxy build started, closed at teardown
 }
 
 // instance is one limiter the driver built, with its wrappers and send records.
@@ -204,6 +212,7 @@ type instance struct {
 	l     *limiter.Limiter
 	sw    *fixtures.StoreWrapper
 	sg    *fixtures.SignerWrapper
+	proxy *respproxy.Proxy // nil unless the spec asked for ViaProxy
 
 	mu     sync.Mutex
 	sent   []Send
@@ -316,8 +325,8 @@ func (d *Driver) AddInstance(spec InstanceSpec) (int, error) {
 // records each acquire's response and each refund attempt, and behind which each refund's
 // response, each cleanup step result and each due_entries page before the faults), signer
 // wrapper, send observer, refund listener (last, so it is
-// the one the limiter keeps) and, unless spec has a key reader, the index's canary as the
-// signing key.
+// the one the limiter keeps), unless spec has a key reader, the index's canary as the signing
+// key, and for ViaProxy a new respproxy in front of the store options' address.
 func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
 	p := d.policyOf(spec)
 	in := d.inst
@@ -329,6 +338,17 @@ func (d *Driver) build(i int, spec InstanceSpec) (*instance, error) {
 		so = *spec.Store
 	}
 	inst := &instance{index: i, spec: spec, sw: fixtures.NewStoreWrapper(), sg: fixtures.NewSignerWrapper()}
+	if spec.ViaProxy {
+		px, err := respproxy.New(d.t.Context(), so.Addr)
+		if err != nil {
+			d.t.Fatalf("driver: instance %d: %v", i, err)
+			return inst, err
+		}
+		d.mu.Lock()
+		d.proxies = append(d.proxies, px)
+		d.mu.Unlock()
+		inst.proxy, so.Addr = px, px.Addr()
+	}
 	opts := slices.Concat(spec.Options, []limitertest.Option{
 		limitertest.WithControlledClock(),
 		limitertest.WithStoreWrapper(func(a limitertest.Adapter) limitertest.Adapter {
@@ -394,7 +414,17 @@ func (d *Driver) SignerWrapper(i int) *fixtures.SignerWrapper {
 	return nil
 }
 
-// Sent returns instance i's send-observer records so far, oldest first.
+// Proxy returns the respproxy in front of instance i's store (InstanceSpec.ViaProxy), or nil
+// for an instance built without one.
+func (d *Driver) Proxy(i int) *respproxy.Proxy {
+	if in := d.current(i); in != nil {
+		return in.proxy
+	}
+	return nil
+}
+
+// Sent returns instance i's send-observer records so far, oldest first (§A5.12): cmd is the
+// script name for an EVALSHA ("acquire"), else the command ("SCRIPT LOAD", "AUTH", "PING").
 func (d *Driver) Sent(i int) []Send {
 	if in := d.current(i); in != nil {
 		return in.sends()
@@ -980,9 +1010,16 @@ func writtenKeys(args []string) []string {
 	return args[1:2]
 }
 
-// cleanup is the driver's t.Cleanup: the teardown checks, then its connections.
+// cleanup is the driver's t.Cleanup: the teardown checks (which close every instance), then
+// the instances' proxies and the driver's connections.
 func (d *Driver) cleanup() {
 	d.teardownChecks(d.t)
+	d.mu.Lock()
+	proxies := slices.Clone(d.proxies)
+	d.mu.Unlock()
+	for _, px := range proxies {
+		px.Close()
+	}
 	d.fixMu.Lock()
 	if d.fixture != nil {
 		_ = d.fixture.c.Close()

@@ -295,6 +295,30 @@ func (d *Driver) RestartStore() {
 		d.t.Fatalf("driver: %v", err)
 		return
 	}
+	d.reconnect()
+}
+
+// storeReadyWait bounds ReconnectStore's wait for a restarted store to load its data (plan
+// choice: storeproc's own wait after Restart(true)).
+const storeReadyWait = 30 * time.Second
+
+// ReconnectStore is the second half of RestartStore, for a test that restarted the store itself
+// without waiting for its data (Store().Restart(false), to watch it answer LOADING, plan S9
+// Tests (b)): it waits up to storeReadyWait until the store has loaded its data, then
+// reconnects the driver's own connections.
+func (d *Driver) ReconnectStore() {
+	d.t.Helper()
+	if err := d.st.WaitReady(storeReadyWait); err != nil {
+		d.t.Fatalf("driver: %v", err)
+		return
+	}
+	d.reconnect()
+}
+
+// reconnect replaces the driver's own connections (the clock's and the admin, ops and fixture
+// ones) with new ones to the running store.
+func (d *Driver) reconnect() {
+	d.t.Helper()
 	var conns [3]*storeproc.Client // the clock's, admin, fixture
 	for i, user := range []string{"rl_fixture", "rl_admin", "rl_fixture"} {
 		c, err := d.st.Conn(user)

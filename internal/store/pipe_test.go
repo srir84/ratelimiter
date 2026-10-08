@@ -872,6 +872,130 @@ func TestWaitingWriterRepicks(t *testing.T) {
 	}
 }
 
+// TestClosedBeforeWriteRepicks (DESIGN §A5.4: commands not yet written move to another ready
+// connection within their own deadline; plan S3 step 5, S9 step 1): a call whose picked
+// connection closes after the pick, before the call's write starts, writes nothing there and
+// moves to the other ready connection, where it is sent once and succeeds. This is the check
+// in write that finds the connection already closed while the call holds the write lock, not
+// lockWrite's errConnLost. The order is fixed, with no new seam: of 2 call connections, the
+// test holds X's write lock (X is the first ready one, so a call picks it at equal load); once
+// the call has picked X, the test closes X while holding the set's lock, so the close marks X
+// closed and then waits in onClose, before it ends X's done; releasing X's write lock then
+// hands it to the call, the only case ready in lockWrite, and the call's write finds X closed.
+func TestClosedBeforeWriteRepicks(t *testing.T) {
+	e := newEnv(t)
+	sc := e.script("acquire", echoAcquire)
+	e.start(withConns(2, 1))
+	e.warm(2, 1)
+	set := e.a.sets[Call]
+	set.mu.Lock()
+	x := set.ready[0]
+	set.mu.Unlock()
+	x.wlock <- struct{}{} // the test holds X's write lock
+	var r Response
+	done := goDone(func() { r = e.a.Call(t.Context(), acquireReq(sc, 7)) })
+	waitFor(t, "the call to pick X", time.Second, func() bool { return x.load.Load() == 1 })
+	set.mu.Lock()
+	unlockSet := sync.OnceFunc(set.mu.Unlock)
+	t.Cleanup(unlockSet) // runs before the adapter's Close, also after a failure here
+	closing := goDone(x.close)
+	waitFor(t, "X marked closed", time.Second, func() bool {
+		x.mu.Lock()
+		defer x.mu.Unlock()
+		return x.closed
+	})
+	select {
+	case <-x.done:
+		t.Fatal("X's done closed while its close waits for the set's lock")
+	default:
+	}
+	<-x.wlock // the call takes X's write lock, finds X closed and leaves it
+	waitFor(t, "the call to leave X", time.Second, func() bool { return x.load.Load() == 0 })
+	unlockSet()
+	if !waitDone(t, "the call", 2*time.Second, done) || !waitDone(t, "X's close", time.Second, closing) {
+		t.FailNow()
+	}
+	if r.Outcome != OK || r.Reply.Elems[4].Int != 7 || !r.Sent || r.SentCommands != 1 {
+		t.Errorf("the call = %v, Sent %v, SentCommands %d; want ok with its own reply, sent once, on the other ready connection",
+			r.Outcome, r.Sent, r.SentCommands)
+	}
+	if n := e.srv.Count("EVALSHA"); n != 1 {
+		t.Errorf("the store received %d EVALSHA, want 1", n)
+	}
+	if got, want := e.obs.bytesOf("acquire"), []int{cmdLen("EVALSHA", sc.SHA, "0", "7")}; !slices.Equal(got, want) {
+		t.Errorf("acquire writes of %v bytes observed, want %v: one whole write, none on X", got, want)
+	}
+}
+
+// TestClosedDuringEmptyWriteRepicks (DESIGN §A5.4: commands not yet written move to another
+// ready connection within their own deadline; plan S9 step 1): a call whose picked connection
+// closes after the call joined its FIFO and before any byte of its write left moves to the
+// other ready connection, where it is sent once and succeeds: not unavailable, and not the
+// errConnLost that the close put in its first record. Of 2 call connections, the tap holds the
+// first EVALSHA write, on X, with the call in X's FIFO; the test closes X, then lets the write
+// go on, which fails on the closed socket with nothing written.
+func TestClosedDuringEmptyWriteRepicks(t *testing.T) {
+	e := newEnv(t)
+	sc := e.script("acquire", echoAcquire)
+	held := make(chan *tapConn, 1)
+	release := make(chan struct{})
+	var first atomic.Bool
+	var taps tapList
+	e.start(withConns(2, 1), withTap(&taps, func(c *tapConn, p []byte) (bool, int, error) {
+		if !bytes.Contains(p, []byte("EVALSHA")) || !first.CompareAndSwap(false, true) {
+			return false, 0, nil
+		}
+		held <- c
+		select {
+		case <-release:
+		case <-t.Context().Done():
+		}
+		n, err := c.Conn.Write(p) // X is closed by now: nothing leaves
+		return true, n, err
+	}))
+	e.warm(2, 1)
+	var r Response
+	done := goDone(func() { r = e.a.Call(t.Context(), acquireReq(sc, 7)) })
+	var x *pipeConn
+	select {
+	case tc := <-held:
+		set := e.a.sets[Call]
+		set.mu.Lock()
+		for _, pc := range set.ready {
+			if pc.conn == tc {
+				x = pc
+			}
+		}
+		set.mu.Unlock()
+	case <-time.After(time.Second):
+		t.Fatal("no EVALSHA write within 1 s")
+	}
+	if x == nil {
+		t.Fatal("the held write is not on a ready call connection")
+	}
+	x.mu.Lock()
+	queued := len(x.fifo)
+	x.mu.Unlock()
+	if queued != 1 {
+		t.Fatalf("X's FIFO holds %d commands while the write is held, want 1: the call joined it", queued)
+	}
+	mustWithin(t, "X's close", time.Second, x.close) // takes the call out of X's FIFO
+	close(release)
+	if !waitDone(t, "the call", 2*time.Second, done) {
+		t.FailNow()
+	}
+	if r.Outcome != OK || r.Reply.Elems[4].Int != 7 || !r.Sent || r.SentCommands != 1 {
+		t.Errorf("the call = %v, Sent %v, SentCommands %d; want ok with its own reply, sent once, on the other ready connection",
+			r.Outcome, r.Sent, r.SentCommands)
+	}
+	if n := e.srv.Count("EVALSHA"); n != 1 {
+		t.Errorf("the store received %d EVALSHA, want 1", n)
+	}
+	if got, want := e.obs.bytesOf("acquire"), []int{0, cmdLen("EVALSHA", sc.SHA, "0", "7")}; !slices.Equal(got, want) {
+		t.Errorf("acquire writes of %v bytes observed, want %v: nothing on X, then one whole write on the other connection", got, want)
+	}
+}
+
 // TestFailedDeadlineClearStillCloses: a connection on which setting the read deadline failed
 // is broken (DESIGN §A5.4: a connection is closed on an I/O error), so it still closes by the
 // read deadline it kept. Here a reply that matches no command sent pops the one call in the
