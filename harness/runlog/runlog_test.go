@@ -581,6 +581,112 @@ func TestRunlog_AppendsAfterAnotherWriter(t *testing.T) {
 	}
 }
 
+// TestRunlog_Append: Append adds exactly one JSON line, newline-terminated, after the lines
+// already in the log (H4's pre_kill line on a live hitapi's log), leaving them as they were. It
+// never creates a missing log, and a record that cannot be encoded writes nothing.
+func TestRunlog_Append(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "api-2.jsonl")
+	const before = `{"kind":"lifecycle","event":"start"}` + "\n" + `{"kind":"lifecycle","event":"ready"}` + "\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rec := struct {
+		Kind   string `json:"kind"`
+		Event  string `json:"event"`
+		ReadOK bool   `json:"read_ok"`
+	}{"lifecycle", "pre_kill", true}
+	if err := Append(path, rec); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	want := before + `{"kind":"lifecycle","event":"pre_kill","read_ok":true}` + "\n"
+	if got, err := os.ReadFile(path); err != nil || string(got) != want {
+		t.Fatalf("the log after Append is %q (%v), want %q", got, err, want)
+	}
+
+	if err := Append(path, math.Inf(1)); err == nil {
+		t.Error("Append of a record JSON cannot encode returned nil, want an error")
+	}
+	if got, err := os.ReadFile(path); err != nil || string(got) != want {
+		t.Errorf("the log after a record that cannot be encoded is %q (%v), want it unchanged: %q", got, err, want)
+	}
+
+	missing := filepath.Join(filepath.Dir(path), "api-3.jsonl")
+	if err := Append(missing, rec); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Append to a missing log: %v, want an error wrapping os.ErrNotExist", err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("after Append to a missing log, Stat: %v; want the file still missing", err)
+	}
+
+	// Concurrent: 8 goroutines append 500 lines each to one log while its own Writer writes
+	// there too. Each line is one write(2) on an O_APPEND descriptor, so every line lands whole:
+	// 4,000 Append lines, each one JSON object, in each goroutine's order, beside the Writer's.
+	t.Run("concurrent", func(t *testing.T) {
+		const goroutines, perGoroutine, writerLines = 8, 500, 500
+		path := filepath.Join(t.TempDir(), "api-1.jsonl")
+		w, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = w.Close() })
+		pad := strings.Repeat("x", 200)
+		errs := make(chan error, goroutines)
+		var wg sync.WaitGroup
+		for g := range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := range perGoroutine {
+					if err := Append(path, testRecord{Kind: "append", G: g, I: i, Pad: pad}); err != nil {
+						errs <- err
+						return
+					}
+				}
+			}()
+		}
+		for i := range writerLines {
+			w.Enqueue(testRecord{Kind: "writer", I: i, Pad: pad})
+		}
+		wg.Wait()
+		close(errs)
+		for err := range errs {
+			t.Errorf("Append: %v", err)
+		}
+		if err := w.Close(); err != nil || w.Drops() != 0 {
+			t.Fatalf("the Writer's Close: %v, drops %d; want nil, 0", err, w.Drops())
+		}
+		lines := readLines(t, path)
+		next := make([]int, goroutines) // each goroutine's lines arrive in its own order
+		written := 0
+		for n, l := range lines {
+			var r testRecord
+			dec := json.NewDecoder(strings.NewReader(l))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&r); err != nil || r.Pad != pad {
+				t.Fatalf("line %d is not one whole record (%v): %.120q", n+1, err, l)
+			}
+			if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+				t.Fatalf("line %d holds more after its record: %.120q", n+1, l)
+			}
+			switch {
+			case r.Kind == "writer" && r.I == written:
+				written++
+			case r.Kind == "append" && r.G >= 0 && r.G < goroutines && r.I == next[r.G]:
+				next[r.G]++
+			default:
+				t.Fatalf("line %d: %+v, want the Writer's line %d or an Append line in its goroutine's order %v", n+1, r, written, next)
+			}
+		}
+		appended := 0
+		for _, c := range next {
+			appended += c
+		}
+		if appended != goroutines*perGoroutine || written != writerLines || len(lines) != appended+written {
+			t.Errorf("%d lines: %d by Append, %d by the Writer; want %d and %d", len(lines), appended, written, goroutines*perGoroutine, writerLines)
+		}
+	})
+}
+
 // sigkillChildEnv carries the run-log path to the child copy of TestRunlog_SurvivesSIGKILL.
 const sigkillChildEnv = "RL_RUNLOG_SIGKILL_CHILD"
 

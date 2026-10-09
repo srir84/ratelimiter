@@ -20,6 +20,7 @@ import (
 	"ratelimiter/harness/dbclient"
 	"ratelimiter/harness/fixtures"
 	"ratelimiter/harness/runlog"
+	"ratelimiter/internal/receipt"
 	"ratelimiter/internal/scripts"
 	"ratelimiter/internal/store"
 	"ratelimiter/internal/store/resp"
@@ -62,7 +63,7 @@ func (f *fakeAdapter) count() int {
 	return f.calls
 }
 
-// ctlServer is a test server with both fixtures installed, and the store wrapper wrapped
+// ctlServer is a test server with the four fixtures installed, and the store wrapper wrapped
 // around a fake store so a test can see what the armed faults do to a call.
 type ctlServer struct {
 	*testServer
@@ -73,7 +74,7 @@ type ctlServer struct {
 
 func newCtlServer(t *testing.T, cfg Config, db *fakeDB) *ctlServer {
 	t.Helper()
-	fix := Fixtures{Store: fixtures.NewStoreWrapper(), DB: fixtures.NewDBWrap(db)}
+	fix := Fixtures{Store: fixtures.NewStoreWrapper(), DB: fixtures.NewDBWrap(db), Signer: fixtures.NewSignerWrapper(), Sends: fixtures.NewSendLog()}
 	cfg.Fixtures = fix
 	ts := newTestServer(t, cfg, &fakeLimiter{acquire: allowedWith(&fakePermit{id: "d1"})}, db)
 	inner := &fakeAdapter{}
@@ -97,10 +98,11 @@ func (cs *ctlServer) call(ctx context.Context, script string) store.Response {
 const local = "127.0.0.1:40000"
 
 // TestTestctl_RejectsBadRequests: the /_test routes answer 403 to a remote address that is not
-// loopback, before anything else; 405 with Allow: POST to another method; and 400
-// invalid_request to a body they cannot act on: target "signer" (until H4) or another unknown
-// target, an unknown mode, a match, count or timing the fault does not take, unknown keys,
-// a body that is not one JSON object. A refused request arms nothing and stops nothing. The
+// loopback, before anything else; 405 to another method, with Allow: POST (/_test/faults, which
+// serves DELETE too: Allow: DELETE, POST); and 400
+// invalid_request to a body they cannot act on: an unknown target, an unknown mode, a match,
+// count or timing the fault does not take, unknown keys, a body that is not one JSON object.
+// A refused request arms nothing and stops nothing. The
 // arming bodies DESIGN §B6 gives without a count or a match are accepted: {target:"db", mode}
 // arms the next operation alone, and a barrier {name, at} holds every call ("any").
 func TestTestctl_RejectsBadRequests(t *testing.T) {
@@ -121,13 +123,17 @@ func TestTestctl_RejectsBadRequests(t *testing.T) {
 		}
 		rec := cs.control(ctx, local, http.MethodGet, path, body)
 		checkResponse(t, rec, http.StatusMethodNotAllowed, errMethodNotAllowed)
-		if allow := sentHeader(rec).Get("Allow"); allow != http.MethodPost {
-			t.Errorf("GET %s: Allow %q, want POST", path, allow)
+		want := http.MethodPost
+		if path == "/_test/faults" {
+			want = "DELETE, POST" // it serves DELETE too (IMPLEMENTATION_PLAN H4 step 4)
+		}
+		if allow := sentHeader(rec).Get("Allow"); allow != want {
+			t.Errorf("GET %s: Allow %q, want %q", path, allow, want)
 		}
 	}
 
 	for _, c := range []struct{ path, body string }{
-		{"/_test/faults", `{"target":"signer","mode":"fail","count":1}`},
+		{"/_test/faults", `{"target":"nope","mode":"fail","count":1}`},
 		{"/_test/faults", `{"target":"signer","mode":"refuse","match":"acquire"}`},
 		{"/_test/faults", `{"target":"clock","mode":"refuse","match":"acquire"}`},
 		{"/_test/faults", `{"target":"","mode":"refuse","match":"acquire"}`},
@@ -895,4 +901,259 @@ func TestTestctl_StoreFaultCap(t *testing.T) {
 		checkResponse(t, barrier("b65"), http.StatusOK, "")
 		checkResponse(t, barrier("b66"), http.StatusBadRequest, errInvalidRequest)
 	})
+}
+
+// TestTestctl_SignerFaultCap: POST /_test/faults (target signer) arms at most 64 signer faults
+// at once (the signer wrapper's cap, the store and database wrappers' 64; plan choice,
+// AGENTS.md §1 Queues): the 64th is accepted, the 65th answers 400 invalid_request and arms
+// nothing, and once a Sign has used up the oldest fault the route accepts one more, then
+// refuses the next; exactly 64 faults then answer the next 64 Sign calls.
+func TestTestctl_SignerFaultCap(t *testing.T) {
+	cs := newCtlServer(t, testConfig(), &fakeDB{hit: committed()})
+	signer := cs.fix.Signer.Wrap(&fakeSigner{})
+	r0 := receipt.Receipt{Enc: "azE", G: 3, S: 7, Cost: 1, IssueUs: 1_000, ExpiryUs: 60_001_000}
+	arm := func() *httptest.ResponseRecorder {
+		return cs.control(t.Context(), local, http.MethodPost, "/_test/faults", `{"target":"signer","mode":"fail","count":1}`)
+	}
+	for i := range 64 {
+		if rec := arm(); rec.Code != http.StatusOK {
+			t.Fatalf("signer fault %d of 64: %d %s, want 200", i+1, rec.Code, rec.Body)
+		}
+	}
+	checkResponse(t, arm(), http.StatusBadRequest, errInvalidRequest)
+	checkResponse(t, cs.control(t.Context(), local, http.MethodPost, "/_test/faults", `{"target":"signer","mode":"corrupt"}`),
+		http.StatusBadRequest, errInvalidRequest)
+	if _, err := signer.Sign(r0); !errors.Is(err, fixtures.ErrSignFailed) {
+		t.Errorf("Sign under 64 armed fail faults: %v, want %v", err, fixtures.ErrSignFailed)
+	}
+	checkResponse(t, arm(), http.StatusOK, "")
+	checkResponse(t, arm(), http.StatusBadRequest, errInvalidRequest)
+	for i := range 64 {
+		if _, err := signer.Sign(r0); !errors.Is(err, fixtures.ErrSignFailed) {
+			t.Fatalf("Sign %d of the 64 armed fail faults: %v, want %v", i+1, err, fixtures.ErrSignFailed)
+		}
+	}
+	signed, err := signer.Sign(r0)
+	if err != nil {
+		t.Errorf("Sign once the 64 fail faults are used up: %v, want it signed: the refused faults armed nothing", err)
+	}
+	if !signer.Verify(signed) {
+		t.Error("Verify of the signed receipt: false, want true: the refused corrupt fault armed nothing")
+	}
+}
+
+// fakeSigner signs every receipt (it sets a MAC byte) and verifies only the receipt it signed
+// last, so a signer wrapper's faults show at each of its three calls.
+type fakeSigner struct {
+	mu     sync.Mutex
+	signed receipt.Receipt
+}
+
+func (f *fakeSigner) Usable() bool { return true }
+
+func (f *fakeSigner) Sign(r receipt.Receipt) (receipt.Receipt, error) {
+	r.MAC[0] = 1
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.signed = r
+	return r, nil
+}
+
+func (f *fakeSigner) Verify(r receipt.Receipt) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return r == f.signed
+}
+
+// TestTestCtlValidation (IMPLEMENTATION_PLAN H4 step 4; DESIGN §B6 "bound to loopback"): the
+// H4 routes answer 403 to a remote address that is not loopback, before anything else, and
+// such a DELETE leaves the faults armed from loopback armed; POST /_test/faults answers 400 to
+// an unknown target or mode and to a key the fault does not take; a valid signer body gets 200
+// and arms its fault (fail, unusable, corrupt); DELETE /_test/faults disarms every fixture:
+// store faults and barriers (a held call goes on), database faults and signer faults; a store
+// delay's at reaches the wrapper (after_reply: the store first, then the wait; before_send or
+// none: the wait first, so a call whose ctx ends first is cancelled unsent; plan H4 step 6);
+// GET /_test/sends?since=<seq> returns the send observer's records after seq, oldest first, as
+// [{seq, cmd, bytes_written}], and refuses a query it cannot read.
+func TestTestCtlValidation(t *testing.T) {
+	db := &fakeDB{hit: committed()}
+	cs := newCtlServer(t, testConfig(), db)
+	ctx := t.Context()
+	signer := cs.fix.Signer.Wrap(&fakeSigner{})
+	r0 := receipt.Receipt{Enc: "azE", G: 3, S: 7, Cost: 1, IssueUs: 1_000, ExpiryUs: 60_001_000}
+
+	// A signer fault and a database fault armed from loopback before the refused requests are
+	// still armed after them: a DELETE from a non-loopback address disarms nothing.
+	for _, body := range []string{`{"target":"signer","mode":"unusable","count":1}`, `{"target":"db","mode":"fail_before","count":1}`} {
+		checkResponse(t, cs.control(ctx, local, http.MethodPost, "/_test/faults", body), http.StatusOK, "")
+	}
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, "/_test/faults", `{"target":"signer","mode":"fail","count":1}`},
+		{http.MethodDelete, "/_test/faults", ``},
+		{http.MethodGet, "/_test/sends?since=0", ``},
+	} {
+		for _, remote := range []string{"192.0.2.1:1234", "10.0.0.7:80", "[2001:db8::1]:443", "localhost:80", "garbage"} {
+			checkResponse(t, cs.control(ctx, remote, c.method, c.path, c.body), http.StatusForbidden, errForbidden)
+		}
+	}
+	if signer.Usable() {
+		t.Error("Usable after the refused requests: true, want the unusable fault armed from loopback still armed (a non-loopback DELETE disarmed it)")
+	}
+	if n := cs.fix.DB.Armed(); n != 1 {
+		t.Errorf("the database wrapper has %d operations armed after the refused requests, want the 1 armed from loopback", n)
+	}
+	if got := cs.fix.DB.Hit(ctx, "u1", "r-armed", 1_000, nil); got.Class != dbclient.FailedNoRow {
+		t.Errorf("the operation after the refused requests = %+v, want the fail_before armed from loopback", got)
+	}
+	if _, err := signer.Sign(r0); err != nil {
+		t.Fatalf("Sign after the refused requests: %v, want no signer fault armed", err)
+	}
+
+	for _, body := range []string{
+		`{"target":"nope","mode":"fail"}`,
+		`{"target":"signer","mode":"explode"}`,
+		`{"target":"signer","mode":"refuse","match":"acquire"}`,
+		`{"target":"signer","mode":"fail","match":"acquire"}`,
+		`{"target":"signer","mode":"fail","duration_ms":100}`,
+		`{"target":"signer","mode":"fail","delay_ms":100}`,
+		`{"target":"signer","mode":"fail","at":"before_send"}`,
+		`{"target":"signer","mode":"unusable","field":"g"}`,
+		`{"target":"signer","mode":"corrupt","field":"mac"}`,
+		`{"target":"signer","mode":"fail","count":-1}`,
+		`{"target":"store","mode":"delay","match":"acquire","delay_ms":10,"at":"during_send"}`,
+		`{"target":"store","mode":"refuse","match":"acquire","at":"before_send"}`,
+		`{"target":"store","mode":"drop_reply","match":"acquire","field":"g"}`,
+		`{"target":"db","mode":"fail_before","at":"after_reply"}`,
+		`{"target":"db","mode":"fail_before","field":"g"}`,
+	} {
+		checkResponse(t, cs.control(ctx, local, http.MethodPost, "/_test/faults", body), http.StatusBadRequest, errInvalidRequest)
+	}
+	signed, err := signer.Sign(r0)
+	if err != nil || !signer.Usable() || !signer.Verify(signed) {
+		t.Fatalf("after the refused bodies: Sign %v, Usable %v, Verify %v; want no signer fault armed",
+			err, signer.Usable(), signer.Verify(signed))
+	}
+
+	post := func(path, body string) {
+		t.Helper()
+		checkResponse(t, cs.control(ctx, local, http.MethodPost, path, body), http.StatusOK, "")
+	}
+	post("/_test/faults", `{"target":"signer","mode":"fail","count":1}`)
+	if _, err := signer.Sign(r0); !errors.Is(err, fixtures.ErrSignFailed) {
+		t.Errorf("Sign under signer fail: %v, want %v", err, fixtures.ErrSignFailed)
+	}
+	if signed, err = signer.Sign(r0); err != nil {
+		t.Errorf("the second Sign under signer fail with count 1: %v, want it signed", err)
+	}
+	post("/_test/faults", `{"target":"signer","mode":"unusable","match":"any"}`)
+	post("/_test/faults", `{"target":"signer","mode":"corrupt"}`)
+	post("/_test/faults", `{"target":"signer","mode":"corrupt","field":"expiry_us","count":1}`)
+	for range 2 {
+		if signer.Usable() {
+			t.Error("Usable under signer unusable without a count: true, want false until DELETE")
+		}
+		if signer.Verify(signed) {
+			t.Error("Verify of the signed receipt under signer corrupt: true, want false")
+		}
+	}
+
+	// DELETE /_test/faults disarms the store, barrier, database and signer faults.
+	post("/_test/faults", `{"target":"store","mode":"refuse","match":"acquire"}`)
+	post("/_test/faults", `{"target":"db","mode":"fail_before","count":2}`)
+	post("/_test/barrier", `{"name":"held","at":"before_send","match":"refund"}`)
+	reached := cs.fix.Store.Reached("held")
+	held := make(chan store.Response, 1)
+	go func() { held <- cs.call(ctx, "refund") }()
+	recv(t, reached, "a refund call to reach the barrier")
+	if r := cs.call(ctx, "acquire"); r.Outcome != store.Unavailable {
+		t.Errorf("an acquire call under refuse = %+v, want unavailable", r)
+	}
+	checkResponse(t, cs.control(ctx, local, http.MethodDelete, "/_test/faults", `{"target":"store"}`), http.StatusBadRequest, errInvalidRequest)
+	checkResponse(t, cs.control(ctx, local, http.MethodDelete, "/_test/faults", ``), http.StatusOK, "")
+	within(t, held, waitFor, "the refund call held at the barrier, after DELETE", store.OK)
+	if r := cs.call(ctx, "acquire"); r.Outcome != store.OK {
+		t.Errorf("an acquire call after DELETE = %+v, want it passed through", r)
+	}
+	if n := cs.fix.DB.Armed(); n != 0 {
+		t.Errorf("the database wrapper has %d operations armed after DELETE, want 0", n)
+	}
+	if _, err := signer.Sign(r0); err != nil {
+		t.Errorf("Sign after DELETE: %v, want it signed", err)
+	}
+	if signed, err = signer.Sign(r0); err != nil || !signer.Usable() || !signer.Verify(signed) {
+		t.Errorf("after DELETE: Sign %v, Usable %v, Verify %v; want no signer fault armed", err, signer.Usable(), signer.Verify(signed))
+	}
+	checkResponse(t, cs.control(ctx, local, http.MethodDelete, "/_test/faults", `{}`), http.StatusOK, "")
+
+	// A store delay waits where at says (plan H4 step 6). after_reply: the call reaches the
+	// store adapter at once and returns delay_ms (300 ms) later. before_send, and a body
+	// without at: the wait comes first, so a call whose ctx (100 ms) ends before it returns
+	// cancelled without reaching the adapter.
+	const delayed = 300 * time.Millisecond
+	post("/_test/faults", `{"target":"store","mode":"delay","match":"refund","count":1,"delay_ms":300,"at":"after_reply"}`)
+	sent := cs.inner.count()
+	start := time.Now()
+	late := make(chan store.Response, 1)
+	go func() { late <- cs.call(ctx, "refund") }()
+	for cs.inner.count() == sent && time.Since(start) < delayed {
+		time.Sleep(time.Millisecond)
+	}
+	if reached := time.Since(start); cs.inner.count() != sent+1 || reached >= delayed {
+		t.Errorf("an after_reply delay of 300 ms: %d store calls %v after the call began, want the call at the store before 300 ms",
+			cs.inner.count()-sent, reached)
+	}
+	within(t, late, waitFor, "the refund call under the after_reply delay", store.OK)
+	if took := time.Since(start); took < delayed {
+		t.Errorf("the refund call under an after_reply delay of 300 ms returned after %v, want at least 300 ms", took)
+	}
+	for _, body := range []string{
+		`{"target":"store","mode":"delay","match":"refund","count":1,"delay_ms":300,"at":"before_send"}`,
+		`{"target":"store","mode":"delay","match":"refund","count":1,"delay_ms":300}`,
+	} {
+		post("/_test/faults", body)
+		sent := cs.inner.count()
+		cctx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		r := cs.call(cctx, "refund")
+		cancel()
+		if r.Outcome != store.Cancelled || r.Sent || cs.inner.count() != sent {
+			t.Errorf("POST %s, then a refund call whose ctx ends after 100 ms = %+v (%d store calls), want cancelled before the store",
+				body, r, cs.inner.count()-sent)
+		}
+	}
+
+	// GET /_test/sends?since=<seq>: the records after seq, oldest first.
+	cs.fix.Sends.ObserveSend("AUTH", 61)
+	cs.fix.Sends.ObserveSend("acquire", 120)
+	cs.fix.Sends.ObserveSend("refund", 0)
+	sends := func(query string) string {
+		t.Helper()
+		rec := cs.control(ctx, local, http.MethodGet, "/_test/sends"+query, "")
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET /_test/sends%s: status %d (body %s), want 200", query, rec.Code, rec.Body.Bytes())
+		}
+		h := sentHeader(rec)
+		if h.Get("Content-Type") != "application/json" || h.Get("Cache-Control") != "no-store" {
+			t.Errorf("GET /_test/sends%s: Content-Type %q, Cache-Control %q; want application/json and no-store",
+				query, h.Get("Content-Type"), h.Get("Cache-Control"))
+		}
+		return rec.Body.String()
+	}
+	const (
+		all  = `[{"seq":1,"cmd":"AUTH","bytes_written":61},{"seq":2,"cmd":"acquire","bytes_written":120},{"seq":3,"cmd":"refund","bytes_written":0}]` + "\n"
+		last = `[{"seq":3,"cmd":"refund","bytes_written":0}]` + "\n"
+		none = "[]\n"
+	)
+	for query, want := range map[string]string{"?since=0": all, "": all, "?since=2": last, "?since=3": none, "?since=99": none} {
+		if got := sends(query); got != want {
+			t.Errorf("GET /_test/sends%s = %s, want %s", query, got, want)
+		}
+	}
+	for _, query := range []string{"?since=-1", "?since=x", "?since=", "?since=1&since=2", "?other=1", "?since=1&x=2", "?since=%zz"} {
+		checkResponse(t, cs.control(ctx, local, http.MethodGet, "/_test/sends"+query, ""), http.StatusBadRequest, errInvalidRequest)
+	}
+	rec := cs.control(ctx, local, http.MethodPost, "/_test/sends", "")
+	checkResponse(t, rec, http.StatusMethodNotAllowed, errMethodNotAllowed)
+	if allow := sentHeader(rec).Get("Allow"); allow != http.MethodGet {
+		t.Errorf("POST /_test/sends: Allow %q, want GET", allow)
+	}
 }

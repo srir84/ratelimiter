@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -127,19 +126,6 @@ func (c *storeConn) command(args ...string) (resp.Value, error) {
 		return resp.Value{}, fmt.Errorf("%s: the store replied %s", args[0], v)
 	}
 	return v, nil
-}
-
-// storeArgs returns valkey-server's arguments (IMPLEMENTATION_PLAN H3 step 3; DESIGN §A2,
-// §B5): the durable profile's file, the port, the run's store directory and ACL file, and
-// --auto-aof-rewrite-percentage 0 unless the scenario forces rewrites, which keeps the
-// profile's production rewrite settings (§B5 "Forced rewrites"). The paths are absolute:
-// Valkey changes into --dir before it reads the ACL file.
-func storeArgs(conf string, port int, dir, aclPath string, forcedRewrites bool) []string {
-	args := []string{conf, "--port", strconv.Itoa(port), "--dir", dir, "--aclfile", aclPath}
-	if !forcedRewrites {
-		args = append(args, "--auto-aof-rewrite-percentage", "0")
-	}
-	return args
 }
 
 // pingStore reports whether the store at addr answers PING as rl_ops within ctx.

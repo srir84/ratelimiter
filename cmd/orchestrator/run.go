@@ -89,19 +89,24 @@ const (
 // when a step fails or ctx ends (a signal: stopSignals); 2 when a check that needs the running
 // store or instances refuses the run. Every failure and refusal stops whatever runs first. envs holds
 // each child's environment, with only the store passwords it uses; client is the HTTP client
-// main built; now reads the wall clock (context.json, the fault and rewrite records).
+// main built, and killClient the one main built for a faultctl api kill's pre-kill call and
+// /health reads (plan H4 step 7); now reads the wall clock (context.json, the fault and rewrite
+// records).
 func runSequence(ctx context.Context, logger *slog.Logger, s site, in inputs, rd runDir, envs *childEnvs,
-	client *http.Client, now func() time.Time) int {
-	return newRunner(logger, s, in, rd, envs, client, now).run(ctx)
+	client, killClient *http.Client, now func() time.Time) int {
+	r := newRunner(logger, s, in, rd, envs, client, now)
+	r.killClient = killClient
+	return r.run(ctx)
 }
 
 // apiInstance is one hitapi instance's setup: its address, its config file (the run's
-// config.toml, or its own with --instance-config) and the kill grace from that file.
+// config.toml, or its own with --instance-config), the kill grace and P from that file.
 type apiInstance struct {
 	addr   string
 	config string
 	grace  time.Duration
-	own    bool // started with --instance-config: ready once its /health reason is not no_epoch
+	p      time.Duration // max_release_delay_ns: a faultctl api kill's pre-kill call takes up to P + 2 s
+	own    bool          // started with --instance-config: ready once its /health reason is not no_epoch
 }
 
 // runner is one run's sequence: what it was given, the children it started (each stopped in
@@ -113,7 +118,10 @@ type runner struct {
 	rd     runDir
 	envs   *childEnvs
 	client *http.Client
-	now    func() time.Time
+	// killClient makes a faultctl api kill's requests (plan H4 step 7): its timeout must not cut
+	// the pre-kill call short, which takes up to P + 2 s. nil: an api kill fails, doing nothing.
+	killClient *http.Client
+	now        func() time.Time
 
 	runPath   string // the run directory, absolute: children get absolute paths
 	binDir    string // hitapi and rladmin, absolute
@@ -121,8 +129,13 @@ type runner struct {
 	storeAddr string // 127.0.0.1:<store port>, config.toml's [store] addr
 	apis      []apiInstance
 
+	// mu guards the child table (store, apiProcs, procs and pids.json, rec.Children) while the
+	// faults run, each on its own goroutine: a faultctl command that restarts the store or an
+	// instance replaces its child there (plan H4 step 7). Outside drive one goroutine runs the
+	// sequence.
+	mu                     sync.Mutex
 	store, sampler, hitgen *child
-	apiProcs               []*child
+	apiProcs               []*child      // apiProcs[i] is instance i+1; nil once a fault killed it for good
 	procs                  []runlog.Proc // pids.json
 
 	// countRows counts the hits table's rows for db_rows.json: the database client's
@@ -272,7 +285,10 @@ func (r *runner) finishRun(ctx context.Context) int {
 		r.fail("saving hitgen's output in %s%s: %v", nameHitgen, stderrSuffix, err)
 	}
 	for _, f := range r.rec.Faults {
-		if f.Error != "" || !f.sent() {
+		switch {
+		case f.faultctl && (f.Error != "" || f.StartNs == 0):
+			r.fail("the fault at %v s, %s, failed: %s", f.AtS, f.Cmd, f.Error)
+		case !f.faultctl && (f.Error != "" || !f.sent()):
 			r.fail("a fault at %v s was not armed everywhere", f.AtS)
 		}
 	}
@@ -341,10 +357,11 @@ func (r *runner) finishRun(ctx context.Context) int {
 // the orchestrator stopped it, or ended other than with exit 0 after SIGTERM: hitapi exits 1
 // when its run log was not written whole, the sampler when samples.jsonl was not. A SIGKILL
 // after the grace is only recorded (IMPLEMENTATION_PLAN H3 step 3). hitgen's end is judged by
-// its exit, the store's on its own.
+// its exit, the store's on its own. An instance a faultctl api kill ended on purpose is judged
+// by that fault's record, and the one that replaced it here like any other (plan H4 step 7).
 func (r *runner) judgeStops() {
 	for _, c := range r.rec.Children {
-		if c.Role != runlog.RoleHitAPI && c.Role != runlog.RoleSampler {
+		if (c.Role != runlog.RoleHitAPI && c.Role != runlog.RoleSampler) || c.Fault != "" {
 			continue
 		}
 		switch {
@@ -444,13 +461,17 @@ func (r *runner) record(rec childRecord) {
 
 // stopAPIs stops every running instance at once (HAR-15): SIGTERM, then each instance's own
 // grace, P + drain_timeout + 5 s from the config file it was started with, then SIGKILL,
-// which is recorded (plan H3 step 3).
+// which is recorded (plan H3 step 3). An instance a fault restarted is stopped so too; one it
+// killed for good has left the table already.
 func (r *runner) stopAPIs() {
 	procs := r.apiProcs
 	r.apiProcs = nil
 	recs := make([]childRecord, len(procs))
 	var wg sync.WaitGroup
 	for i, c := range procs {
+		if c == nil {
+			continue
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -458,8 +479,10 @@ func (r *runner) stopAPIs() {
 		}()
 	}
 	wg.Wait()
-	for _, rec := range recs {
-		r.record(rec)
+	for i, rec := range recs {
+		if procs[i] != nil {
+			r.record(rec)
+		}
 	}
 }
 
@@ -507,13 +530,14 @@ func (r *runner) prepare() error {
 	r.rec.Versions.ValkeyPath = bin
 	cfg := filepath.Join(r.runPath, configFile)
 	for n, port := range r.in.apiPorts {
-		a := apiInstance{addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), config: cfg, grace: killGrace(r.in.settings)}
+		a := apiInstance{addr: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), config: cfg, grace: killGrace(r.in.settings),
+			p: time.Duration(r.in.settings.Instance.MaxReleaseDelayNs)}
 		if src, ok := r.in.instanceConfigs[n+1]; ok {
 			info, f, err := copyInstanceConfig(src, r.runPath, n+1)
 			if err != nil {
 				return err
 			}
-			a.config, a.grace, a.own = filepath.Join(r.runPath, info.File), killGrace(f), true
+			a.config, a.grace, a.p, a.own = filepath.Join(r.runPath, info.File), killGrace(f), time.Duration(f.Instance.MaxReleaseDelayNs), true
 			r.rec.InstanceConfigs = append(r.rec.InstanceConfigs, info)
 		}
 		r.apis = append(r.apis, a)
@@ -540,6 +564,8 @@ func (r *runner) apiAddrs() []string {
 // addProc adds a started child to pids.json and rewrites the file (plan H3 step 4): the
 // sampler re-reads it on every tick.
 func (r *runner) addProc(c *child) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.procs = append(r.procs, c.proc)
 	if err := runlog.WritePIDs(filepath.Join(r.runPath, runlog.PIDsFile), runlog.PIDs{Procs: r.procs}); err != nil {
 		return fmt.Errorf("writing %s: %w", runlog.PIDsFile, err)
@@ -548,8 +574,8 @@ func (r *runner) addProc(c *child) error {
 }
 
 // startStore starts valkey-server with the durable profile through the file-limit shell
-// (storeArgs, ulimitScript) and waits until it answers PING as rl_ops, at most storeStartWait;
-// a store that exits first fails the run.
+// (storeArgs, runlog.FileLimitCommand) and waits until it answers PING as rl_ops, at most
+// storeStartWait; a store that exits first fails the run.
 func (r *runner) startStore(ctx context.Context) error {
 	c, err := startChild(ctx, r.runPath, r.storeSpec())
 	if err != nil {
@@ -588,12 +614,13 @@ func (r *runner) storeSpec() childSpec {
 		env: r.envs.plain, ulimit: true}
 }
 
-// storeArgs returns the run's valkey-server arguments (storeArgs): the repository's durable
-// profile, the store port, runs/<id>/store and its acl.conf; production rewrite settings only
-// when the scenario forces rewrites.
+// storeArgs returns the run's valkey-server arguments (runlog.StoreArgs, which faultctl's store
+// down rebuilds to restart the store, plan H4 step 3): the repository's durable profile, the
+// store port, runs/<id>/store and its acl.conf; production rewrite settings only when the
+// scenario forces rewrites.
 func (r *runner) storeArgs() []string {
 	dir := filepath.Join(r.runPath, storeDir)
-	return storeArgs(absPath(r.s.path(storeConf)), r.in.storePort, dir, filepath.Join(dir, aclFile),
+	return runlog.StoreArgs(absPath(r.s.path(storeConf)), r.in.storePort, dir, filepath.Join(dir, aclFile),
 		len(r.in.scenario.ForcedAOFRewritesS) > 0)
 }
 

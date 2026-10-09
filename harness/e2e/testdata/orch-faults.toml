@@ -1,0 +1,23 @@
+# TestDesign_OrchestratorFaultctl (IMPLEMENTATION_PLAN H4 step 7, plan choice): a small
+# test-build run of three instances whose two [[faults]] run faultctl inside the orchestrator:
+# hitapi 2 killed and restarted at 1 s, and the store down for 4 s at 3 s, the run's one store
+# outage segment. One 30/s step of 12 s for 50 users, on the store clock.
+name = "orch-faults"
+seed = 1
+run_kind = "test"
+instances = 3
+
+[[steps]]
+rate_per_s = 30
+duration_s = 12
+
+[users]
+count = 50
+
+[[faults]]
+at_s = 1
+cmd = "faultctl api kill 2 --restart"
+
+[[faults]]
+at_s = 3
+cmd = "faultctl store down 4s"

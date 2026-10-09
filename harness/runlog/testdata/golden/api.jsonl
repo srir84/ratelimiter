@@ -5,3 +5,4 @@
 {"kind":"request","run_id":"20261007-120000-golden-1","epoch_id":"5f0c9a3e1b7d4c2a8e6f0b1d3c5a7e9f","instance":1,"user_id":"alice","request_id":"req-1","arrival_ns":1791374400123456789,"decision_ns":1791374400124002000,"deduction_id":"d1_Kx3vQ9mZt2LwB7nR5yHc0A","result":"allowed","existed":false,"http_status":503,"error":"database_unavailable","limiter_ns":612345,"db_ns":2101447,"total_ns":2840112}
 {"kind":"refund","deduction_id":"d1_Kx3vQ9mZt2LwB7nR5yHc0A","result":"applied","reason":"","attempts":1,"credit_decision_ns":1791374400133918000,"release_mono_ns":8411236450,"final_mono_ns":8418950122}
 {"kind":"lifecycle","event":"stop","listener_drops":0,"log_drops":0}
+{"kind":"lifecycle","event":"pre_kill","listener_drops":0,"log_drops":0,"read_ok":true}

@@ -93,6 +93,34 @@ func (c *Clock) Back(ns int64) error {
 	return c.write(c.ns - ns)
 }
 
+// Load reads the controlled time the store holds, rl:ctl:time in µs (GET, which rl_fixture
+// may send, DESIGN §A2), and makes it the clock's current value without writing anything
+// (IMPLEMENTATION_PLAN H4 step 3, plan choice): a driver in a new process, such as one
+// faultctl command, then steps from the value an earlier driver wrote, so Advance and Back
+// work as they do in the driver that wrote it. A missing key is ErrUnset; a value that is not
+// a decimal count of µs, at least 0, whose ns fit an int64 is an error. Either way the clock
+// is left as it was. onSet does not hear a load: nothing was written.
+func (c *Clock) Load() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	r, err := c.conn.Do("GET", keys.CtlTimeKey)
+	if err != nil {
+		return fmt.Errorf("fixtures: reading the controlled time: %w", err)
+	}
+	switch {
+	case r.Kind == '$' && r.Nil:
+		return ErrUnset
+	case r.Kind != '$':
+		return fmt.Errorf("fixtures: reading the controlled time: reply %s", r)
+	}
+	us, err := strconv.ParseInt(r.Str, 10, 64)
+	if err != nil || us < 0 || us > maxInt64/1000 {
+		return fmt.Errorf("fixtures: reading the controlled time: %q is not a count of µs from 0 to %d", r.Str, int64(maxInt64/1000))
+	}
+	c.ns, c.set = us*1000, true
+	return nil
+}
+
 // NowNs returns the last value written (0 before the first Set).
 func (c *Clock) NowNs() int64 {
 	c.mu.Lock()

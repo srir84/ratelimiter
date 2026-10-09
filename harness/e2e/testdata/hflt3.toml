@@ -1,0 +1,19 @@
+# T-HFLT-3 (HARNESS §8; IMPLEMENTATION_PLAN H4 Tests, plan choice): a one-request hitgen run.
+# One instance and one user, u000000, whose 1/s stream over the 1 s run plans exactly one
+# request with seed 4 (r000000000, about 0.59 s in); the test checks schedule.jsonl holds that
+# one entry.
+name = "hflt3"
+seed = 4
+run_kind = "test"
+instances = 1
+
+[[steps]]
+rate_per_s = 0
+duration_s = 1
+
+[users]
+count = 1
+
+[[streams]]
+users = [0, 0]
+rate_per_s = 1

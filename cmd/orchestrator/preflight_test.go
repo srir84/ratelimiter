@@ -357,9 +357,6 @@ func TestPreflight_Refusals(t *testing.T) {
 		{name: "two refuse bodies whose duration_ms repeats as null, then in another case", want: []string{reasonOutageSegments},
 			scenario: scenario("test", "", oneStep+
 				"[[faults]]\nat_s = 1\ncmd = '"+refuseNullRepeat+"'\n[[faults]]\nat_s = 5\ncmd = '"+refuseNullCase+"'\n")},
-		// Interim (plan H3 step 1): H4 removes the faultctl refusal and this case.
-		{name: "interim: a faultctl cmd", want: []string{reasonFaultctl},
-			scenario: scenario("test", "", oneStep+"[[faults]]\nat_s = 1\ncmd = \"faultctl api kill 2 --restart\"\n")},
 		{name: "--instance-config on a bench run", want: []string{reasonInstanceConfBench},
 			scenario: scenario("bench", "", ""),
 			args:     []string{"--instance-config", "3=" + instanceConfig}},

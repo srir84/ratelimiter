@@ -35,3 +35,11 @@ func buildRefusals(sc config.Scenario, controlled bool) []refusal {
 func setControlledClock(context.Context, string, string, time.Time) (int64, error) {
 	return 0, errNotTestBuild
 }
+
+// runFaultctl records a faultctl cmd as failed in an untagged build, which has no fault
+// runner (it lives in harness/fixtures, faultctl_rltest.go); preflight has already refused
+// every run that would call it.
+func (r *runner) runFaultctl(_ context.Context, _ config.Fault, rec faultRecord) faultRecord {
+	rec.Error = errNotTestBuild.Error()
+	return rec
+}

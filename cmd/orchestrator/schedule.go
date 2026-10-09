@@ -59,15 +59,26 @@ func (w *t0Watch) line(b []byte) {
 // faultRecord is one [[faults]] entry as context.json records it (DESIGN §B5 "Faults"; plan H3
 // step 3): its offset and cmd, the instance it named (null when it went to every instance),
 // the wall-clock ns when the orchestrator began sending it and when every target had answered,
-// and each target's answer. A fault that did not run has an error and no times.
+// and each target's answer. A fault that did not run has an error and no times. A faultctl
+// cmd's record (plan H4 step 7, runFaultctl) has no targets; its instance is the one an api
+// kill names (null for the store, tamper and clock commands, which act on the shared store);
+// its times are the command's own start and end, as faultctl prints them. A store fault whose
+// outage was measured adds outage_ns, the outage's length (DESIGN §B6: from SHUTDOWN or
+// SIGSTOP to the first PING answered, on the monotonic clock), and outage_start_ns (plan
+// choice), the wall-clock ns just before SHUTDOWN or SIGSTOP, which places it; both are null
+// for every other fault.
 type faultRecord struct {
-	AtS      float64       `json:"at_s"`
-	Cmd      string        `json:"cmd"`
-	Instance *int          `json:"instance"`
-	StartNs  int64         `json:"start_ns"`
-	EndNs    int64         `json:"end_ns"`
-	Targets  []faultTarget `json:"targets"`
-	Error    string        `json:"error,omitempty"`
+	AtS           float64       `json:"at_s"`
+	Cmd           string        `json:"cmd"`
+	Instance      *int          `json:"instance"`
+	StartNs       int64         `json:"start_ns"`
+	EndNs         int64         `json:"end_ns"`
+	OutageStartNs *int64        `json:"outage_start_ns"`
+	OutageNs      *int64        `json:"outage_ns"`
+	Targets       []faultTarget `json:"targets"`
+	Error         string        `json:"error,omitempty"`
+
+	faultctl bool // Cmd runs faultctl (config.Fault.Faultctl)
 }
 
 // faultTarget is one instance's answer to a fault: its HTTP status, or why there was none.
@@ -109,7 +120,7 @@ func offset(s float64) time.Duration { return time.Duration(math.Round(s * float
 
 // newFaultRecord is f's record before it runs.
 func newFaultRecord(f config.Fault) faultRecord {
-	rec := faultRecord{AtS: f.AtS, Cmd: f.Cmd}
+	rec := faultRecord{AtS: f.AtS, Cmd: f.Cmd, faultctl: f.Faultctl()}
 	if len(f.Targets) == 1 {
 		n := f.Targets[0]
 		rec.Instance = &n
@@ -186,13 +197,13 @@ func waitUntil(ctx context.Context, at time.Time, stop <-chan struct{}) bool {
 	}
 }
 
-// runFaults sends each fault at t0 + at_s (DESIGN §B4, §B5; plan H3 step 3): its JSON body
+// runFaults runs each fault at t0 + at_s (DESIGN §B4, §B5; plan H3 step 3): a JSON body is
 // posted to /_test/faults of its targets, the one instance it names or every instance (§B4),
-// all at once. Each fault waits for its own time on its own goroutine, one per [[faults]]
-// entry, so targets that answer late delay no other fault (runFault); faults due at the same
-// offset go out together, in no set order. It returns once every one has ended, with the
-// records in the scenario's order. A faultctl cmd never gets here (preflight refuses it until
-// H4).
+// all at once; a faultctl cmd runs in-process (runFaultctl, plan H4 step 7). Each fault waits
+// for its own time on its own goroutine, one per [[faults]] entry, so targets that answer late,
+// or a store outage, delay no other fault (runFault); faults due at the same offset go out
+// together, in no set order. It returns once every one has ended, with the records in the
+// scenario's order.
 func (r *runner) runFaults(ctx context.Context, t0 time.Time, faults []config.Fault, stop <-chan struct{}) []faultRecord {
 	recs := make([]faultRecord, len(faults))
 	var wg sync.WaitGroup
@@ -207,8 +218,9 @@ func (r *runner) runFaults(ctx context.Context, t0 time.Time, faults []config.Fa
 	return recs
 }
 
-// runFault sends f at t0 + its at_s (sendFault) and returns its record once every target has
-// answered. A fault not yet due when stop closes or ctx ends is recorded as not run.
+// runFault runs f at t0 + its at_s, a faultctl cmd in-process (runFaultctl) and a body through
+// sendFault, and returns its record once it has ended: the command, or every target's answer.
+// A fault not yet due when stop closes or ctx ends is recorded as not run.
 func (r *runner) runFault(ctx context.Context, t0 time.Time, f config.Fault, stop <-chan struct{}) faultRecord {
 	rec := newFaultRecord(f)
 	if !waitUntil(ctx, t0.Add(offset(f.AtS)), stop) {
@@ -216,7 +228,9 @@ func (r *runner) runFault(ctx context.Context, t0 time.Time, f config.Fault, sto
 		return rec
 	}
 	if f.Faultctl() {
-		rec.Error = "faultctl cannot run yet (H4)"
+		rec = r.runFaultctl(ctx, f, rec)
+		r.logger.Info("faultctl command ran", "at_s", f.AtS, "cmd", f.Cmd, "start_ns", rec.StartNs, "end_ns", rec.EndNs,
+			"outage_start_ns", rec.OutageStartNs, "outage_ns", rec.OutageNs, "error", rec.Error)
 		return rec
 	}
 	rec = r.sendFault(ctx, f, rec)

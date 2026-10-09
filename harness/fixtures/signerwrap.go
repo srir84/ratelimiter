@@ -87,8 +87,14 @@ type SignerFault struct {
 	Field string
 }
 
+// maxSignerFaults is how many armed signer faults may wait at once (plan choice: the database
+// and store wrappers' cap of 64, maxDBFaults; AGENTS.md §1 Queues): Arm refuses another until a
+// call has used one up or Disarm removed them, so hitapi's POST /_test/faults cannot grow the
+// list without bound.
+const maxSignerFaults = 64
+
 // SignerWrapper stands between the limiter and its signer (DESIGN §A5.12, §B6) and applies
-// the armed faults. It is safe for concurrent use.
+// the armed faults, at most maxSignerFaults at once. It is safe for concurrent use.
 type SignerWrapper struct {
 	mu     sync.Mutex
 	faults []*armedSigner
@@ -107,8 +113,9 @@ func (w *SignerWrapper) Wrap(inner receipt.Signer) receipt.Signer {
 	return &wrappedSigner{w: w, next: inner}
 }
 
-// Arm arms f. It fails on an unknown mode, a negative count, and a corrupt fault whose Field
-// is not one of ReceiptFields (or a Field on another mode).
+// Arm arms f. It fails on an unknown mode, a negative count, a corrupt fault whose Field is
+// not one of ReceiptFields (or a Field on another mode), and when maxSignerFaults faults are
+// armed already; a refused fault arms nothing.
 func (w *SignerWrapper) Arm(f SignerFault) error {
 	switch f.Mode {
 	case SignFail, SignUnusable:
@@ -127,6 +134,9 @@ func (w *SignerWrapper) Arm(f SignerFault) error {
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if len(w.faults) >= maxSignerFaults {
+		return fmt.Errorf("fixtures: signer fault %q refused: %d faults are armed already, the most that may wait", f.Mode, maxSignerFaults)
+	}
 	w.faults = append(w.faults, &armedSigner{f: f, left: f.Count})
 	return nil
 }

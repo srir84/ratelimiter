@@ -75,6 +75,10 @@ type StackOpts struct {
 	// [policy], [instance] and [api] merged onto the stack's config (config.Merge). StartStack
 	// waits for such an instance to be ready, like every other.
 	PerInstanceConfig map[int]string
+	// NoEpoch, when true, starts no epoch on the store (ERR-12a): each hitapi stays not ready,
+	// and StartStack waits for its /health to answer status not_ready with reason no_epoch
+	// instead of ready. The test may start the epoch later (Stack.startEpoch).
+	NoEpoch bool
 }
 
 // Stack is one running stack. Its cleanup stops every hitapi (SIGTERM, then SIGKILL after
@@ -92,9 +96,10 @@ type Stack struct {
 	APIs       []*API // APIs[i] is instance i+1
 	HTTP       *http.Client
 
-	t     testing.TB
-	root  string
-	build string
+	t       testing.TB
+	root    string
+	build   string
+	noEpoch bool // StackOpts.NoEpoch: waitReady takes not_ready (no_epoch) for ready
 }
 
 // API is one hitapi process.
@@ -125,10 +130,11 @@ type child struct {
 
 // StartStack starts a stack for t and registers its cleanup (IMPLEMENTATION_PLAN H1 step 12):
 // a fast-profile store (storeproc); with o.Clock the controlled time; rladmin start-epoch
-// --policy <config> from bin/<build> (RL_STORE_ADDR and RL_ADMIN_PASSWORD in its environment);
-// PostgreSQL through pgtest.Ensure and TRUNCATE hits; then each hitapi from bin/<build> on a
-// free loopback port, waiting up to 10 s for /health status = ready. Any failure ends the test;
-// a missing binary or PostgreSQL is a failure, never a skip.
+// --policy <config> from bin/<build> (RL_STORE_ADDR and RL_ADMIN_PASSWORD in its environment),
+// unless o.NoEpoch; PostgreSQL through pgtest.Ensure and TRUNCATE hits; then each hitapi from
+// bin/<build> on a free loopback port, waiting up to 10 s for /health status = ready (with
+// o.NoEpoch, not_ready with reason no_epoch). Any failure ends the test; a missing binary or
+// PostgreSQL is a failure, never a skip.
 func StartStack(t *testing.T, o StackOpts) *Stack {
 	t.Helper()
 	if o.Instances == 0 {
@@ -144,7 +150,7 @@ func StartStack(t *testing.T, o StackOpts) *Stack {
 	if err != nil {
 		t.Fatalf("StartStack: %v", err)
 	}
-	s := &Stack{t: t, root: root, build: o.Build, Dir: t.TempDir()}
+	s := &Stack{t: t, root: root, build: o.Build, Dir: t.TempDir(), noEpoch: o.NoEpoch}
 	for _, name := range []string{"hitapi", "rladmin"} {
 		if err := checkBinary(s.bin(name)); err != nil {
 			t.Fatalf("StartStack: %v", err)
@@ -167,7 +173,9 @@ func StartStack(t *testing.T, o StackOpts) *Stack {
 			t.Fatalf("StartStack: setting the controlled time: %v", err)
 		}
 	}
-	s.startEpoch()
+	if !o.NoEpoch {
+		s.startEpoch()
+	}
 
 	pgtest.Ensure(t)
 	dsn, err := helperDSN(baseDSN)
@@ -366,9 +374,10 @@ func (s *Stack) startAPI(n int, path string, cfg config.File) *API {
 	}
 }
 
-// waitReady polls /health until it answers status = ready, the process exits, or 10 s have
-// passed since the call. Each probe runs under that deadline, so a /health that hangs ends the
-// wait on time and a ready that comes later is never taken.
+// waitReady polls /health until it answers status = ready (on a stack started with NoEpoch:
+// status not_ready with reason no_epoch), the process exits, or 10 s have passed since the
+// call. Each probe runs under that deadline, so a /health that hangs ends the wait on time and
+// a ready that comes later is never taken.
 func (a *API) waitReady(t testing.TB) error {
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(readyWait))
 	defer cancel()
@@ -380,7 +389,8 @@ func (a *API) waitReady(t testing.TB) error {
 		default:
 		}
 		if r, err := a.try(ctx, http.MethodGet, "/health", nil, ""); err == nil {
-			if r.JSON["status"] == "ready" {
+			if r.JSON["status"] == "ready" && !a.stack.noEpoch ||
+				r.JSON["status"] == "not_ready" && r.JSON["reason"] == "no_epoch" && a.stack.noEpoch {
 				return nil
 			}
 			last = string(r.Body)

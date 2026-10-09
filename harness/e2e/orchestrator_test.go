@@ -14,6 +14,7 @@ import (
 	"io"
 	"io/fs"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -317,7 +318,7 @@ func testdataPath(t *testing.T, name string) string {
 }
 
 // readJSON decodes the JSON file at path into v.
-func readJSON(t *testing.T, path string, v any) {
+func readJSON(t testing.TB, path string, v any) {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -338,15 +339,30 @@ type orchAPIRecord struct {
 	LogDrops      *int64 `json:"log_drops"`
 }
 
-// orchGenRecord is the part of a gen.jsonl line these tests read (DESIGN §B4 "Record").
+// orchGenRecord is the part of a gen.jsonl line these tests read (DESIGN §B4 "Record"):
+// planned_ns and sent_ns are offsets from hitgen's t0, sent_ns null for an attempt never
+// written; planned_ns is the entry's on every attempt, a retry's included; latency is null on
+// an attempt never written, hint_ms and jitter_ns on a first attempt.
 type orchGenRecord struct {
-	Kind     string  `json:"kind"`
-	Instance int     `json:"instance"`
-	Status   int     `json:"status"`
-	Error    *string `json:"error"`
-	Unsent   *int64  `json:"unsent"`
-	LogDrops *int64  `json:"log_drops"`
+	Kind      string  `json:"kind"`
+	PlannedNs int64   `json:"planned_ns"`
+	SentNs    *int64  `json:"sent_ns"`
+	Instance  int     `json:"instance"`
+	RequestID string  `json:"request_id"`
+	Attempt   int     `json:"attempt"`
+	HintMs    *int64  `json:"hint_ms"`
+	JitterNs  *int64  `json:"jitter_ns"`
+	Status    int     `json:"status"`
+	Error     *string `json:"error"`
+	Latency   *int64  `json:"latency"`
+	Unsent    *int64  `json:"unsent"`
+	LogDrops  *int64  `json:"log_drops"`
 }
+
+// unsentCheck checks the gen.jsonl attempts a run's faults left unsent (sent_ns null), in
+// place of checkFinishedRun's rule for a run without faults, the summary's unsent 0: it gets
+// gen.jsonl's lines, the summary last.
+type unsentCheck func(t *testing.T, gen []orchGenRecord)
 
 // orchHealth is the part of an instance's /health these tests read, as samples.jsonl records
 // it (DESIGN §B7, §B8).
@@ -452,13 +468,14 @@ func insertSentinel(t *testing.T) *dbclient.Client {
 // api-1…N.jsonl, samples.jsonl, db_rows.json and store/; db_rows.json equals the api-N.jsonl
 // request records with http_status 200 and existed = false, of which there is at least one;
 // the sentinel row is gone (the run's TRUNCATE hits); each instance wrote one stop record, with
-// listener_drops 0 and log_drops 0; gen.jsonl ends with its summary, unsent 0 and log_drops 0;
+// listener_drops 0 and log_drops 0; gen.jsonl ends with its summary, log_drops 0 and unsent 0
+// (when unsent is not nil, it checks the attempts the run's faults left unsent instead);
 // samples.jsonl has at least minSamples lines, one of them with every read (sampleGaps);
 // context.json's schedule_sha256 is the SHA-256 of runs/<id>/schedule.jsonl and its
 // postgres_settings hold the DESIGN §B10 settings, each set, neither with a read error (plan H3
 // step 5); and runs/index.jsonl gained exactly one line, {scenario, baseline, run_id}, naming
 // this run.
-func checkFinishedRun(t *testing.T, r *orchRun, db *dbclient.Client, scenario string, baseline bool, instances int) {
+func checkFinishedRun(t *testing.T, r *orchRun, db *dbclient.Client, scenario string, baseline bool, instances int, unsent unsentCheck) {
 	t.Helper()
 	if r.code != 0 || r.dir == "" {
 		t.Fatalf("the orchestrator exited %d (run %q), want 0 after a finished run; its output:\n%s", r.code, r.runID, r.out)
@@ -524,8 +541,13 @@ func checkFinishedRun(t *testing.T, r *orchRun, db *dbclient.Client, scenario st
 	if len(gen) == 0 || gen[len(gen)-1].Kind != "summary" {
 		t.Fatalf("gen.jsonl (%d lines) does not end with its summary", len(gen))
 	}
-	if s := gen[len(gen)-1]; s.Unsent == nil || *s.Unsent != 0 || s.LogDrops == nil || *s.LogDrops != 0 {
-		t.Errorf("gen.jsonl summary: unsent %s, log_drops %s; want 0 and 0", nullable(s.Unsent), nullable(s.LogDrops))
+	if s := gen[len(gen)-1]; s.LogDrops == nil || *s.LogDrops != 0 {
+		t.Errorf("gen.jsonl summary: log_drops %s, want 0", nullable(s.LogDrops))
+	}
+	if unsent != nil {
+		unsent(t, gen)
+	} else if s := gen[len(gen)-1]; s.Unsent == nil || *s.Unsent != 0 {
+		t.Errorf("gen.jsonl summary: unsent %s, want 0", nullable(s.Unsent))
 	}
 	samples := readJSONLines[orchSample](t, filepath.Join(r.dir, "samples.jsonl"))
 	if len(samples) < minSamples {
@@ -646,7 +668,7 @@ func aofCommands(t *testing.T, storeDir string) [][]string {
 func TestDesign_OrchestratorTestRun(t *testing.T) {
 	db := insertSentinel(t)
 	r := runOrchestrator(t, "--scenario", testdataPath(t, "orch-test.toml"))
-	checkFinishedRun(t, r, db, "orch-test", false, 3)
+	checkFinishedRun(t, r, db, "orch-test", false, 3, nil)
 
 	clockAt, epochAt := -1, -1
 	var clockUs string
@@ -899,7 +921,7 @@ func TestDesign_OrchestratorStderrGone(t *testing.T) {
 func TestDesign_OrchestratorBaselineBench(t *testing.T) {
 	db := insertSentinel(t)
 	r := runOrchestrator(t, "--scenario", testdataPath(t, "orch-baseline.toml"), "--baseline")
-	checkFinishedRun(t, r, db, "orch-baseline", true, 3)
+	checkFinishedRun(t, r, db, "orch-baseline", true, 3, nil)
 
 	read := map[int]int{}
 	for i, s := range readJSONLines[orchSample](t, filepath.Join(r.dir, "samples.jsonl")) {
@@ -945,7 +967,7 @@ func TestT_HAR_1(t *testing.T) {
 	db := insertSentinel(t)
 	r := runOrchestrator(t, "--scenario", testdataPath(t, "orch-test.toml"),
 		"--instance-config", "3="+testdataPath(t, "har1-mismatch.toml"))
-	checkFinishedRun(t, r, db, "orch-test", false, 3)
+	checkFinishedRun(t, r, db, "orch-test", false, 3, nil)
 
 	attempts, ok := map[int]int{}, map[int]int{}
 	for i, g := range readJSONLines[orchGenRecord](t, filepath.Join(r.dir, "gen.jsonl")) {
@@ -1079,5 +1101,488 @@ func TestT_FIX_2(t *testing.T) {
 				t.Errorf("store directories %q (%v) after the refusal, want none: no valkey-server started", aof, err)
 			}
 		})
+	}
+}
+
+// orchFaultRecord is a context.json faults entry (IMPLEMENTATION_PLAN H3 step 3, H4 step 7).
+type orchFaultRecord struct {
+	AtS           float64           `json:"at_s"`
+	Cmd           string            `json:"cmd"`
+	Instance      *int              `json:"instance"`
+	StartNs       int64             `json:"start_ns"`
+	EndNs         int64             `json:"end_ns"`
+	OutageStartNs *int64            `json:"outage_start_ns"`
+	OutageNs      *int64            `json:"outage_ns"`
+	Targets       []json.RawMessage `json:"targets"`
+	Error         string            `json:"error"`
+}
+
+// orchChildRecord is a context.json children entry (plan H3 step 4, H4 step 7).
+type orchChildRecord struct {
+	Name   string `json:"name"`
+	Role   string `json:"role"`
+	PID    int    `json:"pid"`
+	Exit   string `json:"exit"`
+	Early  bool   `json:"exited_before_stop"`
+	Killed bool   `json:"killed"`
+	Fault  string `json:"fault"`
+	Error  string `json:"error"`
+}
+
+// TestDesign_OrchestratorFaultctl (IMPLEMENTATION_PLAN H4 step 7; DESIGN §B4 [[faults]], §B5
+// "Faults", §B6): bin/test/orchestrator runs testdata/orch-faults.toml, whose two faults run
+// faultctl inside the orchestrator: api kill 2 --restart at 1 s and store down 4s at 3 s. The
+// run finishes, exit 0, with a finished run's evidence (checkFinishedRun: among it each
+// instance's one stop record, the restarted hitapi 2's included), except that the attempts
+// the kill leaves unsent, refused while hitapi 2 restarts, are accepted, exactly those
+// (checkKillUnsent). context.json records both faults without an error, each with its
+// command's own start_ns and end_ns: the kill with instance 2 and no outage_start_ns or
+// outage_ns; the store down with no instance and an outage_ns of more than the commanded 4,000
+// ms, at most 5,000 ms (DESIGN §B6: from SHUTDOWN to the first PING) from its outage_start_ns,
+// inside its start_ns and end_ns within the wall clock's adjustment meanwhile
+// (checkOutageBounds). Each restarted process is the orchestrator's child: pids.json ends with
+// the restarted hitapi 2 and store, each under a PID other than the one it replaced;
+// context.json's children show the killed hitapi 2 (signal: killed) and the shut-down store
+// (exit 0) each with its fault and not as an early exit, and the run's end stops the restarted
+// ones: hitapi 2 by SIGTERM, exit 0, neither killed nor early, in context.json's children; the
+// store by SHUTDOWN, exit 0, in the orchestrator's "child stopped" line (the run shuts its
+// store down after it wrote context.json and ran the report, plan H3 step 3). api-2.jsonl
+// holds the pre_kill line, read_ok:true with both drop counts 0, and the restarted process's
+// stop record after it; samples.jsonl shows the sampler reached both restarted processes
+// under their new PIDs (an rss, no error).
+func TestDesign_OrchestratorFaultctl(t *testing.T) {
+	const (
+		killCmd = "faultctl api kill 2 --restart"
+		downCmd = "faultctl store down 4s"
+		downFor = 4 * time.Second // the store down's commanded duration
+	)
+	db := insertSentinel(t)
+	before := time.Now()
+	r := runOrchestrator(t, "--scenario", testdataPath(t, "orch-faults.toml"))
+	adj := clockAdjustment(before, time.Now())
+	checkFinishedRun(t, r, db, "orch-faults", false, 3, func(t *testing.T, gen []orchGenRecord) { checkKillUnsent(t, r, killCmd, gen) })
+
+	var rc struct {
+		Faults   []orchFaultRecord `json:"faults"`
+		Children []orchChildRecord `json:"children"`
+	}
+	readJSON(t, filepath.Join(r.dir, "context.json"), &rc)
+	if len(rc.Faults) != 2 {
+		t.Fatalf("context.json faults %+v, want the two [[faults]] entries", rc.Faults)
+	}
+	kill, down := rc.Faults[0], rc.Faults[1]
+	if kill.Cmd != killCmd || kill.AtS != 1 || kill.Error != "" || kill.Instance == nil || *kill.Instance != 2 ||
+		kill.StartNs <= 0 || kill.EndNs < kill.StartNs || kill.OutageNs != nil || kill.OutageStartNs != nil || len(kill.Targets) != 0 {
+		t.Errorf("the api kill's record %+v, want at_s 1, instance 2, start_ns <= end_ns, outage_ns and outage_start_ns null, no targets, no error", kill)
+	}
+	if down.Cmd != downCmd || down.AtS != 3 || down.Error != "" || down.Instance != nil || down.OutageNs == nil ||
+		*down.OutageNs <= int64(downFor) || *down.OutageNs > int64(5*time.Second) || down.EndNs <= down.StartNs {
+		t.Errorf("the store down's record %+v (outage_ns %s), want at_s 3, no instance, an outage_ns of more than 4,000 ms, at most 5,000 ms, "+
+			"between start_ns and end_ns, no error", down, nullable(down.OutageNs))
+	}
+	checkOutageBounds(t, down, downFor, adj)
+
+	pids, err := runlog.ReadPIDs(filepath.Join(r.dir, runlog.PIDsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := map[string]int{}
+	for _, p := range pids.Procs {
+		final[p.Role+" "+strconv.Itoa(p.Instance)] = p.PID
+	}
+	for _, c := range []struct {
+		name, role, key, fault, endedExit string
+		storeEnd                          bool // the restarted process's end is in the log only
+	}{
+		{name: "hitapi-2", role: "hitapi", key: "hitapi 2", fault: killCmd, endedExit: "signal: killed"},
+		{name: "valkey-server", role: "valkey-server", key: "valkey-server 0", fault: downCmd, endedExit: "exit 0", storeEnd: true},
+	} {
+		var recs []orchChildRecord
+		for _, ch := range rc.Children {
+			if ch.Name == c.name {
+				recs = append(recs, ch)
+			}
+		}
+		if c.storeEnd { // the run's SHUTDOWN of the restarted store, as the orchestrator logged it
+			for _, l := range r.recs {
+				if l["msg"] == "child stopped" && l["name"] == c.name && l["pid"] == float64(final[c.key]) {
+					recs = append(recs, orchChildRecord{Name: c.name, Role: c.role, PID: final[c.key], Exit: fmt.Sprint(l["exit"])})
+				}
+			}
+		}
+		if len(recs) != 2 {
+			t.Errorf("the ends of %s: %+v, want two: the process the fault ended, then the one that replaced it, stopped by the run's end", c.name, recs)
+			continue
+		}
+		ended, restarted := recs[0], recs[1]
+		if ended.Fault != c.fault || ended.Exit != c.endedExit || ended.Early || ended.Killed || ended.Error != "" {
+			t.Errorf("%s's ended process %+v, want exit %q, fault %q, not early, not killed", c.name, ended, c.endedExit, c.fault)
+		}
+		if restarted.Fault != "" || restarted.Exit != "exit 0" || restarted.Early || restarted.Killed || restarted.Error != "" ||
+			restarted.PID == ended.PID || final[c.key] != restarted.PID {
+			t.Errorf("%s's restarted process %+v (pids.json: %d), want the PID pids.json names, other than %d, exit 0 at the run's end, not early, not killed, no fault",
+				c.name, restarted, final[c.key], ended.PID)
+		}
+		var sampled bool
+		for _, s := range readJSONLines[faultSample](t, filepath.Join(r.dir, "samples.jsonl")) {
+			for _, p := range s.Procs {
+				if p.Role == c.role && p.PID == restarted.PID && p.RSS != nil && *p.RSS > 0 && p.Error == nil {
+					sampled = true
+				}
+			}
+		}
+		if !sampled {
+			t.Errorf("no samples.jsonl line has %s's restarted process %d with an rss and no error: the sampler never reached it", c.name, restarted.PID)
+		}
+	}
+
+	type lifecycle struct {
+		Kind          string `json:"kind"`
+		Event         string `json:"event"`
+		ListenerDrops *int64 `json:"listener_drops"`
+		LogDrops      *int64 `json:"log_drops"`
+		ReadOK        *bool  `json:"read_ok"`
+	}
+	preKill, stopsAfter := -1, 0
+	for i, l := range readJSONLines[lifecycle](t, filepath.Join(r.dir, "api-2.jsonl")) {
+		switch {
+		case l.Kind == "lifecycle" && l.Event == "pre_kill":
+			preKill = i
+			if l.ReadOK == nil || !*l.ReadOK || l.ListenerDrops == nil || *l.ListenerDrops != 0 || l.LogDrops == nil || *l.LogDrops != 0 {
+				t.Errorf("api-2.jsonl's pre_kill line %+v, want read_ok true, listener_drops 0, log_drops 0", l)
+			}
+		case l.Kind == "lifecycle" && l.Event == "stop" && preKill >= 0:
+			stopsAfter++
+		}
+	}
+	if preKill < 0 || stopsAfter != 1 {
+		t.Errorf("api-2.jsonl: pre_kill line at %d, %d stop records after it; want the pre_kill line, then the restarted process's one stop record", preKill, stopsAfter)
+	}
+}
+
+// checkOutageBounds checks the context.json record of a store fault commanded for d
+// (IMPLEMENTATION_PLAN H4 step 7; DESIGN §B5 "Faults", §B6): start_ns and end_ns are the
+// command's own times, and the outage it measured, outage_ns long (from SHUTDOWN or SIGSTOP to
+// the first PING answered) from outage_start_ns, lasts more than d and at most 5 s and lies
+// inside them. More than d: it ends at the first PING answered after SIGCONT or the restart, d
+// after it began, so an outage_ns that was not measured, d itself among them, fails. Inside:
+// start_ns <= outage_start_ns and outage_start_ns + outage_ns <= end_ns, each within |adj|,
+// the wall clock's adjustment the test saw around the run (clockAdjustment): outage_ns is a
+// monotonic length and the others wall-clock readings, so a step or slew of the system clock
+// meanwhile moves them apart by that much.
+func checkOutageBounds(t *testing.T, rec orchFaultRecord, d time.Duration, adj int64) {
+	t.Helper()
+	if rec.OutageNs == nil || rec.OutageStartNs == nil {
+		t.Errorf("the store fault's record %+v has no outage_ns or outage_start_ns", rec)
+		return
+	}
+	from, length, slack := *rec.OutageStartNs, *rec.OutageNs, max(adj, -adj)
+	if length <= int64(d) || from < rec.StartNs-slack || from+length > rec.EndNs+slack || length > int64(5*time.Second) {
+		t.Errorf("%s: an outage of outage_ns %d from outage_start_ns %d, start_ns %d, end_ns %d (the wall clock adjusted by %d ns meanwhile); "+
+			"want more than the commanded %v and at most 5 s, inside the command's times: start_ns <= outage_start_ns and "+
+			"outage_start_ns + outage_ns <= end_ns, within that adjustment",
+			rec.Cmd, length, from, rec.StartNs, rec.EndNs, adj, d)
+	}
+}
+
+// clockAdjustment is how far the wall clock moved beyond the monotonic clock between before
+// and after, two time.Now readings: the system clock's steps and slews in between (timed on
+// macOS slews it by up to a few ms a second and sometimes steps it by tens of ms).
+func clockAdjustment(before, after time.Time) int64 {
+	return (after.UnixNano() - before.UnixNano()) - after.Sub(before).Nanoseconds()
+}
+
+// killUnsentMargin is how far outside the api kill's [start_ns, end_ns] an attempt the kill
+// left unsent may be made (plan choice): hitgen launches an attempt up to a few ms after its
+// planned time (a retry, after its timer's), and t0 comes from hitgen's "sending" line, written
+// just before its sender takes t0.
+const killUnsentMargin = 50 * time.Millisecond
+
+// checkKillUnsent checks the attempts orch-faults' api kill leaves unsent (an unsentCheck):
+// while hitapi 2 is killed and restarting (tens of ms), a connect to it is refused, and hitgen
+// logs that attempt with sent_ns null and error transport_error. Each gen.jsonl attempt with
+// sent_ns null, a retry included, must be such a one: to instance 2, error transport_error,
+// made while context.json's record of killCmd ran, t0 plus its time (attemptTime) in
+// [start_ns, end_ns] give or take killUnsentMargin (t0: the time of hitgen's "sending" line in
+// runs/<id>/hitgen.stderr, wall clock). The summary's unsent (planned − written) counts the
+// entries whose first attempt was never written: hitgen counts an entry written by its first
+// attempt alone (cmd/hitgen sender.go), so a refused retry is not in it, and unsent must equal
+// the number of first attempts among those lines. A run whose connects all found hitapi 2 has
+// none.
+func checkKillUnsent(t testing.TB, r *orchRun, killCmd string, gen []orchGenRecord) {
+	t.Helper()
+	var rc struct {
+		Faults []orchFaultRecord `json:"faults"`
+	}
+	readJSON(t, filepath.Join(r.dir, "context.json"), &rc)
+	var kill *orchFaultRecord
+	for i := range rc.Faults {
+		if rc.Faults[i].Cmd == killCmd {
+			kill = &rc.Faults[i]
+		}
+	}
+	if kill == nil || kill.StartNs <= 0 || kill.EndNs < kill.StartNs {
+		t.Fatalf("context.json faults %+v, want %q with its start_ns and end_ns", rc.Faults, killCmd)
+	}
+	t0 := hitgenT0(t, r)
+	from, to := kill.StartNs-int64(killUnsentMargin), kill.EndNs+int64(killUnsentMargin)
+	attempts := gen[:len(gen)-1]
+	unsent, unsentFirst := 0, int64(0)
+	var made []time.Duration // each unsent attempt's time, from the kill's start_ns
+	for _, g := range attempts {
+		if g.SentNs != nil {
+			continue
+		}
+		unsent++
+		if g.Attempt == 1 {
+			unsentFirst++
+		}
+		off, err := attemptTime(attempts, g)
+		if err != nil {
+			t.Errorf("gen.jsonl attempt %d of %s (instance %d, error %s) was never written, and %v",
+				g.Attempt, g.RequestID, g.Instance, nullable(g.Error), err)
+			continue
+		}
+		at := t0 + off
+		made = append(made, time.Duration(at-kill.StartNs))
+		if g.Instance != 2 || g.Error == nil || *g.Error != "transport_error" || at < from || at > to {
+			t.Errorf("gen.jsonl attempt %d of %s (instance %d, error %s) was never written, made at %d ns; want only attempts to instance 2 with error transport_error made while %q ran, in [%d, %d] ns",
+				g.Attempt, g.RequestID, g.Instance, nullable(g.Error), at, killCmd, from, to)
+		}
+	}
+	if s := gen[len(gen)-1]; s.Unsent == nil || *s.Unsent != unsentFirst {
+		t.Errorf("gen.jsonl summary unsent %s, want %d: the first attempts with sent_ns null, those the kill left unsent (a retry never written is not counted)",
+			nullable(s.Unsent), unsentFirst)
+	}
+	t.Logf("%q ran %v and left %d attempts unsent (%d first attempts), made %v after its start",
+		killCmd, time.Duration(kill.EndNs-kill.StartNs), unsent, unsentFirst, made)
+}
+
+// attemptTime is when hitgen made attempt g, as an offset from its t0 (DESIGN §B4 "Sending",
+// "Retries"): a first attempt at its planned_ns; a retry its hint_ms plus its jitter_ns after
+// the attempt before it ended, at that attempt's sent_ns + latency, the moment hitgen's sender
+// schedules a retry from (cmd/hitgen sender.go). planned_ns cannot time a retry: it is the
+// entry's, earlier than the retry by at least the hint. The attempt before is the same entry's
+// (same request ID and planned_ns; a duplicate entry reuses an earlier one's request ID),
+// numbered one less, and must be written and answered 429; the error says what gen.jsonl lacks.
+func attemptTime(attempts []orchGenRecord, g orchGenRecord) (int64, error) {
+	if g.Attempt == 1 {
+		return g.PlannedNs, nil
+	}
+	if g.HintMs == nil || g.JitterNs == nil {
+		return 0, fmt.Errorf("the retry's hint_ms %s and jitter_ns %s: want both", nullable(g.HintMs), nullable(g.JitterNs))
+	}
+	for _, p := range attempts {
+		if p.RequestID != g.RequestID || p.PlannedNs != g.PlannedNs || p.Attempt != g.Attempt-1 {
+			continue
+		}
+		if p.Status != http.StatusTooManyRequests || p.SentNs == nil || p.Latency == nil {
+			return 0, fmt.Errorf("its attempt %d is not a written attempt answered 429: status %d, sent_ns %s, latency %s",
+				p.Attempt, p.Status, nullable(p.SentNs), nullable(p.Latency))
+		}
+		return *p.SentNs + *p.Latency + *g.HintMs*int64(time.Millisecond) + *g.JitterNs, nil
+	}
+	return 0, fmt.Errorf("gen.jsonl has no attempt %d of the same entry before it", g.Attempt-1)
+}
+
+// hitgenT0 is the wall-clock time, in ns, of hitgen's "sending" line in runs/<id>/hitgen.stderr:
+// hitgen writes it just before its sender takes t0, from which gen.jsonl's offsets count.
+func hitgenT0(t testing.TB, r *orchRun) int64 {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(r.dir, "hitgen.stderr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		var rec struct {
+			Time string `json:"time"`
+			Msg  string `json:"msg"`
+		}
+		if json.Unmarshal(line, &rec) != nil || rec.Msg != "sending" {
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, rec.Time)
+		if err != nil {
+			t.Fatalf("hitgen's sending line %s: %v", line, err)
+		}
+		return at.UnixNano()
+	}
+	t.Fatalf("runs/%s/hitgen.stderr has no sending line:\n%s", r.runID, data)
+	return 0
+}
+
+// errRecorder is a testing.TB that keeps a checker's Errorf reports instead of failing the
+// test (TestCheckKillUnsent); anything else, Fatalf included, reaches the real test.
+type errRecorder struct {
+	testing.TB
+	errs []string
+}
+
+func (r *errRecorder) Helper() {}
+
+func (r *errRecorder) Errorf(format string, args ...any) {
+	r.errs = append(r.errs, fmt.Sprintf(format, args...))
+}
+
+// TestCheckKillUnsent (IMPLEMENTATION_PLAN H4 step 7; DESIGN §B4 "Record", "Retries"):
+// checkKillUnsent, TestDesign_OrchestratorFaultctl's unsent check, given a synthetic run
+// directory (context.json's api kill from 1,000 to 1,120 ms after hitgen's t0, hitgen.stderr's
+// "sending" line at t0) and gen.jsonl, accepts a retry the kill refused with the summary's
+// unsent 0, as hitgen counts first attempts only: the retry is made at 1,062 ms (its first
+// attempt, planned at 800 ms, answered 429 by 802 ms, plus hint_ms 250 and jitter_ns 10 ms),
+// inside the window although its planned_ns is not; and with a first attempt refused at
+// 1,100 ms besides, unsent 1. Each rule then fails alone, with one report: the summary leaving
+// out that first attempt or counting the retry; a refused retry made after the kill and its
+// margin, one to instance 1, one that timed out, one without a 429 before it.
+func TestCheckKillUnsent(t *testing.T) {
+	const killCmd = "faultctl api kill 2 --restart"
+	t0 := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	ms := int64(time.Millisecond)
+	ctxJSON, err := json.Marshal(map[string]any{"faults": []map[string]any{{
+		"at_s": 1, "cmd": killCmd, "instance": 2, "start_ns": t0.UnixNano() + 1000*ms, "end_ns": t0.UnixNano() + 1120*ms,
+		"outage_start_ns": nil, "outage_ns": nil, "targets": []any{}, "error": "",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stderr := `{"time":"` + t0.Add(-time.Second).Format(time.RFC3339Nano) + `","level":"INFO","msg":"schedule ready"}` + "\n" +
+		`{"time":"` + t0.Format(time.RFC3339Nano) + `","level":"INFO","msg":"sending"}` + "\n"
+	// The written attempts every case has: a 200 on instance 1; on instance 2 and on instance
+	// 1, a first attempt answered 429 (ended at 802 ms and 812 ms).
+	written := []string{
+		`{"kind":"initial","planned_ns":500000000,"sent_ns":500100000,"instance":1,"request_id":"r000000000","attempt":1,"hint_ms":null,"jitter_ns":null,"status":200,"error":null,"latency":2000000}`,
+		`{"kind":"initial","planned_ns":800000000,"sent_ns":800200000,"instance":2,"request_id":"r000000001","attempt":1,"hint_ms":null,"jitter_ns":null,"status":429,"error":"rate_limited","latency":1800000}`,
+		`{"kind":"initial","planned_ns":810000000,"sent_ns":810100000,"instance":1,"request_id":"r000000002","attempt":1,"hint_ms":null,"jitter_ns":null,"status":429,"error":"rate_limited","latency":1900000}`,
+	}
+	const (
+		retryIn      = `{"kind":"retry","planned_ns":800000000,"sent_ns":null,"instance":2,"request_id":"r000000001","attempt":2,"hint_ms":250,"jitter_ns":10000000,"status":0,"error":"transport_error","latency":null}`
+		firstIn      = `{"kind":"initial","planned_ns":1100000000,"sent_ns":null,"instance":2,"request_id":"r000000003","attempt":1,"hint_ms":null,"jitter_ns":null,"status":0,"error":"transport_error","latency":null}`
+		retryLate    = `{"kind":"retry","planned_ns":800000000,"sent_ns":null,"instance":2,"request_id":"r000000001","attempt":2,"hint_ms":400,"jitter_ns":10000000,"status":0,"error":"transport_error","latency":null}`
+		retryInst1   = `{"kind":"retry","planned_ns":810000000,"sent_ns":null,"instance":1,"request_id":"r000000002","attempt":2,"hint_ms":250,"jitter_ns":0,"status":0,"error":"transport_error","latency":null}`
+		retryTimeout = `{"kind":"retry","planned_ns":800000000,"sent_ns":null,"instance":2,"request_id":"r000000001","attempt":2,"hint_ms":250,"jitter_ns":10000000,"status":0,"error":"timeout","latency":null}`
+		retryNo429   = `{"kind":"retry","planned_ns":500000000,"sent_ns":null,"instance":2,"request_id":"r000000000","attempt":2,"hint_ms":500,"jitter_ns":10000000,"status":0,"error":"transport_error","latency":null}`
+	)
+	for _, c := range []struct {
+		name    string
+		unsent  []string // the attempts never written
+		summary int      // the summary's unsent
+		reports int
+	}{
+		{"a retry refused in the kill", []string{retryIn}, 0, 0},
+		{"and a first attempt refused in the kill", []string{retryIn, firstIn}, 1, 0},
+		{"the summary leaving out the first attempt", []string{retryIn, firstIn}, 0, 1},
+		{"the summary counting the retry", []string{retryIn}, 1, 1},
+		{"a retry made after the kill", []string{retryLate}, 0, 1},
+		{"a retry to instance 1", []string{retryInst1}, 0, 1},
+		{"a retry that timed out", []string{retryTimeout}, 0, 1},
+		{"a retry without a 429 before it", []string{retryNo429}, 0, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := t.TempDir()
+			lines := append(slices.Clone(written), c.unsent...)
+			lines = append(lines, fmt.Sprintf(`{"kind":"summary","unsent":%d,"log_drops":0}`, c.summary))
+			for name, data := range map[string]string{
+				"context.json":  string(ctxJSON),
+				"hitgen.stderr": stderr,
+				"gen.jsonl":     strings.Join(lines, "\n") + "\n",
+			} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rec := &errRecorder{TB: t}
+			checkKillUnsent(rec, &orchRun{runID: "unit", dir: dir}, killCmd, readJSONLines[orchGenRecord](t, filepath.Join(dir, "gen.jsonl")))
+			if len(rec.errs) != c.reports {
+				t.Errorf("%d reports, want %d: %q", len(rec.errs), c.reports, rec.errs)
+			}
+		})
+	}
+}
+
+// faultSample is the part of a samples.jsonl line TestDesign_OrchestratorFaultctl reads: each
+// process pids.json named at that tick, with its PID (DESIGN §B7).
+type faultSample struct {
+	Procs []struct {
+		Role  string  `json:"role"`
+		PID   int     `json:"pid"`
+		RSS   *int64  `json:"rss"`
+		Error *string `json:"error"`
+	} `json:"procs"`
+}
+
+// TestDesign_OrchestratorStorePause (IMPLEMENTATION_PLAN H4 step 7 and Watch out; DESIGN §B6
+// FLT-2, §B7): bin/test/orchestrator runs testdata/orch-pause.toml, whose fault runs faultctl
+// store pause 4.5s inside the orchestrator at 2 s, and the run and its sampler outlive the
+// paused store. The run finishes, exit 0, with a finished run's evidence (checkFinishedRun:
+// the sampler exited 0 after its SIGTERM, among the rest). context.json records the pause
+// without an error, no instance, the command's own start_ns and end_ns, and an outage_ns of
+// more than the commanded 4,500 ms, at most 5,000 ms, from its outage_start_ns, inside
+// start_ns and end_ns within the wall clock's adjustment meanwhile (checkOutageBounds); the
+// store was not restarted (pids.json names the process the "store started" line named).
+// samples.jsonl goes on through the pause: a line whose tick started inside the outage (from
+// outage_start_ns for outage_ns) shows the store's read failing (store_error), and a later
+// line reads the store again.
+func TestDesign_OrchestratorStorePause(t *testing.T) {
+	const (
+		pauseCmd = "faultctl store pause 4.5s"
+		pauseFor = 4500 * time.Millisecond // its commanded duration
+	)
+	db := insertSentinel(t)
+	before := time.Now()
+	r := runOrchestrator(t, "--scenario", testdataPath(t, "orch-pause.toml"))
+	adj := clockAdjustment(before, time.Now())
+	checkFinishedRun(t, r, db, "orch-pause", false, 1, nil)
+
+	var rc struct {
+		Faults []orchFaultRecord `json:"faults"`
+	}
+	readJSON(t, filepath.Join(r.dir, "context.json"), &rc)
+	if len(rc.Faults) != 1 {
+		t.Fatalf("context.json faults %+v, want the one [[faults]] entry", rc.Faults)
+	}
+	pause := rc.Faults[0]
+	if pause.Cmd != pauseCmd || pause.AtS != 2 || pause.Error != "" || pause.Instance != nil || pause.OutageNs == nil || pause.OutageStartNs == nil ||
+		*pause.OutageNs <= int64(pauseFor) || *pause.OutageNs > int64(5*time.Second) || pause.EndNs <= pause.StartNs {
+		t.Fatalf("the store pause's record %+v (outage_ns %s), want at_s 2, no instance, an outage_ns of more than 4,500 ms, at most 5,000 ms, "+
+			"between start_ns and end_ns, no error", pause, nullable(pause.OutageNs))
+	}
+	checkOutageBounds(t, pause, pauseFor, adj)
+	outageFrom, outageTo := *pause.OutageStartNs, *pause.OutageStartNs+*pause.OutageNs
+
+	pids, err := runlog.ReadPIDs(filepath.Join(r.dir, runlog.PIDsFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var started float64
+	for _, l := range r.recs {
+		if l["msg"] == "store started" {
+			started, _ = l["pid"].(float64)
+		}
+	}
+	for _, p := range pids.Procs {
+		if p.Role == "valkey-server" && float64(p.PID) != started {
+			t.Errorf("pids.json names the store as process %d, the \"store started\" line %v: want the same process, not restarted", p.PID, started)
+		}
+	}
+
+	type sample struct {
+		TNs        int64   `json:"t_ns"`
+		StoreError *string `json:"store_error"`
+		Store      *struct {
+			Persistence map[string]string `json:"persistence"`
+		} `json:"store"`
+	}
+	failedInside, readAfter := false, false
+	for _, s := range readJSONLines[sample](t, filepath.Join(r.dir, "samples.jsonl")) {
+		switch {
+		case s.TNs >= outageFrom && s.TNs < outageTo && s.StoreError != nil:
+			failedInside = true
+		case s.TNs > outageTo && s.StoreError == nil && s.Store != nil && len(s.Store.Persistence) > 0:
+			readAfter = true
+		}
+	}
+	if !failedInside || !readAfter {
+		t.Errorf("samples.jsonl: a store read failing in a tick inside the pause %v, the store read again after it %v; want both: the sampler outlives the paused store",
+			failedInside, readAfter)
 	}
 }

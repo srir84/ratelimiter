@@ -12,7 +12,7 @@
 // repository root, where it finds harness.toml, bin/, deploy/, runs/ and .data/.
 //
 // Exit codes (plan choice): 0 after a finished run; 1 a failure once the run has begun, or a
-// signal (SIGINT, SIGTERM or SIGHUP); 2 a bad command line or a refused run. A refused run logs one "refusing the run"
+// signal (SIGINT, SIGTERM, SIGHUP or SIGQUIT); 2 a bad command line or a refused run. A refused run logs one "refusing the run"
 // error line per reason found, each with a fixed reason code (preflight.go, run.go) and a
 // detail. Preflight's refusals start nothing; the checks that need the running store or
 // instances (maxclients, the benchmark guard's /health check) refuse once the run is torn down.
@@ -64,12 +64,18 @@ func main() {
 // run's ctx, so the run stops every child's group in order, shuts the store down, removes the
 // pid file and exits 1. SIGHUP (a closed terminal, a dropped SSH session) is among them: its
 // default action would kill the orchestrator alone and leave its children, each in its own
-// process group, running. A SIGINT or SIGHUP that ignored reports ignored at startup (nohup
-// ignores SIGHUP; a shell ignores SIGINT for a background job) is left out, so it stays
-// ignored: catching it would undo the ignore. SIGTERM is always caught. SIGQUIT keeps Go's
-// default (a goroutine dump, for debugging).
+// process group, running. The orchestrator always catches SIGQUIT, as it does SIGTERM (plan H4
+// step 7; an orchestrator decision): Go's default, a goroutine dump and exit 2, would end the
+// orchestrator in the middle of an in-process store fault (faultctl_rltest.go), leaving a
+// paused store stopped (SIGSTOP) or a shut-down one not restarted; caught, it lets the fault's
+// recovery (SIGCONT, the restart) and the teardown run, as faultctl's own stop signals do. An
+// ignore inherited at startup never keeps SIGQUIT out: Go's runtime installs its own SIGQUIT
+// handler whatever the parent left (os/signal keeps an inherited ignore only for SIGHUP and
+// SIGINT), so ignored never reports SIGQUIT. A SIGINT or SIGHUP that ignored reports ignored at
+// startup (nohup ignores SIGHUP; a shell ignores SIGINT for a background job) is left out, so
+// it stays ignored: catching it would undo the ignore.
 func stopSignals(ignored func(os.Signal) bool) []os.Signal {
-	sigs := []os.Signal{syscall.SIGTERM}
+	sigs := []os.Signal{syscall.SIGTERM, syscall.SIGQUIT}
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGHUP} {
 		if !ignored(sig) {
 			sigs = append(sigs, sig)
@@ -137,18 +143,23 @@ func orchestrate(ctx context.Context, args []string, s site, environ []string, p
 	}
 	logger.Info("run directory ready", "run_id", rd.id, "dir", rd.path, "run_kind", in.scenario.RunKind,
 		"baseline", in.baseline, "thresholds_sha256", rd.thresholdsSHA256)
-	client := newHTTPClient()
+	client, killClient := newHTTPClient(), newKillClient()
 	defer client.CloseIdleConnections()
-	return runSequence(ctx, logger, s, in, rd, envs, client, now)
+	defer killClient.CloseIdleConnections()
+	return runSequence(ctx, logger, s, in, rd, envs, client, killClient, now)
 }
 
 // The orchestrator's HTTP client's limits (plan choice): /health and /_test/faults answer at
-// once on loopback.
+// once on loopback. A faultctl api kill's client (newKillClient) waits up to killHTTPTimeout
+// for one exchange: the pre-kill call answers only once the instance's admitted requests have
+// finished, within P + 1 s, and its run log has drained (plan H4 steps 2 and 7), as faultctl's
+// own client does.
 const (
 	httpTimeout       = 10 * time.Second
 	httpDialTimeout   = 5 * time.Second
 	httpHeaderTimeout = 10 * time.Second
 	httpMaxHeader     = 64 << 10
+	killHTTPTimeout   = time.Minute
 )
 
 // newHTTPClient builds the orchestrator's one HTTP client (AGENTS.md §1 "HTTP"): the instances'
@@ -166,6 +177,27 @@ func newHTTPClient() *http.Client {
 	return &http.Client{
 		Transport:     tr,
 		Timeout:       httpTimeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+}
+
+// newKillClient builds the HTTP client of a faultctl api kill run as a [[faults]] entry
+// (IMPLEMENTATION_PLAN H4 step 7; AGENTS.md §1 "HTTP"): the pre-kill call, within P + 2 s, and
+// the /health reads of the restarted instance, each with its own deadline, to loopback. As
+// newHTTPClient, but its timeout, response headers included, is killHTTPTimeout, so it never
+// cuts the pre-kill call short at the harness's P (5 s); the runner refuses a kill whose P + 2 s
+// is longer (faultctl_rltest.go).
+func newKillClient() *http.Client {
+	tr := &http.Transport{
+		DialContext:            (&net.Dialer{Timeout: httpDialTimeout}).DialContext,
+		DisableKeepAlives:      true,
+		DisableCompression:     true,
+		ResponseHeaderTimeout:  killHTTPTimeout,
+		MaxResponseHeaderBytes: httpMaxHeader,
+	}
+	return &http.Client{
+		Transport:     tr,
+		Timeout:       killHTTPTimeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }

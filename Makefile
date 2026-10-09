@@ -111,8 +111,10 @@ test-integration: bin/trace build
 # bin/test binaries, built first, and the harness PostgreSQL, one package at a time (-p 1: they
 # share the hits table). A missing binary or PostgreSQL fails the test, never skips it. Later
 # slices append their packages to E2E_PKGS: H3 the orchestrator's rltest tests (its untagged
-# TestClockStub_Refuses runs in test-unit).
-E2E_PKGS = ./harness/dbclient/ ./harness/e2e/ ./harness/httpapi/ ./cmd/orchestrator/
+# TestClockStub_Refuses runs in test-unit), H4 faultctl's (its untagged stub test runs in
+# test-unit) and hitapi's rltest construction test, TestConstruct_FixturesWired (its untagged
+# tests run in test-unit too).
+E2E_PKGS = ./harness/dbclient/ ./harness/e2e/ ./harness/httpapi/ ./cmd/orchestrator/ ./cmd/faultctl/ ./cmd/hitapi/
 
 .PHONY: test-e2e
 test-e2e: bin/trace build

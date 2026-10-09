@@ -102,6 +102,14 @@ func (w *DBWrap) Armed() int {
 	return n
 }
 
+// Disarm removes every armed database fault (hitapi's DELETE /_test/faults; IMPLEMENTATION_PLAN
+// H4 step 4): the next operations run straight through.
+func (w *DBWrap) Disarm() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.faults = nil
+}
+
 // take uses up one operation of the oldest armed fault and returns its mode; ok is false
 // when no fault is armed.
 func (w *DBWrap) take() (mode DBMode, ok bool) {

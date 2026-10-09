@@ -58,7 +58,6 @@ const (
 	reasonRefusalRate        = "refusal_rate_over_limit"   // refusals/s above 50 × instances (§B4, §A7)
 	reasonSpikeStep          = "spike_step_too_short"      // the step after the spike shorter than 90 s (§B9)
 	reasonOutageSegments     = "store_outage_segments"     // more than one store outage segment (§A7, §B4)
-	reasonFaultctl           = "faultctl_not_built"        // interim: H3 cannot run faultctl yet (H4 removes this)
 	reasonClockUntagged      = "controlled_clock_untagged" // a controlled clock in a !rltest build (clock_stub.go)
 	reasonFaultctlUntagged   = "faultctl_untagged"         // a faultctl cmd in a !rltest build (clock_stub.go)
 	reasonBinaryMissing      = "binary_missing"            // hitapi, rladmin, hitgen or sampler missing (§B1)
@@ -284,8 +283,9 @@ func dsnRefusal(refs *refusals, dsn, source, parseReason string) {
 	}
 }
 
-// scenarioRules checks the scenario's own values: the step after the spike, the store outage
-// segments among the faults, and the interim faultctl refusal.
+// scenarioRules checks the scenario's own values: the step after the spike and the store outage
+// segments among the faults. Each build checks the faultctl cmds itself (buildRefusals): the
+// untagged one refuses them, the rltest one refuses those it could not run.
 func scenarioRules(refs *refusals, sc config.Scenario) {
 	if sc.Verdict == config.VerdictSpike && sc.SpikeStep != nil {
 		if i := *sc.SpikeStep + 1; i < len(sc.Steps) && sc.Steps[i].DurationS < minRecoveryStepS {
@@ -295,12 +295,6 @@ func scenarioRules(refs *refusals, sc config.Scenario) {
 	}
 	if n := outageSegments(sc.Faults); n > 1 {
 		refs.add(reasonOutageSegments, "the [[faults]] arm %d store outage segments: a run arms at most one", n)
-	}
-	// Interim (plan H3 step 1): H4 brings faultctl, and removes this refusal and its test case.
-	for i, f := range sc.Faults {
-		if f.Faultctl() {
-			refs.add(reasonFaultctl, "faults[%d].cmd %q runs faultctl, which this orchestrator cannot run yet (H4)", i, f.Cmd)
-		}
 	}
 }
 

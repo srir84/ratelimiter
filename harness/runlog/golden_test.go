@@ -16,7 +16,9 @@ import (
 // TestGoldenAPI_OneRealRequest checks the hand-written golden api.jsonl against DESIGN §B8 and
 // IMPLEMENTATION_PLAN H1 step 8, not against any writer: one line per kind and event, each
 // with exactly the §B8 fields, and the four request lines fitting one real request (an
-// allowed request whose insert failed with no row, its release and its applied refund).
+// allowed request whose insert failed with no row, its release and its applied refund). The
+// lifecycle pre_kill line is faultctl's (DESIGN §B6 FLT-6; plan H4 step 2): a pre-kill read
+// that succeeded with both drop counts 0.
 func TestGoldenAPI_OneRealRequest(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "golden", "api.jsonl"))
 	if err != nil {
@@ -45,11 +47,12 @@ func TestGoldenAPI_OneRealRequest(t *testing.T) {
 		"decision": {"deduction_id", "user_id", "decision_ns", "result"},
 		"request": {"run_id", "epoch_id", "instance", "user_id", "request_id", "arrival_ns", "decision_ns",
 			"deduction_id", "result", "existed", "http_status", "error", "limiter_ns", "db_ns", "total_ns"},
-		"release":         {"deduction_id", "release_mono_ns"},
-		"refund":          {"deduction_id", "result", "reason", "attempts", "credit_decision_ns", "release_mono_ns", "final_mono_ns"},
-		"lifecycle/start": {"event", "max_in_flight", "queue_len", "max_release_delay_ns", "dependency_deadline_ns", "drain_timeout_ns", "nofile_limit"},
-		"lifecycle/ready": {"event"},
-		"lifecycle/stop":  {"event", "listener_drops", "log_drops"},
+		"release":            {"deduction_id", "release_mono_ns"},
+		"refund":             {"deduction_id", "result", "reason", "attempts", "credit_decision_ns", "release_mono_ns", "final_mono_ns"},
+		"lifecycle/start":    {"event", "max_in_flight", "queue_len", "max_release_delay_ns", "dependency_deadline_ns", "drain_timeout_ns", "nofile_limit"},
+		"lifecycle/ready":    {"event"},
+		"lifecycle/stop":     {"event", "listener_drops", "log_drops"},
+		"lifecycle/pre_kill": {"event", "listener_drops", "log_drops", "read_ok"},
 	}
 	for name, want := range fields {
 		r, ok := byName[name]
@@ -100,6 +103,8 @@ func TestGoldenAPI_OneRealRequest(t *testing.T) {
 		{"total_ns covers limiter_ns + db_ns", num("request", "total_ns") >= num("request", "limiter_ns")+num("request", "db_ns")},
 		{"start: queue length 0, nofile ≥ 1,024", num("lifecycle/start", "queue_len") == 0 && num("lifecycle/start", "nofile_limit") >= 1024},
 		{"stop: drop counts 0", num("lifecycle/stop", "listener_drops") == 0 && num("lifecycle/stop", "log_drops") == 0},
+		{"pre_kill: drop counts 0, read_ok true", num("lifecycle/pre_kill", "listener_drops") == 0 &&
+			num("lifecycle/pre_kill", "log_drops") == 0 && byName["lifecycle/pre_kill"]["read_ok"] == true},
 	}
 	for _, c := range checks {
 		if !c.ok {

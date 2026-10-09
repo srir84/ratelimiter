@@ -13,14 +13,16 @@ import (
 	"ratelimiter/internal/testutil/storeproc"
 )
 
-// clockTimeout bounds setting the controlled clock: a dial, AUTH and one SET on the local
-// store (plan choice).
+// clockTimeout bounds one rl_fixture exchange on the local store: a dial, AUTH and the few
+// commands of setting the controlled clock, a clock step or a tamper operation (plan choice).
 const clockTimeout = 10 * time.Second
 
-// buildRefusals is this build's part of preflight: none. An rltest orchestrator drives the
-// controlled clock in-process (setControlledClock); faultctl is refused for every build until
-// H4 (scenarioRules).
-func buildRefusals(config.Scenario, bool) []refusal { return nil }
+// buildRefusals is this build's part of preflight: an rltest orchestrator drives the
+// controlled clock in-process (setControlledClock) and runs the faultctl cmds in-process too
+// (runFaultctl), refusing only those it could not run (faultctlRefusals).
+func buildRefusals(sc config.Scenario, controlled bool) []refusal {
+	return faultctlRefusals(sc, controlled)
+}
 
 // setControlledClock sets a controlled-clock run's time to now, truncated to µs, in ns, through
 // the S5 clock driver (fixtures.Clock.Set) on an rl_fixture connection to the store at addr,
@@ -28,18 +30,28 @@ func buildRefusals(config.Scenario, bool) []refusal { return nil }
 // the run sequence calls it before rladmin start-epoch, so H3 needs no faultctl. It returns the
 // value written. The whole call ends within clockTimeout or when ctx ends.
 func setControlledClock(ctx context.Context, addr, fixturePassword string, now time.Time) (int64, error) {
+	ns := now.UnixMicro() * 1_000
+	err := withFixtureConn(ctx, addr, fixturePassword, func(c fixtureConn) error {
+		return fixtures.NewClock(c, nil).Set(ns)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("setting the controlled clock: %w", err)
+	}
+	return ns, nil
+}
+
+// withFixtureConn runs fn on an rl_fixture connection to the store at addr (DESIGN §A2): the
+// clock driver's and the tamper tool's. The dial, AUTH and fn's commands end within
+// clockTimeout or when ctx ends.
+func withFixtureConn(ctx context.Context, addr, fixturePassword string, fn func(fixtureConn) error) error {
 	ctx, cancel := context.WithTimeout(ctx, clockTimeout)
 	defer cancel()
 	c, err := dialStore(ctx, addr, userFixture, fixturePassword)
 	if err != nil {
-		return 0, fmt.Errorf("setting the controlled clock: %w", err)
+		return err
 	}
 	defer c.close()
-	ns := now.UnixMicro() * 1_000
-	if err := fixtures.NewClock(fixtureConn{c}, nil).Set(ns); err != nil {
-		return 0, fmt.Errorf("setting the controlled clock: %w", err)
-	}
-	return ns, nil
+	return fn(fixtureConn{c})
 }
 
 // fixtureConn is the clock driver's connection, a fixtures.ClockConn: the store connection as

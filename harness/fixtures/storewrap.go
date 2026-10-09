@@ -26,10 +26,15 @@ const (
 	// DropReply makes the real call and discards its reply: outcome_unknown (FLT-3, FLT-4).
 	// A call that sent nothing passes through unchanged: there was no reply to lose.
 	DropReply Mode = "drop_reply"
-	// Delay waits Fault.Delay before sending (or until the call's ctx ends). In a CallBatch the
-	// wait of every delayed request starts when the batch enters the wrapper and runs while the
-	// rest of the batch goes ahead; then the delayed requests whose waits have passed go out
-	// together.
+	// Delay waits Fault.Delay, at its Fault.At (IMPLEMENTATION_PLAN H4 step 6). Before the send
+	// (At before_send, or empty), it waits Delay or until the call's ctx ends; when ctx ends
+	// first, the call returns cancelled without reaching the store adapter. After the reply
+	// (At after_reply), the call goes to the store at once, and its return waits Delay or until
+	// ctx ends. In a CallBatch the before_send wait of every delayed request starts when the
+	// batch enters the wrapper and runs while the rest of the batch goes ahead; then the delayed
+	// requests whose waits have passed go out together, and those whose ctx ended first are
+	// cancelled. The after_reply requests go out with the rest, and the batch returns once the
+	// longest of their waits has passed after the replies.
 	Delay Mode = "delay"
 	// Barrier blocks before the send or after the reply until Release (§B6 Barriers). In a
 	// CallBatch a request held before the send is sent alone after Release, while the rest of
@@ -37,10 +42,10 @@ const (
 	Barrier Mode = "barrier"
 )
 
-// At is where a barrier blocks.
+// At is where a barrier blocks, or where a delay waits.
 type At string
 
-// The barrier positions.
+// The barrier and delay positions.
 const (
 	BeforeSend At = "before_send"
 	AfterReply At = "after_reply"
@@ -66,7 +71,9 @@ type Fault struct {
 	Duration time.Duration
 	// Delay is the wait of a Delay fault.
 	Delay time.Duration
-	// At and Name place a Barrier fault: Reached(Name) and Release(Name) address it.
+	// At places a Barrier fault (before_send or after_reply) or a Delay fault (before_send,
+	// the default when empty, or after_reply); Refuse and DropReply take none. Name names a
+	// Barrier fault: Reached(Name) and Release(Name) address it.
 	At   At
 	Name string
 }
@@ -123,12 +130,13 @@ func (w *StoreWrapper) Wrap(inner store.Adapter) store.Adapter {
 	return &wrapped{w: w, next: inner}
 }
 
-// Arm arms f. It fails on an unknown mode, a negative count or time, a barrier without a
-// name or position, a delay without a wait, and a Key that is no valid budget key (API-1). It
-// also refuses f while maxStoreFaults faults are armed (a fault used up, disarmed or past its
-// Duration frees its slot), and a Barrier fault under a new name while maxBarriers names are
-// held: a name is dropped first once it is finished, that is released, named by no armed
-// fault, and with no call on its way to it. A refused fault arms nothing.
+// Arm arms f. It fails on an unknown mode, a negative count or time, a barrier without a name
+// or position, a delay without a wait or with an unknown position, a position on refuse or
+// drop_reply, and a Key that is no valid budget key (API-1). It also refuses f while
+// maxStoreFaults faults are armed (a fault used up, disarmed or past its Duration frees its
+// slot), and a Barrier fault under a new name while maxBarriers names are held: a name is
+// dropped first once it is finished, that is released, named by no armed fault, and with no
+// call on its way to it. A refused fault arms nothing.
 func (w *StoreWrapper) Arm(f Fault) error {
 	if f.Count < 0 || f.Duration < 0 || f.Delay < 0 {
 		return fmt.Errorf("fixtures: fault %q: negative count or time", f.Mode)
@@ -142,9 +150,15 @@ func (w *StoreWrapper) Arm(f Fault) error {
 	}
 	switch f.Mode {
 	case Refuse, DropReply:
+		if f.At != "" {
+			return fmt.Errorf("fixtures: fault %q takes no position", f.Mode)
+		}
 	case Delay:
 		if f.Delay == 0 {
 			return fmt.Errorf("fixtures: fault %q: no delay", f.Mode)
+		}
+		if f.At != "" && f.At != BeforeSend && f.At != AfterReply {
+			return fmt.Errorf("fixtures: fault %q: position %q, want before_send or after_reply", f.Mode, f.At)
 		}
 	case Barrier:
 		if f.Name == "" || (f.At != BeforeSend && f.At != AfterReply) {
@@ -379,15 +393,21 @@ func hold(ctx context.Context, ch <-chan struct{}) {
 	}
 }
 
-// sleep waits d or until ctx ends.
-func sleep(ctx context.Context, d time.Duration) {
+// sleep waits d or until ctx ends; it reports whether the wait ran to its end (false: ctx
+// ended first).
+func sleep(ctx context.Context, d time.Duration) bool {
 	tm := time.NewTimer(d)
 	defer tm.Stop()
 	select {
 	case <-tm.C:
+		return true
 	case <-ctx.Done():
+		return false
 	}
 }
+
+// delaysAfter reports whether f is a Delay fault that waits after the reply.
+func delaysAfter(f *Fault) bool { return f != nil && f.Mode == Delay && f.At == AfterReply }
 
 // wrapped is the adapter Wrap returns.
 type wrapped struct {
@@ -403,37 +423,39 @@ func dropped(r store.Response) store.Response {
 	return store.Response{Outcome: store.OutcomeUnknown, Sent: true, SentCommands: r.SentCommands, NoScript: r.NoScript}
 }
 
-// before runs the part of fault f that comes before the send; it reports false when the
-// call must not reach the store (Refuse).
-func (a *wrapped) before(ctx context.Context, f *Fault) bool {
+// before runs the part of fault f that comes before the send. It reports stop when the call
+// must not reach the store adapter, with the outcome to return: unavailable for Refuse, and
+// cancelled for a before_send Delay whose ctx ended before its wait did (plan H4 step 6). A
+// before_send Barrier holds the call until its release or the end of ctx, then lets it go on.
+func (a *wrapped) before(ctx context.Context, f *Fault) (out store.Outcome, stop bool) {
 	if f == nil {
-		return true
+		return store.OK, false
 	}
 	switch f.Mode {
 	case Refuse:
-		return false
-	case Delay, Barrier:
-		a.wait(ctx, f)
+		return store.Unavailable, true
+	case Delay:
+		if f.At != AfterReply && !sleep(ctx, f.Delay) {
+			return store.Cancelled, true
+		}
+	case Barrier:
+		if f.At == BeforeSend {
+			hold(ctx, a.w.arrive(f.Name))
+		}
 	case DropReply:
 	}
-	return true
+	return store.OK, false
 }
 
-// wait holds a call that fault f delays (Delay) or stops before its send (a before_send
-// Barrier) until the wait has passed, the barrier is released or ctx ends.
-func (a *wrapped) wait(ctx context.Context, f *Fault) {
-	switch {
-	case f.Mode == Delay:
-		sleep(ctx, f.Delay)
-	case f.Mode == Barrier && f.At == BeforeSend:
-		hold(ctx, a.w.arrive(f.Name))
-	}
-}
-
-// after runs the part of fault f that comes after the reply.
+// after runs the part of fault f that comes after the reply: an after_reply Barrier holds the
+// return until its release, and an after_reply Delay waits Delay; either ends with ctx.
 func (a *wrapped) after(ctx context.Context, f *Fault) {
-	if f != nil && f.Mode == Barrier && f.At == AfterReply {
+	switch {
+	case f == nil:
+	case f.Mode == Barrier && f.At == AfterReply:
 		hold(ctx, a.w.arrive(f.Name))
+	case delaysAfter(f):
+		sleep(ctx, f.Delay)
 	}
 }
 
@@ -452,8 +474,8 @@ func keyOf(req store.Request) string {
 // Call applies the first armed fault matching the script's name (and key, keyOf).
 func (a *wrapped) Call(ctx context.Context, req store.Request) store.Response {
 	f := a.w.take(req.Script.Name, keyOf(req))
-	if !a.before(ctx, f) {
-		return store.Response{Outcome: store.Unavailable}
+	if out, stop := a.before(ctx, f); stop {
+		return store.Response{Outcome: out}
 	}
 	r := a.next.Call(ctx, req)
 	a.w.saw(req.Script.Name, r)
@@ -466,13 +488,15 @@ func (a *wrapped) Call(ctx context.Context, req store.Request) store.Response {
 
 // CallBatch applies faults per request (IMPLEMENTATION_PLAN S7 step 11): each request takes
 // the first armed fault matching its script (and key, keyOf). A refused request is not sent
-// (unavailable). The requests with no fault, a drop_reply or an after_reply barrier go out
-// together as one inner CallBatch, in their order. The wait of each delayed request starts at
-// the batch's entry, so it runs while those go out; then the delayed requests go out, each
-// once its Fault.Delay has passed since the entry (sendDelayed). Last, each request held at a
-// before_send barrier is sent alone, in order, once released. A drop_reply request's reply is
-// discarded, and each after_reply barrier holds the return once every reply is in. The
-// responses keep the batch's order.
+// (unavailable). The requests with no fault, a drop_reply, an after_reply barrier or an
+// after_reply delay go out together as one inner CallBatch, in their order. The wait of each
+// before_send delayed request starts at the batch's entry, so it runs while those go out; then
+// the delayed requests go out, each once its Fault.Delay has passed since the entry, and those
+// whose ctx ends first are cancelled without being sent (sendDelayed; plan H4 step 6). Then
+// each request held at a before_send barrier is sent alone, in order, once released. Once every
+// reply is in, the batch waits the longest after_reply delay of its requests (or until ctx
+// ends), each after_reply barrier holds the return, and a drop_reply request's reply is
+// discarded. The responses keep the batch's order.
 func (a *wrapped) CallBatch(ctx context.Context, reqs []store.Request) []store.Response {
 	entry := time.Now() // where every delayed request's wait starts
 	faults := make([]*Fault, len(reqs))
@@ -481,12 +505,16 @@ func (a *wrapped) CallBatch(ctx context.Context, reqs []store.Request) []store.R
 	}
 	out := make([]store.Response, len(reqs))
 	var together, delayed, held []int // request indexes
+	var longest time.Duration         // the longest after_reply delay
 	for i, f := range faults {
 		switch {
 		case f == nil:
 			together = append(together, i)
 		case f.Mode == Refuse:
 			out[i] = store.Response{Outcome: store.Unavailable}
+		case delaysAfter(f):
+			together = append(together, i)
+			longest = max(longest, f.Delay)
 		case f.Mode == Delay:
 			delayed = append(delayed, i)
 		case f.Mode == Barrier && f.At == BeforeSend:
@@ -498,11 +526,16 @@ func (a *wrapped) CallBatch(ctx context.Context, reqs []store.Request) []store.R
 	a.send(ctx, reqs, out, together)
 	a.sendDelayed(ctx, entry, reqs, faults, out, delayed)
 	for _, i := range held {
-		a.wait(ctx, faults[i])
+		hold(ctx, a.w.arrive(faults[i].Name))
 		a.send(ctx, reqs, out, []int{i})
 	}
+	if longest > 0 {
+		sleep(ctx, longest)
+	}
 	for i, f := range faults {
-		a.after(ctx, f)
+		if f != nil && f.Mode == Barrier && f.At == AfterReply {
+			hold(ctx, a.w.arrive(f.Name))
+		}
 		if f != nil && f.Mode == DropReply {
 			out[i] = dropped(out[i])
 		}
@@ -523,10 +556,11 @@ func (a *wrapped) send(ctx context.Context, reqs []store.Request, out []store.Re
 	a.place(reqs, out, idx, a.next.CallBatch(ctx, batch))
 }
 
-// sendDelayed sends the delayed requests of reqs at the indexes idx, each once its fault's
-// Delay has passed since entry, or at once when ctx has ended: it sleeps until the earliest
-// end among the requests left, then sends every request whose wait is over as one inner
-// CallBatch, in idx order, until none is left.
+// sendDelayed sends the before_send delayed requests of reqs at the indexes idx, each once
+// its fault's Delay has passed since entry: it sleeps until the earliest end among the
+// requests left, then sends every request whose wait is over as one inner CallBatch, in idx
+// order, until none is left. Once ctx has ended, the requests whose waits are not over are
+// cancelled, never sent (plan H4 step 6).
 func (a *wrapped) sendDelayed(ctx context.Context, entry time.Time, reqs []store.Request, faults []*Fault, out []store.Response, idx []int) {
 	for len(idx) > 0 {
 		next := entry.Add(faults[idx[0]].Delay)
@@ -539,13 +573,19 @@ func (a *wrapped) sendDelayed(ctx context.Context, entry time.Time, reqs []store
 		now := time.Now()
 		var due, left []int
 		for _, i := range idx {
-			if ctx.Err() != nil || !now.Before(entry.Add(faults[i].Delay)) {
+			if !now.Before(entry.Add(faults[i].Delay)) {
 				due = append(due, i)
 			} else {
 				left = append(left, i)
 			}
 		}
 		a.send(ctx, reqs, out, due)
+		if ctx.Err() != nil {
+			for _, i := range left {
+				out[i] = store.Response{Outcome: store.Cancelled}
+			}
+			return
+		}
 		idx = left
 	}
 }
@@ -568,8 +608,8 @@ func (a *wrapped) Do(ctx context.Context, kind store.Kind, args ...string) (resp
 		cmd = args[0]
 	}
 	f := a.w.take(cmd, "")
-	if !a.before(ctx, f) {
-		return resp.Value{}, store.Response{Outcome: store.Unavailable}
+	if out, stop := a.before(ctx, f); stop {
+		return resp.Value{}, store.Response{Outcome: out}
 	}
 	v, r := a.next.Do(ctx, kind, args...)
 	a.after(ctx, f)

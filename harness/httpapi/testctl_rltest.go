@@ -12,18 +12,24 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"ratelimiter/harness/fixtures"
 )
 
 // Fixtures are the test build's fault fixtures that the /_test routes drive (DESIGN §B6): the
-// limiter's store wrapper (FLT-1 b, FLT-3, FLT-4, barriers) and the database wrapper (FLT-5,
-// FLT-9). cmd/hitapi's rltest construction installs both; a route whose fixture is missing
-// answers 400. The benchmark build has neither the fixtures nor the routes (testctl_stub.go).
+// limiter's store wrapper (FLT-1 b, FLT-3, FLT-4, barriers), the database wrapper (FLT-5,
+// FLT-9), the limiter's signer wrapper (FLT-10) and its send observer (the §A5.4 test hook,
+// which shows what was sent under FLT-2). cmd/hitapi's rltest construction installs all four;
+// a route whose fixture is missing answers 400. The benchmark build has neither the fixtures
+// nor the routes (testctl_stub.go).
 type Fixtures struct {
-	Store *fixtures.StoreWrapper
-	DB    *fixtures.DBWrap
+	Store  *fixtures.StoreWrapper
+	DB     *fixtures.DBWrap
+	Signer *fixtures.SignerWrapper
+	Sends  *fixtures.SendLog
 }
 
 // The /_test routes' own answers (plan choice): JSON {error, message} like every other error.
@@ -43,30 +49,52 @@ const (
 	// defaultDBCount is how many operations a db fault without a count applies to: the next one
 	// (plan choice). DESIGN §B6 arms FLT-5 and FLT-9 with {target, mode} alone, and HARNESS §6
 	// describes each as one operation's failure (before the insert or after the commit) or one
-	// lost commit reply; the database wrapper has no duration and no disarm, so a fault armed
-	// without a count must still end by itself.
+	// lost commit reply; the database wrapper has no duration, so a fault armed without a count
+	// must still end by itself.
 	defaultDBCount = 1
+	// defaultCorruptField is the receipt field a signer corrupt fault alters when its body names
+	// none (plan choice: the first field of the MAC input, §A5.9). DESIGN §B6 arms FLT-10 with
+	// {target:"signer", mode} alone; any altered field fails the MAC check that comes first.
+	defaultCorruptField = fixtures.FieldEpochID
+	// sinceParam is GET /_test/sends's one query parameter: the sequence number after which
+	// records are returned (plan choice; absent: 0, every record kept).
+	sinceParam = "since"
+	// faultsAllow is the Allow header of a 405 from /_test/faults: both methods it serves (RFC
+	// 9110 §15.5.6), POST arming a fault and DELETE disarming them all.
+	faultsAllow = "DELETE, POST"
 )
 
-// testRoutes registers the /_test routes (DESIGN §B6; IMPLEMENTATION_PLAN H1 step 11). Each
-// takes POST only and answers 403 to a remote address that is not loopback. The fixtures hold
-// at most 64 armed faults each, and the store wrapper at most 64 barrier names (plan choice,
-// AGENTS.md §1 Queues): a fault or barrier past a cap is refused, and the route answers the
-// refusal with 400 like any other.
+// testRoutes registers the /_test routes (DESIGN §B6; IMPLEMENTATION_PLAN H1 step 11, H4 step
+// 4). Each answers 403 to a remote address that is not loopback, before anything else. They
+// take POST, except DELETE /_test/faults, which disarms every fixture, and GET /_test/sends,
+// which reads the send observer; another method gets 405 with Allow naming every method the
+// route serves: POST, GET, or for /_test/faults "DELETE, POST". The store, database and signer
+// wrappers hold at most 64 armed faults each, and the store wrapper at most 64 barrier names
+// (plan choice, AGENTS.md §1 Queues): a fault or barrier past a cap is refused, and the route
+// answers the refusal with 400 like any other. The send observer keeps its newest 4,096
+// records.
 func (s *Server) testRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/_test/faults", s.testFaults)
 	mux.HandleFunc("/_test/barrier", s.testBarrier)
 	mux.HandleFunc("/_test/barrier/release", s.testBarrierRelease)
 	mux.HandleFunc("/_test/prekill", s.testPrekill)
+	mux.HandleFunc("/_test/sends", s.testSends)
 }
 
-// faultRequest is POST /_test/faults (plan choice for the field set). target "store" arms a
-// store-wrapper fault on the calls match names, for count calls (absent or 0: every matching
-// call while it is armed) and for duration_ms (absent or 0: no limit). target "db" arms a
-// database fault on the next count operations: a count given must be at least 1, and an
+// faultRequest is POST /_test/faults (plan choice for the field set: {target, mode, match,
+// count, duration_ms, delay_ms, at}, plus field for a signer corrupt fault). target "store"
+// arms a store-wrapper fault on the calls match names, for count calls (absent or 0: every
+// matching call while it is armed) and for duration_ms (absent or 0: no limit); a delay waits
+// delay_ms where at says: before_send, the default when absent (the call returns cancelled,
+// sending nothing, when its context ends first), or after_reply (plan H4 step 6). target "db"
+// arms a database fault on the next count operations: a count given must be at least 1, and an
 // absent count is defaultDBCount, the next operation (DESIGN §B6's FLT-5 and FLT-9 bodies
-// {target:"db", mode} carry none); match, duration_ms and delay_ms stay unset (or match
-// "any"). duration_ms and delay_ms are at most maxControlMs.
+// {target:"db", mode} carry none); match stays unset (or "any"), and duration_ms, delay_ms and
+// at unset. target "signer" arms a signer fault (fail, unusable or corrupt, FLT-10) for count
+// calls (absent or 0: every call until DELETE /_test/faults); match stays unset (or "any"), and
+// duration_ms, delay_ms and at unset; field names the receipt field a corrupt fault alters
+// (absent: defaultCorruptField) and is refused on every other fault. duration_ms and delay_ms
+// are at most maxControlMs.
 type faultRequest struct {
 	Target     string `json:"target"`
 	Mode       string `json:"mode"`
@@ -74,6 +102,8 @@ type faultRequest struct {
 	Count      *int   `json:"count"` // nil when absent (or null)
 	DurationMs int64  `json:"duration_ms"`
 	DelayMs    int64  `json:"delay_ms"`
+	At         string `json:"at"`
+	Field      string `json:"field"`
 }
 
 // count is the request's count, 0 when absent.
@@ -116,10 +146,14 @@ func badRequest(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format, append([]any{errBadRequest}, args...)...)
 }
 
-// testFaults serves POST /_test/faults.
+// testFaults serves POST /_test/faults, and DELETE /_test/faults (testDisarm).
 func (s *Server) testFaults(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		s.testDisarm(w, r)
+		return
+	}
 	var req faultRequest
-	if !s.controlRequest(w, r, &req) {
+	if !s.checkControl(w, r, http.MethodPost, faultsAllow, &req) {
 		return
 	}
 	if err := s.armFault(req); err != nil {
@@ -143,26 +177,34 @@ func (s *Server) armFault(req faultRequest) error {
 		return s.armStoreFault(req)
 	case "db":
 		return s.armDBFault(req)
-	default: // "signer" too, until H4 adds its modes
-		return badRequest("unknown target %q", req.Target)
+	case "signer":
+		return s.armSignerFault(req)
+	default:
+		return badRequest("unknown target %q, want \"store\", \"db\" or \"signer\"", req.Target)
 	}
 }
 
 // armStoreFault arms a store-wrapper fault: refuse (FLT-1 b), drop_reply (FLT-3, FLT-4) or
-// delay, on the calls match names.
+// delay, before the send or after the reply, on the calls match names.
 func (s *Server) armStoreFault(req faultRequest) error {
 	if s.cfg.Fixtures.Store == nil {
 		return badRequest("target store: this server has no store wrapper")
 	}
+	if req.Field != "" {
+		return badRequest("target store takes no field")
+	}
 	mode := fixtures.Mode(req.Mode)
 	switch mode {
 	case fixtures.Refuse, fixtures.DropReply:
-		if req.DelayMs != 0 {
-			return badRequest("mode %q takes no delay_ms", req.Mode)
+		if req.DelayMs != 0 || req.At != "" {
+			return badRequest("mode %q takes no delay_ms and no at", req.Mode)
 		}
 	case fixtures.Delay:
 		if req.DelayMs == 0 {
 			return badRequest("mode delay needs delay_ms")
+		}
+		if at := fixtures.At(req.At); req.At != "" && at != fixtures.BeforeSend && at != fixtures.AfterReply {
+			return badRequest("at %q, want \"before_send\" or \"after_reply\"", req.At)
 		}
 	case fixtures.Barrier:
 		return badRequest("store mode barrier is armed through /_test/barrier")
@@ -179,6 +221,7 @@ func (s *Server) armStoreFault(req faultRequest) error {
 		Count:    req.count(),
 		Duration: time.Duration(req.DurationMs) * time.Millisecond,
 		Delay:    time.Duration(req.DelayMs) * time.Millisecond,
+		At:       fixtures.At(req.At),
 	}); err != nil {
 		return badRequest("%v", err)
 	}
@@ -199,8 +242,8 @@ func (s *Server) armDBFault(req faultRequest) error {
 	if req.Match != "" && req.Match != "any" {
 		return badRequest("target db: match %q, want none or \"any\" (a db fault applies to the next operations)", req.Match)
 	}
-	if req.DurationMs != 0 || req.DelayMs != 0 {
-		return badRequest("target db takes no duration_ms or delay_ms")
+	if req.DurationMs != 0 || req.DelayMs != 0 || req.At != "" || req.Field != "" {
+		return badRequest("target db takes no duration_ms, delay_ms, at or field")
 	}
 	count := defaultDBCount
 	if req.Count != nil {
@@ -213,6 +256,105 @@ func (s *Server) armDBFault(req faultRequest) error {
 		return badRequest("%v", err)
 	}
 	return nil
+}
+
+// armSignerFault arms a signer fault (FLT-10, DESIGN §B6): fail (receipt_error after a
+// confirmed deduction), unusable (config_error with no charge) or corrupt (the refund's local
+// verification fails: receipt_invalid, nothing sent), on the next count calls, or every call
+// until DELETE /_test/faults when the count is absent or 0.
+func (s *Server) armSignerFault(req faultRequest) error {
+	if s.cfg.Fixtures.Signer == nil {
+		return badRequest("target signer: this server has no signer wrapper")
+	}
+	mode := fixtures.SignerMode(req.Mode)
+	field := req.Field
+	switch mode {
+	case fixtures.SignFail, fixtures.SignUnusable:
+		if field != "" {
+			return badRequest("signer mode %q takes no field", req.Mode)
+		}
+	case fixtures.SignCorrupt:
+		if field == "" {
+			field = defaultCorruptField
+		}
+	default:
+		return badRequest("unknown signer mode %q, want \"fail\", \"unusable\" or \"corrupt\"", req.Mode)
+	}
+	if req.Match != "" && req.Match != "any" {
+		return badRequest("target signer: match %q, want none or \"any\" (a signer fault applies to the signer's next calls)", req.Match)
+	}
+	if req.DurationMs != 0 || req.DelayMs != 0 || req.At != "" {
+		return badRequest("target signer takes no duration_ms, delay_ms or at")
+	}
+	if err := s.cfg.Fixtures.Signer.Arm(fixtures.SignerFault{Mode: mode, Count: req.count(), Field: field}); err != nil {
+		return badRequest("%v", err)
+	}
+	return nil
+}
+
+// testDisarm serves DELETE /_test/faults (plan choice, IMPLEMENTATION_PLAN H4 step 4): every
+// armed store fault, barrier fault, database fault and signer fault is removed, and every call
+// blocked at a barrier goes on (StoreWrapper.Disarm). The body is empty or {}.
+func (s *Server) testDisarm(w http.ResponseWriter, r *http.Request) {
+	if !s.controlRequest(w, r, http.MethodDelete, nil) {
+		return
+	}
+	f := s.cfg.Fixtures
+	if f.Store != nil {
+		f.Store.Disarm()
+	}
+	if f.DB != nil {
+		f.DB.Disarm()
+	}
+	if f.Signer != nil {
+		f.Signer.Disarm()
+	}
+	writeJSON(w, nil, http.StatusOK, "", okReply{OK: true})
+}
+
+// testSends serves GET /_test/sends?since=<seq> (plan choice, IMPLEMENTATION_PLAN H4 step 4;
+// DESIGN §A5.4 test hook): the send observer's records whose seq is above since (absent: 0),
+// oldest first, as a JSON array of {seq, cmd, bytes_written}: cmd is the script name for an
+// EVALSHA, else the command (§A5.12), and bytes_written above 0 means the command was sent. A
+// record the observer's ring has dropped shows as a gap in seq. The query may hold since once
+// and nothing else, and the body is empty or {}.
+func (s *Server) testSends(w http.ResponseWriter, r *http.Request) {
+	if !s.controlRequest(w, r, http.MethodGet, nil) {
+		return
+	}
+	if s.cfg.Fixtures.Sends == nil {
+		writeControlError(w, badRequest("this server has no send observer"))
+		return
+	}
+	since, err := sinceOf(r)
+	if err != nil {
+		writeControlError(w, err)
+		return
+	}
+	writeJSON(w, nil, http.StatusOK, "", s.cfg.Fixtures.Sends.Since(since))
+}
+
+// sinceOf reads GET /_test/sends's query: since, at most once, a decimal sequence number of at
+// least 0 (absent: 0), and no other parameter.
+func sinceOf(r *http.Request) (uint64, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return 0, badRequest("the query does not parse: %v", err)
+	}
+	for k, vs := range q {
+		if k != sinceParam || len(vs) != 1 {
+			return 0, badRequest("the query takes %s=<seq> once and nothing else", sinceParam)
+		}
+	}
+	v, ok := q[sinceParam]
+	if !ok {
+		return 0, nil
+	}
+	since, err := strconv.ParseUint(v[0], 10, 64)
+	if err != nil {
+		return 0, badRequest("%s=%q: want a sequence number of at least 0", sinceParam, v[0])
+	}
+	return since, nil
 }
 
 // matchName maps a control request's match to the store wrapper's: a script name, or "" for
@@ -233,7 +375,7 @@ func matchName(match string) (string, error) {
 // An absent match is "any", every call: DESIGN §B6's body is {name, at}.
 func (s *Server) testBarrier(w http.ResponseWriter, r *http.Request) {
 	var req barrierRequest
-	if !s.controlRequest(w, r, &req) {
+	if !s.controlRequest(w, r, http.MethodPost, &req) {
 		return
 	}
 	if err := s.armBarrier(req); err != nil {
@@ -273,7 +415,7 @@ func (s *Server) armBarrier(req barrierRequest) error {
 // effect.
 func (s *Server) testBarrierRelease(w http.ResponseWriter, r *http.Request) {
 	var req barrierRequest
-	if !s.controlRequest(w, r, &req) {
+	if !s.controlRequest(w, r, http.MethodPost, &req) {
 		return
 	}
 	switch {
@@ -297,7 +439,7 @@ func (s *Server) testBarrierRelease(w http.ResponseWriter, r *http.Request) {
 // 503, so H4's kill records read_ok:false (refund evidence incomplete, HAR-13). The body is
 // empty or {}.
 func (s *Server) testPrekill(w http.ResponseWriter, r *http.Request) {
-	if !s.controlRequest(w, r, nil) {
+	if !s.controlRequest(w, r, http.MethodPost, nil) {
 		return
 	}
 	s.slots.stop()
@@ -321,20 +463,26 @@ func (s *Server) testPrekill(w http.ResponseWriter, r *http.Request) {
 }
 
 // controlRequest runs the checks every /_test route shares, in order: a loopback remote
-// address (else 403), POST (else 405 with Allow: POST), and a body that is one JSON object
-// whose keys all belong to into, at most maxTestBody bytes (else 400). With into nil the body
-// must be empty or {}. It answers a request that fails one and returns false.
-func (s *Server) controlRequest(w http.ResponseWriter, r *http.Request, into any) bool {
+// address (else 403), the route's method (else 405 with Allow naming it), and a body that is
+// one JSON object whose keys all belong to into, at most maxTestBody bytes (else 400). With
+// into nil the body must be empty or {}. It answers a request that fails one and returns false.
+func (s *Server) controlRequest(w http.ResponseWriter, r *http.Request, method string, into any) bool {
+	return s.checkControl(w, r, method, method, into)
+}
+
+// checkControl is controlRequest for a route that serves more methods than the one this
+// handler takes: a 405 names allow, every method the route serves (RFC 9110 §15.5.6).
+func (s *Server) checkControl(w http.ResponseWriter, r *http.Request, method, allow string, into any) bool {
 	if !loopback(r.RemoteAddr) {
 		writeJSON(w, nil, http.StatusForbidden, errForbidden, errorBody{
 			Error: errForbidden, Message: "the /_test routes answer loopback addresses only",
 		})
 		return false
 	}
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
+	if r.Method != method {
+		w.Header().Set("Allow", allow)
 		writeJSON(w, nil, http.StatusMethodNotAllowed, errMethodNotAllowed, errorBody{
-			Error: errMethodNotAllowed, Message: "method not allowed; use POST",
+			Error: errMethodNotAllowed, Message: "method not allowed; use " + allow,
 		})
 		return false
 	}

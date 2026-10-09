@@ -1404,7 +1404,8 @@ const (
 // (only recorded), exit 0 with db_rows.json {"db_rows":7} and one runs/index.jsonl line,
 // {scenario, baseline, run_id}. Every failure exits 1, context.json's outcome is failed naming
 // it, and runs/index.jsonl gets no line: hitgen exits 1; a fault is not armed (its instance
-// answers 500); a forced rewrite ends with aof_last_bgrewrite_status err; an instance exits
+// answers 500); a faultctl fault fails (store pause 1s, run in-process with no store: plan H4
+// step 7); a forced rewrite ends with aof_last_bgrewrite_status err; an instance exits
 // before its stop; an instance or the sampler exits 1 after SIGTERM; the store exits during the
 // run (recorded in context.json); a signal while hitgen sends; a signal once hitgen has exited,
 // before finishRun; a signal while the report builder runs, which stops it at once (the report
@@ -1414,8 +1415,9 @@ const (
 // the sampler.
 func TestRun_FinishRun(t *testing.T) {
 	const (
-		faultTables = oneStep + "\n[[faults]]\nat_s = 0.1\ncmd = '{\"target\":\"db\",\"mode\":\"fail_before\",\"count\":1}'\ninstance = 1\n"
-		indexLine   = `{"scenario":"pf","baseline":false,"run_id":"20261008-142233-pf-1"}` + "\n"
+		faultTables    = oneStep + "\n[[faults]]\nat_s = 0.1\ncmd = '{\"target\":\"db\",\"mode\":\"fail_before\",\"count\":1}'\ninstance = 1\n"
+		faultctlTables = oneStep + "\n[[faults]]\nat_s = 0.1\ncmd = \"faultctl store pause 1s\"\n"
+		indexLine      = `{"scenario":"pf","baseline":false,"run_id":"20261008-142233-pf-1"}` + "\n"
 	)
 	for _, c := range []struct {
 		name        string
@@ -1437,6 +1439,8 @@ func TestRun_FinishRun(t *testing.T) {
 		{name: "hitgen exits 1", hitgen: hitgenFails, wantErr: "hitgen ended with exit 1"},
 		{name: "a fault is not armed", tables: faultTables, faultStatus: http.StatusInternalServerError,
 			wantErr: "a fault at 0.1 s was not armed everywhere"},
+		{name: "a faultctl fault fails", tables: faultctlTables,
+			wantErr: "the fault at 0.1 s, faultctl store pause 1s, failed: the store is not running"},
 		{name: "a forced rewrite ends with status err", top: "forced_aof_rewrites_s = [0.1]", rewriteInfo: infoRewriteFailed,
 			wantErr: "the forced rewrite at 0.1 s failed"},
 		{name: "an instance exits before its stop", apis: [3]string{1: exitsEarly},

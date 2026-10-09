@@ -1,0 +1,20 @@
+# TestDesign_OrchestratorStorePause (IMPLEMENTATION_PLAN H4 step 7 and Watch out, plan choice): a
+# small test-build run of one instance whose one [[faults]] entry runs faultctl inside the
+# orchestrator: the store paused for 4.5 s at 2 s, the run's one store outage segment, which the
+# sampler and the orchestrator must outlive. One 30/s step of 10 s for 50 users, on the store
+# clock.
+name = "orch-pause"
+seed = 1
+run_kind = "test"
+instances = 1
+
+[[steps]]
+rate_per_s = 30
+duration_s = 10
+
+[users]
+count = 50
+
+[[faults]]
+at_s = 2
+cmd = "faultctl store pause 4.5s"

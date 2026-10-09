@@ -209,14 +209,31 @@ func (tm *Tamper) DeleteHwm() error {
 // (HSET), which record_wellformed refuses (DESIGN §A4.2). The record must exist as a hash
 // (TYPE, read first, so nothing is written otherwise).
 func (tm *Tamper) CorruptRecord() error {
-	r, err := tm.do("CorruptRecord", "TYPE", keys.EpochKey)
+	return tm.corruptRecord("CorruptRecord", "schema", CorruptSchema)
+}
+
+// CorruptRecordField writes value into the epoch record's field (HSET rl:epoch field value),
+// as faultctl's corrupt-record --field does (IMPLEMENTATION_PLAN H4 step 3): with a value the
+// field's grammar refuses, such as TamperedValue for any field of DESIGN §A3.2, the record is
+// no longer well-formed (hwm: hwm_malformed). The record must exist as a hash (TYPE, read
+// first, so nothing is written otherwise).
+func (tm *Tamper) CorruptRecordField(field, value string) error {
+	if field == "" {
+		return errors.New("fixtures: tamper CorruptRecordField: no field")
+	}
+	return tm.corruptRecord("CorruptRecordField", field, value)
+}
+
+// corruptRecord checks that rl:epoch is a hash (TYPE), then writes value into its field.
+func (tm *Tamper) corruptRecord(op, field, value string) error {
+	r, err := tm.do(op, "TYPE", keys.EpochKey)
 	if err != nil {
 		return err
 	}
 	if r.Kind != '+' || r.Str != "hash" {
-		return fmt.Errorf("fixtures: tamper CorruptRecord: rl:epoch is %s, want a hash", r)
+		return fmt.Errorf("fixtures: tamper %s: rl:epoch is %s, want a hash", op, r)
 	}
-	return tm.added("CorruptRecord", "HSET", keys.EpochKey, "schema", CorruptSchema)
+	return tm.added(op, "HSET", keys.EpochKey, field, value)
 }
 
 // Wipe deletes every key (FLUSHALL), as a lost store would, rl:ctl:time included (FLT-7).

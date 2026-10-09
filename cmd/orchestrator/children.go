@@ -19,11 +19,6 @@ import (
 
 // A run's child processes (DESIGN §B1, §C8 "left to the plan"; IMPLEMENTATION_PLAN H3 step 4).
 const (
-	// ulimitScript is how valkey-server and hitapi start (plan H3 step 4): Go raises its own
-	// soft RLIMIT_NOFILE and restores the original soft limit for the children it starts, so the
-	// child's shell raises it to 8,192 (DESIGN §B1), then execs the program, which keeps the
-	// shell's PID and process group.
-	ulimitScript = `ulimit -S -n 8192; exec "$0" "$@"`
 	// stderrSuffix ends a child's saved output file: runs/<id>/<name>.stderr (plan choice).
 	stderrSuffix = ".stderr"
 	// outputWait is how long Wait waits for a child's output to close after it exits
@@ -57,7 +52,10 @@ type child struct {
 }
 
 // childRecord is one child's end as context.json records it (plan choice): how it exited,
-// whether it exited before the orchestrator stopped it, and whether it had to be killed.
+// whether it exited before the orchestrator stopped it, and whether it had to be killed. A
+// child a [[faults]] faultctl command ended on purpose (store down's SHUTDOWN, api kill's
+// SIGKILL; IMPLEMENTATION_PLAN H4 step 7) names that command in fault: the fault's own record
+// judges it, and the process that replaced it, under the same name, has a record of its own.
 type childRecord struct {
 	Name     string `json:"name"`
 	Role     string `json:"role"`
@@ -67,6 +65,7 @@ type childRecord struct {
 	Early    bool   `json:"exited_before_stop"`
 	GraceNs  int64  `json:"grace_ns"`
 	Killed   bool   `json:"killed"`
+	Fault    string `json:"fault,omitempty"`
 	Error    string `json:"error,omitempty"`
 }
 
@@ -78,22 +77,30 @@ type childSpec struct {
 	path     string // the program
 	args     []string
 	env      []string
-	ulimit   bool           // start through ulimitScript (valkey-server, hitapi)
+	ulimit   bool           // start through the file-limit shell, runlog.FileLimitCommand (valkey-server, hitapi)
 	capture  *captureWriter // hitgen: its output goes through this writer, which reads its lines
+	// appendOut appends the output to an existing file: a process a fault restarted continues
+	// the output file of the one it replaces, as faultctl's restart does (plan H4 step 7).
+	appendOut bool
 }
 
 // startChild starts sp in dir (the run directory, which holds its output file) and returns it
 // running. It is started on a context that never ends (context.WithoutCancel): the
 // orchestrator stops it explicitly (stop), so a SIGINT that ends ctx never kills a child
-// before its turn.
+// before its turn. Its output file is new, or with sp.appendOut appended to.
 func startChild(ctx context.Context, dir string, sp childSpec) (*child, error) {
-	out, err := os.OpenFile(filepath.Join(dir, sp.name+stderrSuffix), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if sp.appendOut {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_APPEND
+	}
+	out, err := os.OpenFile(filepath.Join(dir, sp.name+stderrSuffix), flags, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("starting %s: its output file: %w", sp.name, err)
 	}
 	prog, args := sp.path, sp.args
 	if sp.ulimit {
-		prog, args = "/bin/sh", append([]string{"-c", ulimitScript, sp.path}, sp.args...)
+		line := runlog.FileLimitCommand(sp.path, sp.args...)
+		prog, args = line[0], line[1:]
 	}
 	cmd := exec.CommandContext(context.WithoutCancel(ctx), prog, args...)
 	cmd.Env = sp.env

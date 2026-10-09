@@ -142,6 +142,14 @@ func processState(ctx context.Context, pid int) (string, error) {
 // leave it loading its data for a while, answering commands with LOADING (the S1 technique,
 // DESIGN §C2, §A3.0 row 16). The keys lie under PaddingPrefix, outside the §A3.2 layout.
 func (s *Store) LoadPadding(n int) error {
+	return LoadPaddingAt(s.Addr, s.PW.Fixture, n)
+}
+
+// LoadPaddingAt is LoadPadding for a store this package did not start: the store at addr,
+// written as rl_fixture with fixturePassword. A run's store, which the orchestrator, or a
+// faultctl test, starts from its own command line, gets the §A7 size this way, so the AOF load
+// after its store down takes long enough for the store's log to time it.
+func LoadPaddingAt(addr, fixturePassword string, n int) error {
 	if n < 0 {
 		return fmt.Errorf("loading padding: %d hashes", n)
 	}
@@ -152,7 +160,7 @@ func (s *Store) LoadPadding(n int) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[w] = s.padRange(w, conns, n)
+			errs[w] = padRange(addr, fixturePassword, w, conns, n)
 		}()
 	}
 	wg.Wait()
@@ -162,10 +170,10 @@ func (s *Store) LoadPadding(n int) error {
 	return nil
 }
 
-// padRange writes, on its own rl_fixture connection, the hashes i < n with i % step == first,
-// paddingBatch per pipeline; every reply must be the integer 7, the fields the hash got.
-func (s *Store) padRange(first, step, n int) (err error) {
-	c, err := s.Conn("rl_fixture")
+// padRange writes, on its own rl_fixture connection to addr, the hashes i < n with i % step ==
+// first, paddingBatch per pipeline; every reply must be the integer 7, the fields the hash got.
+func padRange(addr, fixturePassword string, first, step, n int) (err error) {
+	c, err := Dial(addr, "rl_fixture", fixturePassword)
 	if err != nil {
 		return err
 	}

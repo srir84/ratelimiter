@@ -22,6 +22,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"ratelimiter/harness/runlog"
 )
 
 // TestParseFlags (plan H3 step 8): --scenario is required; --baseline, --bin-dir and
@@ -132,20 +134,25 @@ func TestOrchestrate_PIDFileHeld(t *testing.T) {
 // noneIgnored is signal.Ignored for a process that ignores no signal.
 func noneIgnored(os.Signal) bool { return false }
 
-// TestOrchestrate_StopSignals (IMPLEMENTATION_PLAN H3 step 4): in a process that started with
-// none of them ignored (TestOrchestrate_StopSignalsIgnored covers the other case), SIGINT,
-// SIGTERM and SIGHUP stop a run, each by ending the ctx main gives it (the teardown, exit 1);
-// SIGQUIT keeps Go's default. A SIGHUP sent to this process while those signals are caught,
-// as main catches them, ends that ctx instead of killing the process.
+// TestOrchestrate_StopSignals (IMPLEMENTATION_PLAN H3 step 4; H4 step 7, the orchestrator
+// decision on SIGQUIT): in a process that started with none of them ignored
+// (TestOrchestrate_StopSignalsIgnored covers the other case), SIGINT, SIGTERM, SIGHUP and
+// SIGQUIT stop a run, each by ending the ctx main gives it (the teardown, exit 1). A SIGHUP
+// sent to this process while those signals are caught, as main catches them, ends that ctx
+// instead of killing the process. A SIGQUIT sent while an in-process store pause has the run's
+// store stopped (ps state T) ends the run as the others do: the pause's recovery sends SIGCONT,
+// so the store runs again (a state other than T) before the teardown, which shuts it down
+// (SHUTDOWN: exit 0, not killed); the run exits 1, context.json's outcome failed, and the
+// pause's record shows it cut short (an error, an outage under its 4.5 s).
 func TestOrchestrate_StopSignals(t *testing.T) {
 	got := stopSignals(noneIgnored)
-	for _, want := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+	for _, want := range []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT} {
 		if !slices.Contains(got, want) {
 			t.Fatalf("stop signals %v, want %v among them", got, want)
 		}
 	}
-	if len(got) != 3 || slices.Contains(got, os.Signal(syscall.SIGQUIT)) {
-		t.Errorf("stop signals %v, want SIGINT, SIGTERM and SIGHUP only (SIGQUIT keeps Go's default)", got)
+	if len(got) != 4 {
+		t.Errorf("stop signals %v, want SIGINT, SIGTERM, SIGHUP and SIGQUIT only", got)
 	}
 	ctx, stop := signal.NotifyContext(t.Context(), got...)
 	defer stop()
@@ -159,11 +166,103 @@ func TestOrchestrate_StopSignals(t *testing.T) {
 	case <-wait.C:
 		t.Fatal("a SIGHUP did not end the run's ctx within 10 s")
 	}
+
+	t.Run("SIGQUIT during a store pause", func(t *testing.T) {
+		const pauseCmd = "faultctl store pause 4.5s"
+		r, logs := testRunner(t, scenario("test", "instances = 1", oneStep+"\n[[faults]]\nat_s = 0.1\ncmd = \""+pauseCmd+"\"\n"), flags{})
+		t.Cleanup(func() { stopTestStore(t, r) })
+		if err := r.startStore(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		store := r.store
+		t.Cleanup(func() { // registered last, so it runs first: a failed test never leaves the store stopped
+			if !store.exited() {
+				_ = syscall.Kill(store.proc.PID, syscall.SIGCONT)
+			}
+		})
+		r.apis[0].grace = 5 * time.Second
+		// The instance takes 300 ms to exit on SIGTERM, so the store runs that long after the
+		// pause's recovery before the teardown reaches it.
+		r.apiProcs = []*child{startStandIn(t, r.runPath, "hitapi-1", runlog.RoleHitAPI, 1, exitOnTERM, nil)}
+		r.sampler = startStandIn(t, r.runPath, "sampler", runlog.RoleSampler, 0, exit0OnTERM, nil)
+		r.countRows = func(context.Context) (int64, error) { return 0, nil } // a run that did reach its end (the test failed)
+		t0 := newT0Watch()
+		startHitgenStandIn(t, r, t0, hitgenLong)
+		ctx, stop := signal.NotifyContext(t.Context(), stopSignals(noneIgnored)...)
+		defer stop()
+
+		// The watcher: once the store is stopped, SIGQUIT to this process, caught as main
+		// catches it; then the store must run again. Each wait is bounded.
+		type watch struct {
+			stopped, resumed bool
+			err              error
+		}
+		watched := make(chan watch, 1)
+		go func() {
+			var w watch
+			defer func() { watched <- w }()
+			for deadline := time.Now().Add(3 * time.Second); !w.stopped && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+				w.stopped = procState(t, store.proc.PID) == "T"
+			}
+			if !w.stopped {
+				return
+			}
+			if w.err = syscall.Kill(os.Getpid(), syscall.SIGQUIT); w.err != nil {
+				return
+			}
+			for deadline := time.Now().Add(5 * time.Second); !w.resumed && time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				st := procState(t, store.proc.PID)
+				w.resumed = st != "" && st != "T"
+			}
+		}()
+		code := r.afterHitgen(ctx, t0)
+		w := <-watched
+		if !w.stopped || w.err != nil || !w.resumed {
+			t.Errorf("store stopped by the pause %v, SIGQUIT sent %v (%v), store running again after it %v; want all three",
+				w.stopped, w.stopped && w.err == nil, w.err, w.resumed)
+		}
+		if code != exitFailure {
+			t.Errorf("exit code %d after the SIGQUIT, want %d\n%s", code, exitFailure, logs.String())
+		}
+		rc := readContext(t, r.runPath)
+		if rc.Outcome != "failed" || !strings.Contains(rc.Error, "the run was stopped") {
+			t.Errorf("context.json outcome %q, error %q; want failed: the run was stopped", rc.Outcome, rc.Error)
+		}
+		if len(rc.Faults) != 1 || rc.Faults[0].Cmd != pauseCmd || rc.Faults[0].Error == "" || rc.Faults[0].OutageNs == nil ||
+			*rc.Faults[0].OutageNs >= int64(4500*time.Millisecond) {
+			t.Errorf("context.json faults %+v, want the pause's record cut short: an error, an outage_ns under 4,500 ms", rc.Faults)
+		}
+		var storeRec []childRecord
+		for _, rec := range rc.Children {
+			if rec.Name == nameStore {
+				storeRec = append(storeRec, rec)
+			}
+		}
+		if len(storeRec) != 1 || storeRec[0].PID != store.proc.PID || storeRec[0].Exit != "exit 0" || storeRec[0].Killed ||
+			storeRec[0].Early || storeRec[0].Error != "" || !gone(store.proc.PID) {
+			t.Errorf("the store's records %+v, want one: process %d shut down by the teardown, exit 0, not killed", storeRec, store.proc.PID)
+		}
+	})
 }
 
-// TestOrchestrate_StopSignalsIgnored (IMPLEMENTATION_PLAN H3 step 4; HARNESS HAR-5): a SIGINT or
-// SIGHUP the orchestrator started with ignored (nohup ignores SIGHUP; a shell ignores SIGINT for
-// a background job) is not caught, so it stays ignored; SIGTERM always is. A process started
+// procState returns the first letter of process pid's state as ps shows it (T: stopped), or
+// "" when ps shows no such process. ps runs within 5 s.
+func procState(t *testing.T, pid int) string {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "/bin/ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+	state := strings.TrimSpace(string(out))
+	if err != nil || state == "" {
+		return ""
+	}
+	return state[:1]
+}
+
+// TestOrchestrate_StopSignalsIgnored (IMPLEMENTATION_PLAN H3 step 4, H4 step 7; HARNESS HAR-5): a
+// SIGINT or SIGHUP the orchestrator started with ignored (nohup ignores SIGHUP; a shell ignores
+// SIGINT for a background job) is not caught, so it stays ignored; SIGTERM and SIGQUIT always
+// are (Go's runtime replaces an inherited SIGQUIT ignore with its own handler, so
+// signal.Ignored never reports SIGQUIT and the table has no such row). A process started
 // under nohup, as `nohup make run …` starts the orchestrator, is checked end to end: this test
 // binary, re-run under /usr/bin/nohup (TestMain, ignoredHUPCheck), catches the signals main
 // catches and sends itself SIGHUP, which must neither end the run's ctx nor kill it.
@@ -172,10 +271,10 @@ func TestOrchestrate_StopSignalsIgnored(t *testing.T) {
 		ignored []os.Signal
 		want    []os.Signal
 	}{
-		{[]os.Signal{syscall.SIGHUP}, []os.Signal{syscall.SIGINT, syscall.SIGTERM}},
-		{[]os.Signal{syscall.SIGINT}, []os.Signal{syscall.SIGTERM, syscall.SIGHUP}},
-		{[]os.Signal{syscall.SIGINT, syscall.SIGHUP}, []os.Signal{syscall.SIGTERM}},
-		{[]os.Signal{syscall.SIGTERM}, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP}},
+		{[]os.Signal{syscall.SIGHUP}, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT}},
+		{[]os.Signal{syscall.SIGINT}, []os.Signal{syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}},
+		{[]os.Signal{syscall.SIGINT, syscall.SIGHUP}, []os.Signal{syscall.SIGTERM, syscall.SIGQUIT}},
+		{[]os.Signal{syscall.SIGTERM}, []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}},
 	} {
 		got := stopSignals(func(sig os.Signal) bool { return slices.Contains(c.ignored, sig) })
 		if len(got) != len(c.want) || slices.ContainsFunc(c.want, func(sig os.Signal) bool { return !slices.Contains(got, sig) }) {

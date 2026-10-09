@@ -4,7 +4,9 @@
 // line handed to the kernel survives SIGKILL. Enqueue never blocks: a full channel counts a
 // drop, and any drop invalidates the run (§B8). Shared by hitapi (H1), hitgen (H2) and the
 // sampler (H3). It also defines pids.json, the run directory's process list that the
-// orchestrator writes and the sampler reads (pids.go; IMPLEMENTATION_PLAN H3 steps 4 and 7).
+// orchestrator writes and the sampler reads (pids.go; IMPLEMENTATION_PLAN H3 steps 4 and 7),
+// and the command lines that start a run's store and instances, which the orchestrator starts
+// them with and faultctl restarts them with (store.go; plan H4 step 3).
 package runlog
 
 import (
@@ -74,6 +76,32 @@ func openFile(path string) (*os.File, error) {
 		return nil, fmt.Errorf("opening the run log: %w", err)
 	}
 	return f, nil
+}
+
+// Append writes rec as one JSON line to the run log at path, with one Write on a descriptor
+// of its own opened with O_APPEND, so one write(2): the line lands whole at the end of the
+// file, after the lines the log's own Writer handed over, as faultctl's pre_kill line does on
+// a live hitapi's log (DESIGN §B6 FLT-6; IMPLEMENTATION_PLAN H4 step 2). The log must exist
+// (plan choice): a line meant for a log its process opened never starts a new file. A record
+// that fails to encode writes nothing.
+func Append(path string, rec any) error {
+	line, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("encoding a run-log record: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return fmt.Errorf("opening the run log: %w", err)
+	}
+	_, werr := f.Write(append(line, '\n'))
+	cerr := f.Close()
+	if werr != nil {
+		return fmt.Errorf("writing the run log: %w", werr)
+	}
+	if cerr != nil {
+		return fmt.Errorf("closing the run log: %w", cerr)
+	}
+	return nil
 }
 
 // newWriter starts the goroutine that writes dst from a channel of capacity lines.
