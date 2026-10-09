@@ -42,14 +42,16 @@ const (
 // rollbackTimeout bounds HoldKey's rollback, which runs even after the caller's ctx ended.
 const rollbackTimeout = 10 * time.Second
 
-// Open's refusals. Neither quotes the DSN: it could hold a secret, and pgconn's own parse error
-// quotes it, redacting a userinfo or key=value password but not a ?password= parameter.
+// Open's refusals (CheckDSN). Neither quotes the DSN: it could hold a secret, and pgconn's own
+// parse error quotes it, redacting a userinfo or key=value password but not a ?password=
+// parameter.
 var (
-	// errDSNPassword: the harness database takes no password (the §B2 db_dsn has none; make
+	// ErrDSNPassword: the harness database takes no password (the §B2 db_dsn has none; make
 	// setup's cluster trusts loopback), and one in the config file would be a secret in TOML
 	// (AGENTS.md §1).
-	errDSNPassword = errors.New("the database DSN carries a password; the harness database takes none, so remove it")
-	errDSNParse    = errors.New("the database DSN does not parse (its text is left out: it could hold a secret)")
+	ErrDSNPassword = errors.New("the database DSN carries a password; the harness database takes none, so remove it")
+	// ErrDSNParse: pgxpool cannot parse the DSN.
+	ErrDSNParse = errors.New("the database DSN does not parse (its text is left out: it could hold a secret)")
 )
 
 // errCancelled is a Cancelled Hit's error: the caller's stop channel closed before the first
@@ -116,23 +118,41 @@ type Client struct {
 }
 
 // Open parses dsn (the §B2 db_dsn: pool_* keys configure the pool; others, such as
-// statement_timeout, go to the server) and returns a client. It refuses a DSN that carries a
-// password (hasPassword), and its errors never quote the DSN. It connects lazily: an
-// unreachable server shows up as FailedNoRow on the first Hit, not as an error here.
+// statement_timeout, go to the server) and returns a client. It refuses what CheckDSN refuses,
+// and its errors never quote the DSN. It connects lazily: an unreachable server shows up as
+// FailedNoRow on the first Hit, not as an error here.
 func Open(ctx context.Context, dsn string) (*Client, error) {
-	if hasPassword(dsn) {
-		return nil, errDSNPassword
-	}
-	cfg, err := pgxpool.ParseConfig(dsn)
+	cfg, err := parseDSN(dsn)
 	if err != nil {
-		// pgconn's error quotes the DSN, so none of it is passed on.
-		return nil, errDSNParse
+		return nil, err
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("creating the database pool: %w", err)
 	}
 	return &Client{pool: pool}, nil
+}
+
+// CheckDSN returns the error Open would refuse dsn with, without connecting: ErrDSNPassword
+// when it carries a password (hasPassword), ErrDSNParse when pgxpool cannot parse it; nil for
+// a DSN Open takes. Neither error quotes the DSN. The orchestrator checks a run's db_dsn with
+// it before it writes any file that would hold the DSN (IMPLEMENTATION_PLAN H3 step 1).
+func CheckDSN(dsn string) error {
+	_, err := parseDSN(dsn)
+	return err
+}
+
+// parseDSN is Open's parse of dsn, after the password check.
+func parseDSN(dsn string) (*pgxpool.Config, error) {
+	if hasPassword(dsn) {
+		return nil, ErrDSNPassword
+	}
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		// pgconn's error quotes the DSN, so none of it is passed on.
+		return nil, ErrDSNParse
+	}
+	return cfg, nil
 }
 
 // hasPassword reports whether dsn names a password in a form pgconn reads: the URL userinfo

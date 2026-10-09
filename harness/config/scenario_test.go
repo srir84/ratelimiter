@@ -423,3 +423,38 @@ func states(quiet, active, burst string) string {
 		"[users.states.active]\nweight = " + active + "\nmean_dwell_s = 1\n" +
 		"[users.states.burst]\nweight = " + burst + "\nmean_dwell_s = 1"
 }
+
+// TestScenario_OverridesKey: OverridesKey tells whether the scenario sets a key of an
+// override table, whatever its value (IMPLEMENTATION_PLAN H3 step 1: a benchmark run refuses
+// a clock_source override, even "store").
+func TestScenario_OverridesKey(t *testing.T) {
+	head := "name = \"ok\"\nseed = 1\nrun_kind = \"test\"\n"
+	tail := "[[steps]]\nrate_per_s = 1\nduration_s = 1\n[users]\ncount = 1\n"
+	for _, c := range []struct {
+		name, overrides string
+		want            bool
+	}{
+		{"no overrides", "", false},
+		{"clock_source store", "[policy]\nclock_source = \"store\"\n", true},
+		{"clock_source controlled", "[policy]\nclock_source = \"controlled\"\n", true},
+		{"dotted key", "policy.clock_source = \"store\"\n", true},
+		{"another policy key", "[policy]\nfailure_mode = \"open\"\n", false},
+		{"another table", "[api]\nrefuse_after_acquire_bp = 1\n", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			content := head + c.overrides + tail // the override tables, or a dotted key, before [[steps]]
+			sc, err := LoadScenario(writeScenario(t, content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := sc.OverridesKey("policy", "clock_source")
+			if err != nil || got != c.want {
+				t.Errorf("OverridesKey(policy, clock_source) = %v, %v; want %v, nil\nfile:\n%s", got, err, c.want, content)
+			}
+		})
+	}
+	bad := Scenario{Overrides: []byte("[policy\n")}
+	if _, err := bad.OverridesKey("policy", "clock_source"); err == nil {
+		t.Error("OverridesKey of overrides that are not TOML: no error")
+	}
+}

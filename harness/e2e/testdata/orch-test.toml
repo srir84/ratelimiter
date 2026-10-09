@@ -1,0 +1,18 @@
+# TestDesign_OrchestratorTestRun and T-HAR-1 (IMPLEMENTATION_PLAN H3 step 9, plan choice), and
+# `make run SCENARIO=harness/e2e/testdata/orch-test.toml`: a small test-build run on the
+# controlled clock (set once before the epoch starts, then frozen), three instances, 50 users,
+# one 30/s step of 10 s.
+name = "orch-test"
+seed = 1
+run_kind = "test"
+instances = 3
+
+[policy]
+clock_source = "controlled"
+
+[[steps]]
+rate_per_s = 30
+duration_s = 10
+
+[users]
+count = 50

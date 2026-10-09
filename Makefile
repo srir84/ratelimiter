@@ -110,8 +110,9 @@ test-integration: bin/trace build
 # L4 end-to-end (DESIGN §C1, §C5; IMPLEMENTATION_PLAN H1 step 13): the HARNESS tests against the
 # bin/test binaries, built first, and the harness PostgreSQL, one package at a time (-p 1: they
 # share the hits table). A missing binary or PostgreSQL fails the test, never skips it. Later
-# slices append their packages to E2E_PKGS.
-E2E_PKGS = ./harness/dbclient/ ./harness/e2e/ ./harness/httpapi/
+# slices append their packages to E2E_PKGS: H3 the orchestrator's rltest tests (its untagged
+# TestClockStub_Refuses runs in test-unit).
+E2E_PKGS = ./harness/dbclient/ ./harness/e2e/ ./harness/httpapi/ ./cmd/orchestrator/
 
 .PHONY: test-e2e
 test-e2e: bin/trace build
@@ -157,6 +158,15 @@ ifneq ($(BENCH_CMDS),)
 endif
 	$(GO) build -tags rltest -o bin/test/ ./cmd/...
 endif
+
+# make run SCENARIO=<file> [BASELINE=1]: one whole run, end to end (DESIGN §B1, §B5;
+# IMPLEMENTATION_PLAN H3 step 9): the binaries built first, then the orchestrator from bin/test,
+# in the repository root (it finds harness.toml, bin/, deploy/, runs/ and .data/ there).
+# BASELINE=1 runs with the limiter off (HAR-17).
+.PHONY: run
+run: build
+	@test -n "$(SCENARIO)" || { echo "run: SCENARIO is required, e.g. make run SCENARIO=harness/e2e/testdata/orch-test.toml" >&2; exit 2; }
+	bin/test/orchestrator --scenario $(SCENARIO) $(if $(BASELINE),--baseline)
 
 # make slice-check S=<id>: leftover children of an earlier run (before .out/ goes), a
 # fresh .out/, check, each test target of the slices up to S followed by procs; then the

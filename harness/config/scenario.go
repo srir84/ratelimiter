@@ -162,6 +162,25 @@ func (f Fault) Faultctl() bool { return strings.HasPrefix(f.Cmd, FaultctlPrefix)
 // the nearest.
 func SecondsToNs(s float64) int64 { return int64(math.Round(s * 1e9)) }
 
+// OverridesKey reports whether the scenario's overrides set key in table ("policy",
+// "instance" or "api"), whatever the value: a benchmark run refuses any clock_source override
+// (DESIGN §B5 "Benchmark guard"; IMPLEMENTATION_PLAN H3 step 1).
+func (sc Scenario) OverridesKey(table, key string) (bool, error) {
+	if len(sc.Overrides) == 0 {
+		return false, nil
+	}
+	m, err := decodeTables(sc.Overrides)
+	if err != nil {
+		return false, fmt.Errorf("overrides: %w", err)
+	}
+	t, ok := m[table].(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	_, set := t[key]
+	return set, nil
+}
+
 // RunNs is the run length: the sum of the steps' durations, each rounded to whole ns.
 func (sc Scenario) RunNs() int64 {
 	var n int64

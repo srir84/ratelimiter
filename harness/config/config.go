@@ -220,6 +220,17 @@ func Load(path string) (File, error) {
 	return f, nil
 }
 
+// Parse decodes a config file's contents as Load does, without reading a file or the
+// environment, so Store.Password stays "". The orchestrator checks a run's merged config with
+// it before anything starts (IMPLEMENTATION_PLAN H3 step 1).
+func Parse(data []byte) (File, error) {
+	f, err := decode(data)
+	if err != nil {
+		return File{}, fmt.Errorf("harness config: %w", err)
+	}
+	return f, nil
+}
+
 // decode parses a config file: [policy] onto DefaultPolicy(), then [instance] onto
 // DefaultInstance(policy) (the drain default depends on the policy), then [store] and [api].
 // It leaves Store.Password "".

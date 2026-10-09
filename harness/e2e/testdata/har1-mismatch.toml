@@ -1,0 +1,34 @@
+# T-HAR-1 (HARNESS §8; IMPLEMENTATION_PLAN H3 step 9, plan choice): a whole config file for one
+# instance (orchestrator --instance-config 3=…): harness.toml with clock_source = "controlled",
+# as orch-test.toml's runs set it, and failure_mode = "open" where the run's config.toml has
+# "closed". The policy's fingerprint differs from the epoch's, so that instance refuses every
+# acquire (limiter_config_error) and reports not ready (fingerprint_mismatch).
+[policy]
+rate_tokens = 10
+rate_period_ns = 1_000_000_000
+capacity = 20
+failure_mode = "open"
+max_tracked_buckets = 100_000
+max_live_markers = 50_000
+max_markers_per_key = 1_000
+receipt_lifetime_ns = 60_000_000_000
+refund_deadline_ns = 30_000_000_000
+outage_tolerance_ns = 5_000_000_000
+cleanup_interval_ns = 5_000_000_000
+clock_source = "controlled"
+
+[instance]
+max_release_delay_ns = 5_000_000_000
+margin_ns = 1_000_000_000
+max_held_receipts = 1152
+max_pending_refunds = 1152
+refund_workers = 128
+
+[store]
+addr = "127.0.0.1:6390"
+
+[api]
+max_in_flight = 512
+limiter_enabled = true
+refuse_after_acquire_bp = 0
+db_dsn = "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conns=64"

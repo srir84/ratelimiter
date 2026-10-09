@@ -416,12 +416,19 @@ func (s *Stack) startChild(t testing.TB, bin string, args, env []string, name st
 // deletes the record once Wait returns. The child outlives the test's context until a helper
 // stops it (AGENTS.md §2).
 func startProcess(t testing.TB, root, dir, bin string, args, env []string, name string) (*child, error) {
+	return startProcessIn(t, root, dir, "", bin, args, env, name)
+}
+
+// startProcessIn is startProcess with the child's working directory workDir ("": the test's
+// own).
+func startProcessIn(t testing.TB, root, dir, workDir, bin string, args, env []string, name string) (*child, error) {
 	outPath := filepath.Join(dir, name+".out")
 	out, err := os.OpenFile(outPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("output file: %w", err)
 	}
 	cmd := exec.CommandContext(context.WithoutCancel(t.Context()), bin, args...)
+	cmd.Dir = workDir
 	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = out, out
 	err = cmd.Start()

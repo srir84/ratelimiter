@@ -120,7 +120,7 @@ func TestDBClient_DSNSecrets(t *testing.T) {
 			t.Errorf("Open(%s) succeeded, want the DSN refused for its password", dsn)
 			continue
 		}
-		if !errors.Is(err, errDSNPassword) || strings.Contains(err.Error(), mark) {
+		if !errors.Is(err, ErrDSNPassword) || strings.Contains(err.Error(), mark) {
 			t.Errorf("Open(%s) = %q, want the fixed password refusal, which quotes no part of the DSN", dsn, err)
 		}
 	}
@@ -136,6 +136,34 @@ func TestDBClient_DSNSecrets(t *testing.T) {
 		}
 		if msg := err.Error(); strings.Contains(msg, mark) || strings.Contains(msg, "127.0.0.1") {
 			t.Errorf("Open(%s) = %q, want a fixed error that quotes no part of the DSN", dsn, err)
+		}
+	}
+}
+
+// TestDBClient_CheckDSN: CheckDSN refuses, without connecting, what Open refuses, with the same
+// fixed errors that quote no part of the DSN: a password in each form pgconn reads, and a DSN
+// that does not parse (a userinfo password in a URL with a bad port among them); harness.toml's
+// db_dsn, which carries none, passes (IMPLEMENTATION_PLAN H3 step 1: the orchestrator checks
+// db_dsn so before it writes any file).
+func TestDBClient_CheckDSN(t *testing.T) {
+	const mark = "SECRETMARK"
+	for _, c := range []struct {
+		dsn  string
+		want error
+	}{
+		{testDSN, nil},
+		{"postgres://rl:" + mark + "@127.0.0.1:5433/hits", ErrDSNPassword},
+		{"postgres://rl@127.0.0.1:5433/hits?password=" + mark, ErrDSNPassword},
+		{"host=127.0.0.1 port=5433 user=rl dbname=hits password=" + mark, ErrDSNPassword},
+		{"postgres://rl:" + mark + "@127.0.0.1:bad/hits", ErrDSNParse},
+		{"postgres://rl@127.0.0.1:5433/hits?pool_max_conns=" + mark, ErrDSNParse},
+	} {
+		err := CheckDSN(c.dsn)
+		if !errors.Is(err, c.want) || (c.want == nil && err != nil) {
+			t.Errorf("CheckDSN(%s) = %v, want %v", c.dsn, err, c.want)
+		}
+		if err != nil && (strings.Contains(err.Error(), mark) || strings.Contains(err.Error(), "127.0.0.1")) {
+			t.Errorf("CheckDSN(%s) = %q, want a fixed error that quotes no part of the DSN", c.dsn, err)
 		}
 	}
 }

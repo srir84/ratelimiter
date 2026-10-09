@@ -1,0 +1,15 @@
+# TestDesign_OrchestratorBaselineBench and T-FIX-2 (IMPLEMENTATION_PLAN H3 step 9, plan choice),
+# and `make run SCENARIO=harness/e2e/testdata/orch-baseline.toml BASELINE=1`: orch-test.toml's
+# load as a benchmark run, on the store clock (no override: benchmarks take harness.toml's
+# clock_source), with bin/bench's hitapi and rladmin.
+name = "orch-baseline"
+seed = 1
+run_kind = "bench"
+instances = 3
+
+[[steps]]
+rate_per_s = 30
+duration_s = 10
+
+[users]
+count = 50

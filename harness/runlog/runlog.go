@@ -3,7 +3,8 @@
 // one write(2) per line on a file opened with O_APPEND, with no userspace buffer, so every
 // line handed to the kernel survives SIGKILL. Enqueue never blocks: a full channel counts a
 // drop, and any drop invalidates the run (§B8). Shared by hitapi (H1), hitgen (H2) and the
-// sampler (H3).
+// sampler (H3). It also defines pids.json, the run directory's process list that the
+// orchestrator writes and the sampler reads (pids.go; IMPLEMENTATION_PLAN H3 steps 4 and 7).
 package runlog
 
 import (

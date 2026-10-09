@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -254,5 +255,134 @@ func TestGoldenGen_AttemptsAndSummary(t *testing.T) {
 		summary["stopped_after_step"] != nil || summary["excluded_step"] != nil {
 		t.Errorf("summary %v: want planned 3, launched 3, unsent 0, log_drops 0, skipped_no_eligible 0, "+
 			"stopped_after_step and excluded_step null", summary)
+	}
+}
+
+// TestGoldenSamples_TwoTicks checks the hand-written golden samples.jsonl against DESIGN §B7,
+// §B8 and IMPLEMENTATION_PLAN H3 step 7, not against any writer: the two ticks TestSampler_Tick
+// produces. Each line has exactly the sample fields (each read's value beside its error); the
+// one process of its pids.json with cpu and rss; one instance with its /metrics series (PRF-4's
+// gauges, listener drops and cleanup counts among them) and, on the first tick, hitapi's
+// /health body (DESIGN §A5.11 Health plus plan H1 step 9's counters, as a benchmark build
+// serves it); and an error with a null value for each read the test leaves unavailable:
+// rladmin status, INFO and the postmaster. The second tick is the same with a /health error.
+func TestGoldenSamples_TwoTicks(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "golden", "samples.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type rec = map[string]any
+	var lines []rec
+	for i, raw := range bytes.Split(bytes.TrimSuffix(data, []byte{'\n'}), []byte{'\n'}) {
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var r rec
+		if err := dec.Decode(&r); err != nil {
+			t.Fatalf("line %d is not a JSON object: %v", i+1, err)
+		}
+		lines = append(lines, r)
+	}
+	if len(lines) != 2 {
+		t.Fatalf("golden samples.jsonl has %d lines, want the 2 ticks of TestSampler_Tick", len(lines))
+	}
+	keysOf := func(v any) []string {
+		r, _ := v.(rec)
+		ks := make([]string, 0, len(r))
+		for k := range r {
+			ks = append(ks, k)
+		}
+		sort.Strings(ks)
+		return ks
+	}
+	sorted := func(ks ...string) []string {
+		sort.Strings(ks)
+		return ks
+	}
+	isNum := func(v any) bool { _, ok := v.(json.Number); return ok }
+	isText := func(v any) bool { s, ok := v.(string); return ok && s != "" }
+	lineKeys := sorted("t_ns", "procs", "procs_error", "postgres", "postgres_error", "apis", "status", "status_error",
+		"store", "store_error")
+	procKeys := sorted("role", "instance", "pid", "cpu", "rss", "error")
+	apiKeys := sorted("instance", "addr", "health", "health_error", "metrics", "metrics_error")
+	healthKeys := sorted("status", "reason", "epoch_id", "clock_source", "instance", "listener_drops", "store_error",
+		"fixtures", "log_drops", "in_flight", "nofile_limit", "log_queue_len")
+	prf4 := []string{"rl_tracked_buckets", "rl_live_markers", "rl_quarantined_keys", "rl_pending_refunds",
+		"rl_cleanup_lag_seconds", "rl_clock_lag_microseconds", "rl_listener_drops_total", "rl_cleanup_passes_total",
+		"rl_cleanup_entries_total"}
+	// PRF-4's labelled series, the cleanup counts, by their label (DESIGN §A5.11): one series
+	// with that label at least. Each other PRF-4 metric is one series without labels.
+	prf4Labels := map[string]string{"rl_cleanup_passes_total": "status", "rl_cleanup_entries_total": "action"}
+	hasSeries := func(m rec, name string) bool {
+		label, labelled := prf4Labels[name]
+		if !labelled {
+			_, ok := m[name]
+			return ok
+		}
+		for k := range m {
+			if strings.HasPrefix(k, name+"{"+label+`="`) && strings.HasSuffix(k, `"}`) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var apis [2]rec
+	for i, l := range lines {
+		tick := i + 1
+		if got := keysOf(l); !reflect.DeepEqual(got, lineKeys) {
+			t.Fatalf("tick %d has keys %v, want %v", tick, got, lineKeys)
+		}
+		if !isNum(l["t_ns"]) || l["procs_error"] != nil {
+			t.Errorf("tick %d: t_ns %v and procs_error %v, want wall-clock ns and null", tick, l["t_ns"], l["procs_error"])
+		}
+		procs, _ := l["procs"].([]any)
+		if len(procs) != 1 {
+			t.Fatalf("tick %d: procs %v, want its pids.json's one process", tick, l["procs"])
+		}
+		p, _ := procs[0].(rec)
+		if got := keysOf(p); !reflect.DeepEqual(got, procKeys) || p["role"] != "hitapi" || p["instance"] != json.Number("1") ||
+			!isNum(p["pid"]) || !isNum(p["cpu"]) || !isNum(p["rss"]) || p["error"] != nil {
+			t.Errorf("tick %d: process %v, want hitapi 1 with a pid, cpu, rss and a null error", tick, p)
+		}
+		for _, read := range []string{"postgres", "status", "store"} {
+			if l[read] != nil || !isText(l[read+"_error"]) {
+				t.Errorf("tick %d: %s %v with error %v, want null and the unavailable read's error", tick, read, l[read], l[read+"_error"])
+			}
+		}
+		list, _ := l["apis"].([]any)
+		if len(list) != 1 {
+			t.Fatalf("tick %d: apis %v, want one instance", tick, l["apis"])
+		}
+		apis[i], _ = list[0].(rec)
+		a := apis[i]
+		if got := keysOf(a); !reflect.DeepEqual(got, apiKeys) || a["instance"] != json.Number("1") || !isText(a["addr"]) ||
+			a["metrics_error"] != nil {
+			t.Errorf("tick %d: instance %v, want instance 1 with its address and a null metrics_error", tick, a)
+		}
+		m, _ := a["metrics"].(rec)
+		for k, v := range m {
+			if !isNum(v) {
+				t.Errorf("tick %d: metrics %s = %v, want a number", tick, k, v)
+			}
+		}
+		for _, k := range prf4 {
+			if !hasSeries(m, k) {
+				t.Errorf("tick %d: metrics lack %s (PRF-4)", tick, k)
+			}
+		}
+	}
+	if got := keysOf(apis[0]["health"]); !reflect.DeepEqual(got, healthKeys) || apis[0]["health_error"] != nil {
+		t.Errorf("tick 1: health keys %v with error %v, want %v and null", got, apis[0]["health_error"], healthKeys)
+	}
+	if apis[1]["health"] != nil || !isText(apis[1]["health_error"]) {
+		t.Errorf("tick 2: health %v with error %v, want null and /health's error", apis[1]["health"], apis[1]["health_error"])
+	}
+	if !reflect.DeepEqual(keysOf(apis[0]["metrics"]), keysOf(apis[1]["metrics"])) {
+		t.Error("the two ticks' metrics have different series, want the same stub")
+	}
+	t1, _ := lines[0]["t_ns"].(json.Number).Int64()
+	t2, _ := lines[1]["t_ns"].(json.Number).Int64()
+	if t2 <= t1 {
+		t.Errorf("t_ns %d then %d, want the second tick later", t1, t2)
 	}
 }

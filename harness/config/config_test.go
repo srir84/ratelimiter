@@ -511,3 +511,21 @@ func TestConfig_EncodeRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestConfig_Parse: Parse decodes a file's contents as Load does, refuses what Load refuses,
+// and never reads the password from the environment (IMPLEMENTATION_PLAN H3 step 1: the
+// orchestrator checks the merged config before anything starts).
+func TestConfig_Parse(t *testing.T) {
+	t.Setenv(LibPasswordEnv, "pw-from-env")
+	got, err := Parse([]byte(b2Policy + b2Instance + storeAndAPI))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if want := b2File(); got != want {
+		t.Errorf("Parse = %+v, want the §B2 values with no password %+v", got, want)
+	}
+	if _, err := Parse([]byte(b2Policy + b2Instance + storeAndAPI + "extra = 1\n")); err == nil ||
+		!strings.Contains(err.Error(), "api.extra") {
+		t.Errorf("Parse of a file with an unknown key: error %v, want one naming api.extra", err)
+	}
+}
