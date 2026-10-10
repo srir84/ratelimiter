@@ -1,0 +1,60 @@
+# s1-ramp (HARNESS TRF-S1; DESIGN §B4, §B5, §B9; IMPLEMENTATION_PLAN H6 step 1): the capacity ramp
+# on three instances, a benchmark (bin/bench) judged by the capacity verdict (T-RPT-2, PRF-8,
+# PRF-11): 100 req/s doubling every 30 s (100, 200, 400, 800, 1,600, 3,200, 6,400) up to the
+# exploratory ceiling of 10,000 req/s, over 10,000 users drawn by Zipf 1.1. stop_early stops the run
+# after the first step that is generator-limited or misses a threshold (a baseline stops only at a
+# generator-limited one). s1-ramp-1api.toml is the same ramp on one instance, so the report gives
+# the 1→3 change as measured (TRF-S1). Its sustainable_capacity, rounded down to a multiple of 100,
+# is the S of s4-spike.toml and s7-long.toml (plan H6 step 2).
+# Plan choices, each with its reason:
+# - The policy is harness.toml's (10 tokens/s, capacity 20 per user): the plan sets none, and the
+#   users above 10 req/s (u000000 alone gets about 15 % of each step) get 429s, which the report
+#   gives apart from admitted throughput (PRF-10). Their retries keep the TRF-5 defaults (at most 2
+#   extra, jitter 0-50 ms): extra traffic, counted separately (TRF-3).
+# - No [[faults]] (a benchmark has none, HAR-24) and no forced_aof_rewrites_s, so the store runs
+#   with auto-aof-rewrite-percentage 0 (DESIGN §A2: capacity benchmarks rewrite between runs; the
+#   orchestrator sets it for every scenario without forced_aof_rewrites_s, runlog.StoreArgs).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s1-ramp"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "capacity"
+stop_early = true
+
+[[steps]]
+rate_per_s = 100
+duration_s = 30
+
+[[steps]]
+rate_per_s = 200
+duration_s = 30
+
+[[steps]]
+rate_per_s = 400
+duration_s = 30
+
+[[steps]]
+rate_per_s = 800
+duration_s = 30
+
+[[steps]]
+rate_per_s = 1600
+duration_s = 30
+
+[[steps]]
+rate_per_s = 3200
+duration_s = 30
+
+[[steps]]
+rate_per_s = 6400
+duration_s = 30
+
+[[steps]]
+rate_per_s = 10000
+duration_s = 30
+
+[users]
+count = 10000
+zipf_s = 1.1

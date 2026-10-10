@@ -50,8 +50,30 @@ report's outstanding_cutoff_ns must be that deadline − threshold (the deadline
 the post-spike step none), and met needs an outstanding count of 0.
 
 Every number is range-checked (integers 0 to 2^63 − 1, finite floats of at least 0): a value out
-of range fails its check. Exit 0 valid, 1 invalid (one "FAIL <check>: <detail>" line for each
-failed check), 2 for a wrong command line.
+of range fails its check. Every count in the sections check_keys reads (COUNT_FIELDS and the
+other count tables below it: PRF-1's planned, sent, retry, drop and per-step counts and the
+gen.jsonl summary's; PRF-2's results, unexpected errors, decisions, releases, attempt outcomes
+and transport errors by kind; each percentile summary's sample count; PRF-4's readings, the
+store's tracked keys, live markers and quarantined keys, and each count series' max and last,
+by the series' name (COUNT_SERIES: hitapi's in-flight requests and drop counts, the store-state
+gauges, pending refunds, the listener-drop and cleanup counters); the schedule and routing
+counts; check_bud11's; the capacity step and spike counts; and the §B8 evidence counts no
+evidence rule reads in every run, EVIDENCE_COUNTS: the stop and pre_kill lines, fixtures_off's
+readings and faults, and the rewrite windows) must be such an integer, never a bool or a float
+(1.0 included), whether or not a check reads it, or null where the report has no reading
+(NULLABLE_COUNT_FIELDS, NULLABLE_MEMBER_COUNT_FIELDS, a count series' max and last): anything
+else fails required_keys, as do an object or a list of counts that is none and an instance
+series whose name the report builder never writes (its set of names is closed). Not counts, so
+not held to this: step indexes (step, stopped_after_step, excluded_step, spike_step,
+post_spike_step, sustainable_step), instance numbers and PIDs (identifiers), times and durations
+in ns, percentiles, rates and the other measurements (CPU %, RSS bytes, a lag series' max and
+last: LAG_SERIES, durations in seconds and µs), and the settings context copies from the run
+(PRF-5); these keep the checks that read them. Nor are the evidence counts a §B8 rule reads in
+every run (log_drops, listener_drops' sum, pre_kill_unread and segments_without_count, outage's
+unmeasured, outage_segments, gen_summary): each is judged again by its rule, which takes nothing
+but an integer (0, or at most 1 outage segment), so a bool, a float, a negative number or a
+string fails that rule's check. Exit 0 valid, 1 invalid (one "FAIL <check>: <detail>" line for
+each failed check), 2 for a wrong command line.
 """
 
 import argparse
@@ -122,20 +144,39 @@ LIMITER_CLASSES = ("allowed", "limited", "degraded", "error")
 END_TO_END_CLASSES = ("all", "success", "limited", "error", "retries")
 # The attempt kinds whose outcomes results.attempt_outcomes counts (§B4).
 ATTEMPT_KINDS = ("initial", "duplicate", "retry")
-# The fields of check_bud11's run-log verdict JSON (plan H5 step 8) that correctness holds, each
-# in every one of its shapes (pass, violation, invalid): the verdict, the credits it counted, the
-# listener drops and pre_kill reads it judged, the reasons for an invalid verdict, and the
-# violation (null unless the verdict is violation).
-VERDICT_FIELDS = (
-    "verdict",
+# PRF-1's first-attempt counts, in load.total and in each load step: planned vs sent, duplicates
+# and retries apart, the unsent.
+LOAD_COUNTS = ("planned", "sent", "initial", "duplicates", "retries_429", "unsent")
+# PRF-2's counts by name (results.prf2).
+PRF2_COUNTS = (
+    "new_rows",
+    "duplicate_rows_avoided",
+    "quota_rejections",
+    "degraded_admissions",
+    "capacity_refusals",
+    "integrity_failures",
+    "unavailable",
+    "unknown_acquires",
+    "unknown_application_outcomes",
+    "server_failures",
+    "transport_errors",
+    "expired_refunds",
+    "unresolved_refunds",
+    "db_rows",
+)
+# check_bud11's counts in its verdict JSON: the credits it counted, the listener drops and the
+# pre_kill lines and failed reads it judged.
+VERDICT_COUNTS = (
     "known_credits",
     "unknown_credits",
     "listener_drops",
     "pre_kill_lines",
     "pre_kill_read_ok_false",
-    "invalid_reasons",
-    "violation",
 )
+# The fields of check_bud11's run-log verdict JSON (plan H5 step 8) that correctness holds, each
+# in every one of its shapes (pass, violation, invalid): the verdict, its counts, the reasons for
+# an invalid verdict, and the violation (null unless the verdict is violation).
+VERDICT_FIELDS = ("verdict", *VERDICT_COUNTS, "invalid_reasons", "violation")
 # The fields of check_bud11's violation, in its violation shape: the window that broke BUD-11a.
 VIOLATION_FIELDS = ("user_id", "start_ns", "end_ns", "excess_units")
 
@@ -172,12 +213,7 @@ FIELDS = (
     ("context", "conformance_floor"),
     # PRF-1: load.
     ("load", "steps"),
-    ("load", "total.planned"),
-    ("load", "total.sent"),
-    ("load", "total.initial"),
-    ("load", "total.duplicates"),
-    ("load", "total.retries_429"),
-    ("load", "total.unsent"),
+    *(("load", f"total.{name}") for name in LOAD_COUNTS),
     ("load", "total.sched_lag_ns"),
     *percentile_fields("load", "total.sched_lag_ns"),
     ("load", "total.got_conn_wait_ns_p99"),
@@ -198,20 +234,7 @@ FIELDS = (
     ("results", "unexpected_errors.total"),
     ("results", "unexpected_errors.steps"),
     ("results", "db_rows"),
-    ("results", "prf2.new_rows"),
-    ("results", "prf2.duplicate_rows_avoided"),
-    ("results", "prf2.quota_rejections"),
-    ("results", "prf2.degraded_admissions"),
-    ("results", "prf2.capacity_refusals"),
-    ("results", "prf2.integrity_failures"),
-    ("results", "prf2.unavailable"),
-    ("results", "prf2.unknown_acquires"),
-    ("results", "prf2.unknown_application_outcomes"),
-    ("results", "prf2.server_failures"),
-    ("results", "prf2.transport_errors"),
-    ("results", "prf2.expired_refunds"),
-    ("results", "prf2.unresolved_refunds"),
-    ("results", "prf2.db_rows"),
+    *(("results", f"prf2.{name}") for name in PRF2_COUNTS),
     # PRF-3: timing.
     *(("timing", f"limiter_ns.{cls}") for cls in LIMITER_CLASSES),
     *(f for cls in LIMITER_CLASSES for f in percentile_fields("timing", f"limiter_ns.{cls}")),
@@ -263,12 +286,7 @@ LIST_FIELDS = (
         "load",
         "steps",
         (
-            "planned",
-            "sent",
-            "initial",
-            "duplicates",
-            "retries_429",
-            "unsent",
+            *LOAD_COUNTS,
             "sched_lag_ns",
             *(f"sched_lag_ns.{p}" for p in PERCENTILES),
             "got_conn_wait_ns_p99",
@@ -313,6 +331,175 @@ LIST_FIELDS = (
         ),
     ),
 )
+# A load step's counts beside LOAD_COUNTS: its schedule entries, 200s and 429s, and unknown
+# outcomes (ERR-9, ERR-16).
+LOAD_STEP_COUNTS = (
+    "scheduled",
+    "status_200",
+    "status_429",
+    "unknown_acquires",
+    "unknown_application_outcomes",
+)
+# The gen.jsonl summary line's counts, as load.summary copies them (§B4).
+GEN_SUMMARY_COUNTS = ("planned", "launched", "unsent", "log_drops", "skipped_no_eligible")
+# The §B9 unexpected-error counts, in results.unexpected_errors.total and in each step: the
+# denominator, the unexpected, their kinds and the 5xx left out.
+UNEXPECTED_COUNTS = (
+    "attempts",
+    "unexpected",
+    "transport_errors",
+    "server_errors",
+    "excluded_service_aborted_after_acquire",
+    "excluded_fault_window",
+)
+# PRF-3's percentile summaries, each with its sample count (count, p50, p95, p99), as paths in
+# timing.
+TIMING_SUMMARIES = (
+    *(f"limiter_ns.{cls}" for cls in LIMITER_CLASSES),
+    "db_ns",
+    "api_total_ns",
+    *(f"refund_ns.{name}" for name in ("all", *REFUND_RESULTS)),
+    *(f"end_to_end_ns.{cls}" for cls in END_TO_END_CLASSES),
+    "rewrite_latency_ns",
+)
+# A capacity step's counts behind its rates and verdict (PRF-10, PRF-11).
+CAPACITY_STEP_COUNTS = (
+    "admitted",
+    "limited_429",
+    "unique_rows",
+    "window_attempts",
+    "window_unexpected",
+    "unsent",
+    "unknown_outcomes",
+)
+# A spike's counts (PRF-6): its window's latency samples, attempts, unexpected errors, planned and
+# unsent entries, and the first attempts before its deadline, finished or outstanding.
+SPIKE_COUNTS = (
+    "window_latency_ns.count",
+    "window_attempts",
+    "window_unexpected",
+    "window_planned",
+    "window_unsent",
+    "planned_before_deadline",
+    "first_attempts_before_deadline",
+    "finished_by_deadline",
+    "not_judged",
+    "outstanding",
+    "outstanding_detail.never_written",
+    "outstanding_detail.ended_after_deadline",
+    "outstanding_detail.no_line",
+)
+# The §B8 evidence values (evidence_validity.checks) that are counts no evidence rule reads in
+# every run: the stop and pre_kill lines listener_drops was summed over (no rule reads them),
+# fixtures_off's /health reads, fixture readings and faults (read for a benchmark run only), and
+# the AOF rewrite windows (read only when the scenario sets forced_aof_rewrites_s).
+EVIDENCE_COUNTS = (
+    "listener_drops.value.stop_lines",
+    "listener_drops.value.pre_kill_lines",
+    "fixtures_off.value.health_reads",
+    "fixtures_off.value.fixtures_on",
+    "fixtures_off.value.clock_not_store",
+    "fixtures_off.value.faults",
+    "rewrite_windows.value.windows",
+)
+# The counts at fixed paths, each an integer from 0 to 2^63 − 1, never a bool or a float (as_int):
+# PRF-1's first-attempt totals, schedule entries, lag sample count and summary line counts; PRF-2's
+# requests, releases, ERR rows, refund results, transport errors, unexpected errors, final row
+# count and prf2 counts; PRF-3's sample counts; PRF-4's sample and /health read counts; the
+# schedule and routing counts; check_bud11's counts and a violation's excess units; a spike's;
+# and EVIDENCE_COUNTS.
+COUNT_FIELDS = (
+    *(("load", f"total.{name}") for name in (*LOAD_COUNTS, "scheduled")),
+    ("load", "total.sched_lag_ns.count"),
+    *(("load", f"summary.{name}") for name in GEN_SUMMARY_COUNTS),
+    ("results", "requests"),
+    ("results", "releases"),
+    *(("results", f"by_err.{row}") for row in ERR_ROWS),
+    *(("results", f"refunds.{result}") for result in REFUND_RESULTS),
+    ("results", "transport_errors.total"),
+    *(("results", f"unexpected_errors.total.{name}") for name in UNEXPECTED_COUNTS),
+    ("results", "db_rows"),
+    *(("results", f"prf2.{name}") for name in PRF2_COUNTS),
+    *(("timing", f"{path}.count") for path in TIMING_SUMMARIES),
+    ("resources", "samples"),
+    ("resources", "health_reads"),
+    ("traffic", "schedule_entries"),
+    ("traffic", "instances"),
+    ("traffic", "instances_used"),
+    ("traffic", "users"),
+    ("traffic", "busiest_user.first_attempts"),
+    *(("correctness", name) for name in VERDICT_COUNTS),
+    ("correctness", "violation.excess_units"),
+    *(("capacity", f"spike.{name}") for name in SPIKE_COUNTS),
+    *(("evidence_validity", f"checks.{path}") for path in EVIDENCE_COUNTS),
+)
+# The counts that are null when the run gives no reading: hitgen's drop counts without its
+# "sending done" line (PRF-8), and the in-flight maximum without a /health read.
+NULLABLE_COUNT_FIELDS = (
+    ("load", "retry_drops"),
+    ("load", "generator_drops"),
+    ("resources", "max_in_flight"),
+)
+# The counts in every element of a list, as COUNT_FIELDS: (section, the list's path, the counts):
+# each load step's, each step's unexpected errors (§B9), each step's API counts, each step's
+# latency sample count, each instance series' reading count, and each capacity step's.
+LIST_COUNT_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("load", "steps", (*LOAD_COUNTS, *LOAD_STEP_COUNTS, "sched_lag_ns.count")),
+    ("results", "unexpected_errors.steps", UNEXPECTED_COUNTS),
+    ("results", "steps", ("requests", "new_rows", "allowed", "limited")),
+    ("timing", "steps", ("latency_ns.count",)),
+    ("resources", "instance_series", ("readings",)),
+    ("capacity", "steps", CAPACITY_STEP_COUNTS),
+)
+# The counts in every member of an object, as COUNT_FIELDS: each process's CPU and RSS reading
+# counts, and each store-state count's reading count; and those that are null without a reading:
+# each store-state count's max and last (PRF-4: tracked keys, live markers, quarantined keys).
+MEMBER_COUNT_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("resources", "processes", ("cpu_readings", "rss_readings")),
+    ("resources", "store_state", ("readings",)),
+)
+NULLABLE_MEMBER_COUNT_FIELDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("resources", "store_state", ("max", "last")),
+)
+# The objects of counts, each member a count (depth 1) or an object of counts (depth 2): decisions
+# by result, request outcomes no ERR row matched, unresolved refunds by reason, attempt outcomes and
+# transport errors by attempt kind, and requests sent to and served by each instance.
+COUNT_OBJECTS = (
+    ("results", "decisions", 1),
+    ("results", "unmatched", 1),
+    ("results", "unresolved_reasons", 1),
+    ("results", "attempt_outcomes", 2),
+    ("results", "transport_errors.by_kind", 2),
+    ("traffic", "requests_per_instance", 1),
+    ("traffic", "served_per_instance", 1),
+)
+# The lists of counts, each element a count: the schedule entries per step.
+COUNT_LISTS = (("traffic", "planned_per_step"),)
+# PRF-4's per-instance series (resources.instance_series) by name, a closed set: the report builder
+# writes only hitapi's /health counts, the /metrics series it follows and each labelled series of
+# the /metrics families it follows (report/build.py HEALTH_COUNTS, METRIC_SERIES, METRIC_FAMILIES;
+# DESIGN §A5.11, §B8). The series whose max and last are counts, null without a reading, as
+# COUNT_FIELDS: hitapi's in-flight requests and drop counts, the store-state gauges, pending
+# refunds, the listener-drop counter, and each labelled series of the cleanup counters (its name up
+# to its labels).
+COUNT_SERIES = (
+    "in_flight",
+    "listener_drops",
+    "log_drops",
+    "rl_listener_drops_total",
+    "rl_live_markers",
+    "rl_pending_refunds",
+    "rl_quarantined_keys",
+    "rl_tracked_buckets",
+)
+COUNT_SERIES_FAMILIES = (
+    "rl_cleanup_entries_total{",
+    "rl_cleanup_passes_total{",
+    "rl_cleanup_stops_total{",
+)
+# The series whose max and last are measurements, not counts: lags, durations in seconds (§A5.8: a
+# fraction) and in µs (§A5.7), which keep only check_keys' presence check, as no check reads them.
+LAG_SERIES = ("rl_cleanup_lag_seconds", "rl_clock_lag_microseconds")
 # The fields every element of a list must hold where the list may be null (no element): PRF-5's
 # faults with their actual start and end (null for a run with no fault).
 NULLABLE_LIST_FIELDS = (("context", "faults", ("cmd", "start_ns", "end_ns")),)
@@ -690,6 +877,92 @@ def check_lag_flags(report: dict[str, object], checks: Checks) -> None:
 # Required keys (T-RPT-1).
 
 
+def check_count(shown: str, count: object, nullable: bool, checks: Checks) -> None:
+    """A count present at shown is an integer from 0 to 2^63 − 1 (as_int: never a bool or a
+    float), or null where nullable; else it fails required_keys."""
+    if count is MISSING or as_int(count) is not None or (nullable and count is None):
+        return
+    want = "null or an integer" if nullable else "an integer"
+    checks.fail("required_keys", f"{shown}: {show(count)}: want {want} from 0 to 2^63 − 1")
+
+
+def count_members(node: object, shown: str, depth: int, checks: Checks) -> list[tuple[str, object]]:
+    """The counts an object of counts holds (depth 1), or an object of such objects (depth 2),
+    each with its path as shown; a level that is no object fails required_keys."""
+    if not isinstance(node, dict):
+        checks.fail("required_keys", f"{shown}: {show(node)}: want an object")
+        return []
+    out: list[tuple[str, object]] = []
+    for member, item in node.items():
+        if depth > 1:
+            out.extend(count_members(item, f"{shown}.{member}", depth - 1, checks))
+        else:
+            out.append((f"{shown}.{member}", item))
+    return out
+
+
+def is_count_series(name: object) -> bool:
+    """Whether an instance series' max and last are counts: its name is one of COUNT_SERIES or a
+    labelled series of COUNT_SERIES_FAMILIES."""
+    return isinstance(name, str) and (
+        name in COUNT_SERIES or name.startswith(COUNT_SERIES_FAMILIES)
+    )
+
+
+def check_series(items: object, checks: Checks) -> None:
+    """Each instance series (resources.instance_series) is one the report builder writes, by its
+    name: a count series, whose max and last are each null or a count (check_count), or a lag
+    (LAG_SERIES), whose are measurements; any other name fails required_keys, the builder's set of
+    names being closed. A missing name, or an element that is no object, fails check_keys'
+    LIST_FIELDS check instead."""
+    for k, item in enumerate(items if isinstance(items, list) else []):
+        shown = f"resources.instance_series[{k}]"
+        name = at(item, "series")
+        if is_count_series(name):
+            for part in ("max", "last"):
+                check_count(f"{shown}.{part}", at(item, part), True, checks)
+        elif name is not MISSING and name not in LAG_SERIES:
+            detail = f"{show(name)}: not a series the report builder writes"
+            checks.fail("required_keys", f"{shown}.series: {detail}")
+
+
+def check_counts(key: str, value: dict[str, object], checks: Checks) -> None:
+    """Every count section key's object value holds (COUNT_FIELDS and the other count tables, and
+    a count series' max and last: check_series), as check_count judges it; an object or list of
+    counts that is none fails required_keys."""
+    for section, path in (*COUNT_FIELDS, *NULLABLE_COUNT_FIELDS):
+        if section == key:
+            nullable = (section, path) in NULLABLE_COUNT_FIELDS
+            check_count(f"{key}.{path}", at(value, path), nullable, checks)
+    for section, path, names in LIST_COUNT_FIELDS:
+        items = at(value, path) if section == key else MISSING
+        for k, item in enumerate(items if isinstance(items, list) else []):
+            for name in names:
+                check_count(f"{key}.{path}[{k}].{name}", at(item, name), False, checks)
+    for section, path, names in (*MEMBER_COUNT_FIELDS, *NULLABLE_MEMBER_COUNT_FIELDS):
+        members = at(value, path) if section == key else MISSING
+        nullable = (section, path, names) in NULLABLE_MEMBER_COUNT_FIELDS
+        for member, item in (members if isinstance(members, dict) else {}).items():
+            for name in names:
+                check_count(f"{key}.{path}.{member}.{name}", at(item, name), nullable, checks)
+    for section, path, depth in COUNT_OBJECTS:
+        node = at(value, path) if section == key else MISSING
+        if node is not MISSING:
+            for shown, count in count_members(node, f"{key}.{path}", depth, checks):
+                check_count(shown, count, False, checks)
+    for section, path in COUNT_LISTS:
+        items = at(value, path) if section == key else MISSING
+        if items is MISSING:
+            continue
+        if not isinstance(items, list):
+            checks.fail("required_keys", f"{key}.{path}: {show(items)}: want a list")
+            continue
+        for k, count in enumerate(items):
+            check_count(f"{key}.{path}[{k}]", count, False, checks)
+    if key == "resources":
+        check_series(at(value, "instance_series"), checks)
+
+
 def check_keys(
     report: dict[str, object],
     objects: list[str],
@@ -699,7 +972,8 @@ def check_keys(
 ) -> None:
     """Each key in present is in report.json; each in objects is an object holding its FIELDS,
     LIST_FIELDS, NULLABLE_LIST_FIELDS, MEMBER_FIELDS and NULLABLE_OBJECT_FIELDS, and a spike
-    run's capacity its SPIKE_FIELDS."""
+    run's capacity its SPIKE_FIELDS, with each count it holds an integer from 0 to 2^63 − 1
+    (check_counts)."""
     for key in present:
         if key not in report:
             checks.fail("required_keys", f"report.json has no {key}")
@@ -725,6 +999,7 @@ def check_keys(
                 for name in names:
                     if at(item, name) is MISSING:
                         checks.fail("required_keys", f"{key}.{path}[{k}].{name}: missing")
+        check_counts(key, value, checks)
         for section, path, names in MEMBER_FIELDS:
             members = at(value, path)
             if section != key or members is MISSING:

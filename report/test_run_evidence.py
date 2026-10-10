@@ -838,6 +838,20 @@ def test_stall_after_deadline_keeps_backlog() -> None:
     }
 
 
+def test_stall_just_after_deadline_keeps_backlog() -> None:
+    """The backlog relief's bound at the decisions' finest step: slow decisions from 0.51 s after
+    the deadline, with every sample's INFO read timing out, give a first stall span starting
+    10 ms after the deadline (70.01 s). It overlaps the window, so met's latency part is relaxed,
+    but not [deadline − 2 s, deadline], so the backlog clause stays asserted: a widening of that
+    bound by 10 ms or more (under the 0.5 s the STALLS cases pin) fails here."""
+    relief = relief_of([(70.51, 74.51, 480 * MS)], EVERY_SAMPLE)
+    stall = relief.latency
+    assert stall is not None and stall.start_ns == DEADLINE_NS + 10 * MS, relief
+    assert relief.backlog is None, relief
+    with pytest.raises(AssertionError, match="backlog not cleared"):
+        check_spike(spike_doc(outstanding=30, p99=500 * MS), POST, relief)
+
+
 def test_stall_at_deadline_relaxes_backlog() -> None:
     """A store stall overlapping [deadline − 2 s, deadline] relaxes the backlog clause and met's
     latency part (both recorded); the rest stays asserted: the window's median latency and its

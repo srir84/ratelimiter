@@ -1,0 +1,138 @@
+# s7-long (HARNESS TRF-S7; DESIGN §A2, §B4, §B5 "Forced rewrites", §B10; IMPLEMENTATION_PLAN H6
+# steps 1 and 2): the long run, a benchmark (bin/bench) with no capacity verdict, three instances:
+# 600 s at 0.7 × S = 70 req/s over new and returning users, 2 % of the allowed requests refused
+# after their acquire (refuse_after_acquire_bp = 200, ERR-15) as the controlled refund population,
+# and forced AOF rewrites at 3 and 7 min (forced_aof_rewrites_s = [180, 420]) under that load. The
+# TRF-S7 review reads tracked state following the recent users and the live refunds, not the total
+# admissions (samples.jsonl: each 1 s tick's rl_tracked_buckets and rl_live_markers of every API
+# and rladmin status's tracked_buckets and live_markers; report.json gives only their max and
+# last), the p99 inside the rewrite windows (timing.rewrite_p99_ns and rewrite_windows) with at
+# least one window observed (evidence_validity rewrite_windows), and gradual drift (each step's p99
+# and its delta to the baseline step).
+# S (plan H6 step 2: s1-ramp's sustainable_capacity rounded down to a multiple of 100) = 100 req/s:
+# the s1-ramp limiter report (runs/20261010-132845-s1-ramp-1, valid) has sustainable_capacity null.
+# Its step 0 (100 req/s offered, 100.2 achieved, 0 unexpected errors) failed only on p99 (503.9 ms
+# against the frozen threshold 61.0 ms) because of a disk flush stall 28-30 s into the run: every
+# slow request (251 over 100 ms) falls in that window and is dominated by limiter (store) time of up
+# to 550 ms, the F_FULLFSYNC behaviour under appendfsync always that H5 recorded as an environment
+# fact; then stop_early ended the run. Rounding null down is undefined, so the orchestrator set
+# S = 100 req/s, the lowest S1 rung: it is also s1-ramp-1api's sustainable_capacity (100.2,
+# runs/20261010-133338-s1-ramp-1api-1) rounded down to a multiple of 100, and S = 0 would give this
+# file and s4-spike.toml no load and divide by zero in the refuse_after_acquire_bp formula below.
+# Plan choices, each with its reason:
+# - Twelve 50 s steps of 70 req/s make the 600 s: the report gives latency per step (timing.steps,
+#   baseline.steps), so twelve steps show drift across the run where one 600 s step would give one
+#   p99. 50 s puts each forced rewrite inside a step's observation window (§B9 leaves each step's
+#   first 5 s out): 180 s in step 3's [155 s, 200 s), 420 s in step 8's [405 s, 450 s); 60 s steps
+#   would start steps 3 and 7 at the rewrites.
+# - users.count = 10000 with Zipf 1.1, as s1-ramp.toml (S is that workload's rate), in two
+#   cohorts: the returning cohort u000000-u004999 (the Zipf head) is active in [0, 200 s) and back
+#   from 400 s; the new cohort u005000-u009999 first appears at 200 s and stays. The seed-1
+#   schedule, built in memory as hitgen builds it (no run), has 42,004 entries and none skipped
+#   (the windows meet at 200 s, so every arrival has an eligible user). Counting at a time t the
+#   users with an arrival in [t − 62 s, t], about the buckets tracked then (receipt lifetime 60 s,
+#   plus refill and the cleanup pass), it gives 1,065 at 199 s (returning users), 2,844-2,892 from
+#   262 s to 399 s (new users, whose weights at ranks 5,001-10,000 are nearly flat), 2,451 at
+#   430 s, and 1,193 at 470 s and 1,168 at 599 s (the returning users back, the new ones down to
+#   about 4 % of the arrivals), while admissions grow to about 41,700 and the users seen to 7,789.
+# - The policy is harness.toml's (10 tokens/s, capacity 20; receipt_lifetime_ns 60 s,
+#   cleanup_interval_ns 5 s): a bucket is due once full (2 s of refill) and past its latest
+#   receipt's expiry (its last allowed acquire + 60 s), and a refund's marker expires with its
+#   receipt. The returning cohort's last arrivals come before 200 s and their 429 retries by about
+#   202.2 s (only u000000, at about 11 req/s, is above the rate; at most 2 extra, each after
+#   max(retry_after_ms, Retry-After) = 1 s plus ≤ 50 ms jitter), so its buckets are due by about
+#   262.2 s and removed by the next pass (every 4.5-5 s) by about 268 s, over 130 s before it
+#   returns: tracked state falls with the departure and is made again on the return (BUD-11 for the
+#   returning users is the report's correctness).
+# - refuse_after_acquire_bp = min(200, floor(1,500,000 / (0.7 × S))) = min(200, 21,428) = 200 (plan
+#   H6 step 1): 2 % of about 69 allowed req/s is about 1.4 refunds/s in all, about 0.5/s per
+#   instance, within §B4's and §B10's 50/s per instance and 5 % failure load (preflight's refusal
+#   rate check: 200 / 10,000 × 70 = 1.4/s against 50/s × 3). The seed-1 schedule has 834 entries
+#   whose IDs select a refusal (1.99 %), so about 830 refunds over the run, with roughly 85-90
+#   markers live at a time (each until its receipt's expiry, 60 s after its acquire, and the next
+#   cleanup pass).
+# - forced_aof_rewrites_s = [180, 420] (§B4, §B5; DESIGN §A2: production values plus forced
+#   rewrites at 3 and 7 min) is all the file needs: for a scenario with forced rewrites the
+#   orchestrator starts the store without --auto-aof-rewrite-percentage 0 (runlog.StoreArgs; run.go
+#   storeArgs), so deploy/valkey-durable.conf's production auto-aof-rewrite-percentage 100 and
+#   auto-aof-rewrite-min-size 1gb apply (no automatic rewrite in 600 s at 70 req/s), and it runs
+#   BGREWRITEAOF as rl_ops at hitgen's t0 + 180 s and + 420 s (schedule.go runRewrites), recording
+#   each window's start, end and status in context.json rewrites. The first comes 20 s before the
+#   returning cohort leaves; the second 20 s after it returns, with both cohorts' buckets tracked.
+# - verdict "none": TRF-S7's review reads tracked state, rewrite windows and drift, not a capacity
+#   or spike verdict. No [[faults]] (a benchmark has none, HAR-24).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s7-long"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "none"
+forced_aof_rewrites_s = [180, 420]
+
+[api]
+refuse_after_acquire_bp = 200
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[[steps]]
+rate_per_s = 70
+duration_s = 50
+
+[users]
+count = 10000
+zipf_s = 1.1
+
+# The returning cohort: active in [0, 200 s), back from 400 s.
+[[cohorts]]
+users = [0, 4999]
+start_s = 0
+stop_s = 200
+revisit_s = 400
+
+# The new cohort: first active at 200 s, then to the end (no stop_s).
+[[cohorts]]
+users = [5000, 9999]
+start_s = 200

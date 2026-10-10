@@ -1,0 +1,58 @@
+{
+  "scenario": "s2-users-100",
+  "seed": 1,
+  "baseline_run_id": "20261010-142421-s2-users-100-1",
+  "schedule_sha256": "9788be47a4623141617357302a7daa79fce242988a055b0355d90fa495d69ac9",
+  "created_ns": 1791642473568532000,
+  "definitions": {
+    "latency_population": "initial attempts (attempt 1) that received an HTTP response; end-to-end latency from gen.jsonl",
+    "error_denominator": "initial attempts (attempt 1)",
+    "unexpected_errors": "5xx other than service_aborted_after_acquire outside every fault window [start_ns, end_ns + P], plus transport errors and timeouts",
+    "observation_window": "each load step minus its first 5 s, by planned_ns",
+    "observation_skip_ns": 5000000000,
+    "allowed_lag": "step p99 of sent_ns \u2212 planned_ns \u2264 5 ms, an unwritten first attempt above any bound; otherwise the step is generator-limited and gets no thresholds",
+    "allowed_lag_ns": 5000000,
+    "latency_threshold": "the baseline step's window p99 + 50 ms",
+    "latency_allowance_ns": 50000000,
+    "error_threshold": "max(0.1 %, 2 \u00d7 the baseline step's window unexpected-error rate)",
+    "error_rate_floor": 0.001,
+    "missing_baseline_step": "a step that did not run in full with planned entries, or has no latency population, gets no thresholds (missing_steps)",
+    "spike_recovery": "deadline = the spike step's end + 30 s; window = [deadline, deadline + 60 s], judged against the post-spike step's thresholds",
+    "spike_recovery_ns": 30000000000,
+    "spike_window_ns": 60000000000
+  },
+  "steps": [
+    {
+      "step": 0,
+      "generator_limited": false,
+      "latency_threshold_ns": 60745958,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 10745958,
+      "baseline_latency_count": 27504,
+      "baseline_attempts": 27504,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 1,
+      "generator_limited": false,
+      "latency_threshold_ns": 58236417,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 8236417,
+      "baseline_latency_count": 852,
+      "baseline_attempts": 852,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 2,
+      "generator_limited": false,
+      "latency_threshold_ns": 60395792,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 10395792,
+      "baseline_latency_count": 27595,
+      "baseline_attempts": 27595,
+      "baseline_unexpected": 0
+    }
+  ],
+  "missing_steps": [],
+  "spike": null
+}

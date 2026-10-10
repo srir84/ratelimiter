@@ -1,0 +1,73 @@
+{
+  "scenarios": {
+    "s1-ramp": {
+      "baseline": "20261010-132426-s1-ramp-1",
+      "limiter": "20261010-132845-s1-ramp-1"
+    },
+    "s1-ramp-1api": {
+      "baseline": "20261010-132920-s1-ramp-1api-1",
+      "limiter": "20261010-133338-s1-ramp-1api-1"
+    },
+    "s2-users-100": {
+      "baseline": "20261010-142421-s2-users-100-1",
+      "limiter": "20261010-142754-s2-users-100-1"
+    },
+    "s2-users-1000": {
+      "baseline": "20261010-143130-s2-users-1000-1",
+      "limiter": "20261010-143503-s2-users-1000-1"
+    },
+    "s2-users-10000": {
+      "baseline": "20261010-143840-s2-users-10000-1",
+      "limiter": "20261010-144213-s2-users-10000-1"
+    },
+    "s3-busy-user": {
+      "baseline": "20261010-144549-s3-busy-user-1",
+      "limiter": "20261010-144753-s3-busy-user-1"
+    },
+    "s4-spike": {
+      "baseline": "20261010-144959-s4-spike-1",
+      "limiter": "20261010-145241-s4-spike-1"
+    },
+    "s5-retry": {
+      "baseline": "20261010-145524-s5-retry-1",
+      "limiter": "20261010-145726-s5-retry-1"
+    },
+    "s6-down-closed": {
+      "baseline": null,
+      "limiter": "20261010-152416-s6-down-closed-1"
+    },
+    "s6-down-open": {
+      "baseline": null,
+      "limiter": "20261010-152621-s6-down-open-1"
+    },
+    "s6-pause-closed": {
+      "baseline": null,
+      "limiter": "20261010-152826-s6-pause-closed-1"
+    },
+    "s6-pause-open": {
+      "baseline": null,
+      "limiter": "20261010-153032-s6-pause-open-1"
+    },
+    "s6-state-closed": {
+      "baseline": null,
+      "limiter": "20261010-153236-s6-state-closed-1"
+    },
+    "s6-state-open": {
+      "baseline": null,
+      "limiter": "20261010-154342-s6-state-open-1"
+    },
+    "s6-capacity-closed": {
+      "baseline": null,
+      "limiter": "20261010-151937-s6-capacity-closed-1"
+    },
+    "s6-capacity-open": {
+      "baseline": null,
+      "limiter": "20261010-152157-s6-capacity-open-1"
+    },
+    "s7-long": {
+      "baseline": "20261010-145931-s7-long-1",
+      "limiter": "20261010-150934-s7-long-1"
+    }
+  },
+  "s3-busy-user-rerun": "20261010-154603-s3-busy-user-1"
+}

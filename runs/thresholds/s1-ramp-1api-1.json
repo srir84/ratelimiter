@@ -1,0 +1,108 @@
+{
+  "scenario": "s1-ramp-1api",
+  "seed": 1,
+  "baseline_run_id": "20261010-132920-s1-ramp-1api-1",
+  "schedule_sha256": "f324f3262fbc0222b117e949101b5e94e43cf71604ce9e4c08fbec8258b64a95",
+  "created_ns": 1791639217964454000,
+  "definitions": {
+    "latency_population": "initial attempts (attempt 1) that received an HTTP response; end-to-end latency from gen.jsonl",
+    "error_denominator": "initial attempts (attempt 1)",
+    "unexpected_errors": "5xx other than service_aborted_after_acquire outside every fault window [start_ns, end_ns + P], plus transport errors and timeouts",
+    "observation_window": "each load step minus its first 5 s, by planned_ns",
+    "observation_skip_ns": 5000000000,
+    "allowed_lag": "step p99 of sent_ns \u2212 planned_ns \u2264 5 ms, an unwritten first attempt above any bound; otherwise the step is generator-limited and gets no thresholds",
+    "allowed_lag_ns": 5000000,
+    "latency_threshold": "the baseline step's window p99 + 50 ms",
+    "latency_allowance_ns": 50000000,
+    "error_threshold": "max(0.1 %, 2 \u00d7 the baseline step's window unexpected-error rate)",
+    "error_rate_floor": 0.001,
+    "missing_baseline_step": "a step that did not run in full with planned entries, or has no latency population, gets no thresholds (missing_steps)",
+    "spike_recovery": "deadline = the spike step's end + 30 s; window = [deadline, deadline + 60 s], judged against the post-spike step's thresholds",
+    "spike_recovery_ns": 30000000000,
+    "spike_window_ns": 60000000000
+  },
+  "steps": [
+    {
+      "step": 0,
+      "generator_limited": false,
+      "latency_threshold_ns": 59893083,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 9893083,
+      "baseline_latency_count": 2515,
+      "baseline_attempts": 2515,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 1,
+      "generator_limited": false,
+      "latency_threshold_ns": 63657042,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 13657042,
+      "baseline_latency_count": 4992,
+      "baseline_attempts": 4992,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 2,
+      "generator_limited": false,
+      "latency_threshold_ns": 59737041,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 9737041,
+      "baseline_latency_count": 10009,
+      "baseline_attempts": 10009,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 3,
+      "generator_limited": false,
+      "latency_threshold_ns": 66963042,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 16963042,
+      "baseline_latency_count": 20000,
+      "baseline_attempts": 20000,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 4,
+      "generator_limited": false,
+      "latency_threshold_ns": 57250625,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 7250625,
+      "baseline_latency_count": 39847,
+      "baseline_attempts": 39847,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 5,
+      "generator_limited": false,
+      "latency_threshold_ns": 67306667,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 17306667,
+      "baseline_latency_count": 79634,
+      "baseline_attempts": 79634,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 6,
+      "generator_limited": false,
+      "latency_threshold_ns": 55883875,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 5883875,
+      "baseline_latency_count": 159640,
+      "baseline_attempts": 159640,
+      "baseline_unexpected": 0
+    },
+    {
+      "step": 7,
+      "generator_limited": false,
+      "latency_threshold_ns": 55616084,
+      "error_rate_threshold": 0.001,
+      "baseline_p99_ns": 5616084,
+      "baseline_latency_count": 250318,
+      "baseline_attempts": 250318,
+      "baseline_unexpected": 0
+    }
+  ],
+  "missing_steps": [],
+  "spike": null
+}

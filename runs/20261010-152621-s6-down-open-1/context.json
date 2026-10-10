@@ -1,0 +1,666 @@
+{
+  "run_id": "20261010-152621-s6-down-open-1",
+  "epoch_id": "993ab59eb3fba60eca3766f9d47f6123",
+  "run_kind": "test",
+  "run_label": "test-build scenario, not a benchmark",
+  "baseline": false,
+  "outcome": "ok",
+  "start_ns": 1791645981939680000,
+  "end_ns": 1791646104538924000,
+  "scenario": {
+    "name": "s6-down-open",
+    "path": "scenarios/s6-down-open.toml",
+    "sha256": "162a7a5045ae306bc24829f2c21c213623fa13e481254597335dbc05ffb92142"
+  },
+  "seed": 1,
+  "instances": 3,
+  "hardware": {
+    "model": "Mac15,9",
+    "ncpu": 16,
+    "memsize_bytes": 137438953472
+  },
+  "os": {
+    "BuildVersion": "25G83",
+    "ProductName": "macOS",
+    "ProductVersion": "26.6.2"
+  },
+  "versions": {
+    "go": "go1.27.1",
+    "valkey": "Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=1af85cd1d1bb3237",
+    "valkey_path": "/opt/homebrew/bin/valkey-server",
+    "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
+  },
+  "store_settings": {
+    "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-152621-s6-down-open-1/store/acl.conf",
+    "aof-use-rdb-preamble": "yes",
+    "appendfsync": "always",
+    "appendonly": "yes",
+    "auto-aof-rewrite-min-size": "1073741824",
+    "auto-aof-rewrite-percentage": "0",
+    "bind": "127.0.0.1",
+    "maxclients": "4096",
+    "maxmemory": "536870912",
+    "maxmemory-policy": "noeviction",
+    "no-appendfsync-on-rewrite": "no",
+    "port": "6390",
+    "protected-mode": "yes",
+    "save": ""
+  },
+  "postgres_settings": {
+    "fsync": "on",
+    "max_connections": "300",
+    "statement_timeout": "2500ms",
+    "synchronous_commit": "on"
+  },
+  "conformance": {
+    "crash": [
+      {
+        "acked": 4716,
+        "lost": 0,
+        "in_flight": 32,
+        "kept_unacked": 17
+      },
+      {
+        "acked": 4982,
+        "lost": 0,
+        "in_flight": 32,
+        "kept_unacked": 14
+      },
+      {
+        "acked": 3279,
+        "lost": 0,
+        "in_flight": 32,
+        "kept_unacked": 11
+      }
+    ],
+    "eligible": true,
+    "fsync": {
+      "durable_script_p50_us": 6460.5,
+      "f_fullfsync_floor_p50_us": 5667.9,
+      "plain_fsync_p50_us": 41.6
+    },
+    "generated_at": "2026-10-05T16:54:35Z",
+    "go": "go1.27.1",
+    "os": "darwin/arm64",
+    "passed": true,
+    "product": "Valkey",
+    "recommended_store_conns": 16,
+    "reload_ms_a7": 468.7,
+    "row13": [
+      {
+        "conns": 2,
+        "depth": 1,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 161.7,
+        "p50_us": 12789.1,
+        "p99_us": 16013.8,
+        "ops": 485
+      },
+      {
+        "conns": 2,
+        "depth": 16,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 2549.3,
+        "p50_us": 12866,
+        "p99_us": 17634.8,
+        "ops": 7648
+      },
+      {
+        "conns": 2,
+        "depth": 64,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 9514.7,
+        "p50_us": 13786.9,
+        "p99_us": 17045.8,
+        "ops": 28544
+      },
+      {
+        "conns": 4,
+        "depth": 1,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 323.7,
+        "p50_us": 12232.2,
+        "p99_us": 16004.5,
+        "ops": 971
+      },
+      {
+        "conns": 4,
+        "depth": 16,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 1898.7,
+        "p50_us": 12942.5,
+        "p99_us": 463328.4,
+        "ops": 5696
+      },
+      {
+        "conns": 4,
+        "depth": 64,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 18453.3,
+        "p50_us": 13980.8,
+        "p99_us": 17923.8,
+        "ops": 55360
+      },
+      {
+        "conns": 8,
+        "depth": 1,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 640,
+        "p50_us": 12750.1,
+        "p99_us": 16603.6,
+        "ops": 1920
+      },
+      {
+        "conns": 8,
+        "depth": 16,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 9386.7,
+        "p50_us": 13821.9,
+        "p99_us": 17747.1,
+        "ops": 28160
+      },
+      {
+        "conns": 8,
+        "depth": 64,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 32448,
+        "p50_us": 15927.6,
+        "p99_us": 19109.6,
+        "ops": 97344
+      },
+      {
+        "conns": 16,
+        "depth": 1,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 1281.7,
+        "p50_us": 12758.2,
+        "p99_us": 16881.6,
+        "ops": 3845
+      },
+      {
+        "conns": 16,
+        "depth": 16,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 517.3,
+        "p50_us": 508771.4,
+        "p99_us": 530600.4,
+        "ops": 1552
+      },
+      {
+        "conns": 16,
+        "depth": 64,
+        "size": "small",
+        "cmd_bytes": 103,
+        "ops_per_s": 31445.3,
+        "p50_us": 31420,
+        "p99_us": 61230.8,
+        "ops": 94336
+      },
+      {
+        "conns": 2,
+        "depth": 1,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 93,
+        "p50_us": 22394,
+        "p99_us": 54675.4,
+        "ops": 279
+      },
+      {
+        "conns": 2,
+        "depth": 16,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 1664,
+        "p50_us": 19317.3,
+        "p99_us": 23440.8,
+        "ops": 4992
+      },
+      {
+        "conns": 2,
+        "depth": 64,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 3242.7,
+        "p50_us": 39107.3,
+        "p99_us": 44113.4,
+        "ops": 9728,
+        "samples": [
+          {
+            "ops_per_s": 3242.7,
+            "p50_us": 39107.3,
+            "p99_us": 44113.4,
+            "ops": 9728
+          },
+          {
+            "ops_per_s": 3242.7,
+            "p50_us": 39034.8,
+            "p99_us": 44834.3,
+            "ops": 9728
+          },
+          {
+            "ops_per_s": 3157.3,
+            "p50_us": 40180.7,
+            "p99_us": 47179.4,
+            "ops": 9472
+          }
+        ]
+      },
+      {
+        "conns": 4,
+        "depth": 1,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 315.7,
+        "p50_us": 12842.8,
+        "p99_us": 23946.7,
+        "ops": 947
+      },
+      {
+        "conns": 4,
+        "depth": 16,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 1685.3,
+        "p50_us": 20234.8,
+        "p99_us": 768276,
+        "ops": 5056
+      },
+      {
+        "conns": 4,
+        "depth": 64,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 6144,
+        "p50_us": 42006.3,
+        "p99_us": 47831.8,
+        "ops": 18432,
+        "samples": [
+          {
+            "ops_per_s": 6400,
+            "p50_us": 40046.3,
+            "p99_us": 46061.8,
+            "ops": 19200
+          },
+          {
+            "ops_per_s": 6144,
+            "p50_us": 42006.3,
+            "p99_us": 47831.8,
+            "ops": 18432
+          },
+          {
+            "ops_per_s": 192,
+            "p50_us": 1383685.6,
+            "p99_us": 1432940.2,
+            "ops": 576
+          }
+        ]
+      },
+      {
+        "conns": 8,
+        "depth": 1,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 649,
+        "p50_us": 12106.3,
+        "p99_us": 17120.1,
+        "ops": 1947
+      },
+      {
+        "conns": 8,
+        "depth": 16,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 6314.7,
+        "p50_us": 20396.8,
+        "p99_us": 25607.4,
+        "ops": 18944
+      },
+      {
+        "conns": 8,
+        "depth": 64,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 11434.7,
+        "p50_us": 45407.2,
+        "p99_us": 51959.4,
+        "ops": 34304,
+        "samples": [
+          {
+            "ops_per_s": 11093.3,
+            "p50_us": 46036,
+            "p99_us": 52877,
+            "ops": 33280
+          },
+          {
+            "ops_per_s": 11434.7,
+            "p50_us": 45407.2,
+            "p99_us": 51959.4,
+            "ops": 34304
+          },
+          {
+            "ops_per_s": 11434.7,
+            "p50_us": 45746.6,
+            "p99_us": 51687.3,
+            "ops": 34304
+          }
+        ]
+      },
+      {
+        "conns": 16,
+        "depth": 1,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 1254.3,
+        "p50_us": 12946.9,
+        "p99_us": 16894.7,
+        "ops": 3763
+      },
+      {
+        "conns": 16,
+        "depth": 16,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 1984,
+        "p50_us": 21427.9,
+        "p99_us": 765305.3,
+        "ops": 5952
+      },
+      {
+        "conns": 16,
+        "depth": 64,
+        "size": "max",
+        "cmd_bytes": 1505,
+        "ops_per_s": 20138.7,
+        "p50_us": 50788.9,
+        "p99_us": 56848.5,
+        "ops": 60416,
+        "samples": [
+          {
+            "ops_per_s": 20821.3,
+            "p50_us": 49100.7,
+            "p99_us": 66090,
+            "ops": 62464
+          },
+          {
+            "ops_per_s": 20138.7,
+            "p50_us": 50788.9,
+            "p99_us": 56848.5,
+            "ops": 60416
+          },
+          {
+            "ops_per_s": 19797.3,
+            "p50_us": 51887.7,
+            "p99_us": 58964.4,
+            "ops": 59392
+          }
+        ]
+      }
+    ],
+    "row14": {
+      "idle_p50_us": 49.4,
+      "loaded_p50_us": 12994,
+      "writers": 16
+    },
+    "row9": [
+      {
+        "clients": 50,
+        "appendfsync": "always",
+        "ops_per_s": 3641.7,
+        "p50_us": 13927.9,
+        "p99_us": 20129.8,
+        "ops": 10925
+      },
+      {
+        "clients": 600,
+        "appendfsync": "always",
+        "ops_per_s": 36418.7,
+        "p50_us": 17220.8,
+        "p99_us": 22973.2,
+        "ops": 109256
+      },
+      {
+        "clients": 50,
+        "appendfsync": "everysec",
+        "ops_per_s": 96507.3,
+        "p50_us": 512.8,
+        "p99_us": 823.7,
+        "ops": 289522
+      }
+    ],
+    "scan_calls_200k": 200,
+    "store_bin": "/opt/homebrew/bin/valkey-server",
+    "store_version": "9.1.2"
+  },
+  "settings": {
+    "api": {
+      "db_dsn": "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500\u0026pool_max_conns=64",
+      "limiter_enabled": true,
+      "max_in_flight": 512,
+      "refuse_after_acquire_bp": 300
+    },
+    "instance": {
+      "margin_ns": 1000000000,
+      "max_held_receipts": 1152,
+      "max_pending_refunds": 1152,
+      "max_release_delay_ns": 5000000000,
+      "refund_workers": 128
+    },
+    "policy": {
+      "capacity": 20,
+      "cleanup_interval_ns": 5000000000,
+      "clock_source": "store",
+      "failure_mode": "open",
+      "max_live_markers": 50000,
+      "max_markers_per_key": 1000,
+      "max_tracked_buckets": 100000,
+      "outage_tolerance_ns": 5000000000,
+      "rate_period_ns": 1000000000,
+      "rate_tokens": 10,
+      "receipt_lifetime_ns": 60000000000,
+      "refund_deadline_ns": 30000000000
+    },
+    "store": {
+      "addr": "127.0.0.1:6390"
+    }
+  },
+  "instance_configs": null,
+  "controlled_clock_ns": null,
+  "schedule_sha256": "b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45",
+  "thresholds_sha256": null,
+  "faults": [
+    {
+      "at_s": 10,
+      "cmd": "{\"target\":\"store\",\"mode\":\"drop_reply\",\"match\":\"acquire\",\"count\":5}",
+      "instance": 1,
+      "start_ns": 1791645992437901000,
+      "end_ns": 1791645992441342000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 1,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 20,
+      "cmd": "{\"target\":\"store\",\"mode\":\"drop_reply\",\"match\":\"refund\",\"count\":5}",
+      "instance": 2,
+      "start_ns": 1791646002437628000,
+      "end_ns": 1791646002438751000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 2,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 30,
+      "cmd": "{\"target\":\"db\",\"mode\":\"fail_before\",\"count\":5}",
+      "instance": 3,
+      "start_ns": 1791646012437915000,
+      "end_ns": 1791646012438758000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 3,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 35,
+      "cmd": "{\"target\":\"db\",\"mode\":\"fail_after_commit\",\"count\":5}",
+      "instance": 1,
+      "start_ns": 1791646017437943000,
+      "end_ns": 1791646017439162000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 1,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 40,
+      "cmd": "{\"target\":\"db\",\"mode\":\"lose_commit_reply\",\"count\":5}",
+      "instance": 2,
+      "start_ns": 1791646022437912000,
+      "end_ns": 1791646022439329000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 2,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 50,
+      "cmd": "{\"target\":\"signer\",\"mode\":\"fail\",\"count\":5}",
+      "instance": 3,
+      "start_ns": 1791646032437739000,
+      "end_ns": 1791646032439099000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": [
+        {
+          "instance": 3,
+          "status": 200
+        }
+      ]
+    },
+    {
+      "at_s": 60,
+      "cmd": "faultctl store down 4s",
+      "instance": null,
+      "start_ns": 1791646042437626000,
+      "end_ns": 1791646046595807000,
+      "outage_start_ns": 1791646042571333000,
+      "outage_ns": 4023858250,
+      "targets": []
+    },
+    {
+      "at_s": 85,
+      "cmd": "faultctl api kill 2 --restart",
+      "instance": 2,
+      "start_ns": 1791646067440233000,
+      "end_ns": 1791646067586689000,
+      "outage_start_ns": null,
+      "outage_ns": null,
+      "targets": []
+    }
+  ],
+  "rewrites": [],
+  "children": [
+    {
+      "name": "valkey-server",
+      "role": "valkey-server",
+      "pid": 57697,
+      "exit": "exit 0",
+      "exited_before_stop": false,
+      "grace_ns": 0,
+      "killed": false,
+      "fault": "faultctl store down 4s"
+    },
+    {
+      "name": "hitapi-2",
+      "role": "hitapi",
+      "instance": 2,
+      "pid": 57703,
+      "exit": "signal: killed",
+      "exited_before_stop": false,
+      "grace_ns": 0,
+      "killed": false,
+      "fault": "faultctl api kill 2 --restart"
+    },
+    {
+      "name": "hitgen",
+      "role": "hitgen",
+      "pid": 57706,
+      "exit": "exit 0",
+      "exited_before_stop": true,
+      "grace_ns": 35000000000,
+      "killed": false
+    },
+    {
+      "name": "hitapi-1",
+      "role": "hitapi",
+      "instance": 1,
+      "pid": 57702,
+      "exit": "exit 0",
+      "exited_before_stop": false,
+      "grace_ns": 45000000000,
+      "killed": false
+    },
+    {
+      "name": "hitapi-2",
+      "role": "hitapi",
+      "instance": 2,
+      "pid": 58052,
+      "exit": "exit 0",
+      "exited_before_stop": false,
+      "grace_ns": 45000000000,
+      "killed": false
+    },
+    {
+      "name": "hitapi-3",
+      "role": "hitapi",
+      "instance": 3,
+      "pid": 57704,
+      "exit": "exit 0",
+      "exited_before_stop": false,
+      "grace_ns": 45000000000,
+      "killed": false
+    },
+    {
+      "name": "sampler",
+      "role": "sampler",
+      "pid": 57705,
+      "exit": "exit 0",
+      "exited_before_stop": false,
+      "grace_ns": 10000000000,
+      "killed": false
+    }
+  ]
+}

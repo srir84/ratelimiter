@@ -1,0 +1,32 @@
+# s5-retry (HARNESS TRF-S5, TRF-5; DESIGN §B4 [retries], §B5; IMPLEMENTATION_PLAN H6 step 1): retry
+# pressure, a benchmark (bin/bench) with no capacity verdict, three instances: 200 req/s over
+# 10 users for 120 s, with the 429-only retry policy at its TRF-5 bounds ([retries] max_extra = 2,
+# jitter_max_ms = 50). The report shows the extra offered load: retries only after a 429, with the
+# same IDs, each waiting at least the hint, at most 2 extra, counted apart from the initial
+# attempts.
+# Plan choices, each with its reason:
+# - The policy is harness.toml's (10 tokens/s, capacity 20 per user), so the load makes 429s: Zipf
+#   1.1 (the default) over 10 users offers u000000-u000005 about 75, 35, 22, 16, 13 and 10 req/s,
+#   above the rate, about 110 req/s of initial attempts beyond what the buckets allow; each 429 then
+#   gets up to 2 retries.
+# - No [[faults]] (a benchmark has none, HAR-24), no refunds (refuse_after_acquire_bp 0) and no
+#   forced_aof_rewrites_s, so the store runs with auto-aof-rewrite-percentage 0 (DESIGN §A2;
+#   runlog.StoreArgs).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s5-retry"
+seed = 1
+run_kind = "bench"
+instances = 3
+
+[[steps]]
+rate_per_s = 200
+duration_s = 120
+
+[users]
+count = 10
+zipf_s = 1.1
+
+[retries]
+max_extra = 2
+jitter_max_ms = 50

@@ -1168,14 +1168,18 @@ OUT_OF_RANGE: list[tuple[str, Callable[[str], str] | tuple[str, object], set[str
     (
         "a count beyond a float's range",
         ("results.unexpected_errors.steps.0.unexpected", 10**400),
-        {"capacity_verdicts"},
+        {"capacity_verdicts", "required_keys"},
     ),
     (
         "a spike window count beyond a float's range",
         ("capacity.spike.window_unexpected", 10**400),
-        {"spike_met"},
+        {"spike_met", "required_keys"},
     ),
-    ("a negative count", ("results.unexpected_errors.steps.0.attempts", -3), {"capacity_verdicts"}),
+    (
+        "a negative count",
+        ("results.unexpected_errors.steps.0.attempts", -3),
+        {"capacity_verdicts", "required_keys"},
+    ),
     (
         "a negative outage",
         (f"{EVIDENCE}.outage.value.max_outage_ns", -1),
@@ -1199,7 +1203,8 @@ def test_numbers_out_of_range(
     checks: set[str],
 ) -> None:
     """Integers are read from 0 to 2^63 − 1 and floats finite: a value out of range fails the
-    check that reads it (never a traceback), and 1e999 is no number at all."""
+    check that reads it (never a traceback), a count required_keys too, and 1e999 is no number at
+    all."""
     runs = valid_runs(tmp_path)
     if isinstance(change, tuple):
         edit_report(runs.run, *change)
@@ -1211,6 +1216,519 @@ def test_numbers_out_of_range(
     code, lines = run_validate(runs.run)
     assert code == 1, case
     assert failed(lines) == checks, (case, lines)
+
+
+# PRF-1's first-attempt counts, in load.total and in each load step.
+LOAD_COUNTS = ("planned", "sent", "initial", "duplicates", "retries_429", "unsent")
+# The §B9 unexpected-error counts, in results.unexpected_errors.total and in each step.
+UNEXPECTED = (
+    "attempts",
+    "unexpected",
+    "transport_errors",
+    "server_errors",
+    "excluded_service_aborted_after_acquire",
+    "excluded_fault_window",
+)
+REFUND_RESULTS = ("applied", "already_applied", "receipt_expired", "receipt_invalid", "unresolved")
+STORE_STATE = ("tracked_buckets", "live_markers", "quarantined_keys")
+# The §B8 evidence counts no evidence rule reads in every run: the stop and pre_kill lines
+# listener_drops was summed over (no rule reads them), fixtures_off's /health reads, fixture
+# readings and faults (read for a benchmark run only), and the AOF rewrite windows (read only when
+# the scenario sets forced_aof_rewrites_s).
+EVIDENCE_COUNTS = tuple(
+    f"evidence_validity.checks.{path}"
+    for path in (
+        "listener_drops.value.stop_lines",
+        "listener_drops.value.pre_kill_lines",
+        "fixtures_off.value.health_reads",
+        "fixtures_off.value.fixtures_on",
+        "fixtures_off.value.clock_not_store",
+        "fixtures_off.value.faults",
+        "rewrite_windows.value.windows",
+    )
+)
+# The §B8 evidence counts a rule reads in every run, which the count check leaves to it: (the
+# count, the evidence check whose rule reads it).
+EVIDENCE_RULE_COUNTS = (
+    ("log_drops.value", "log_drops"),
+    ("listener_drops.value.sum", "listener_drops"),
+    ("listener_drops.value.pre_kill_unread", "listener_drops"),
+    ("listener_drops.value.segments_without_count", "listener_drops"),
+    ("outage.value.unmeasured", "outage"),
+    ("outage_segments.value", "outage_segments"),
+    ("gen_summary.value", "gen_summary"),
+)
+# Every count in report.json (HARNESS PRF-1…PRF-5, the schedule and routing, check_bud11's verdict,
+# the capacity steps and spike), each as a path of the valid spike run (a number is a list index
+# where the node is a list, else a member name such as an instance's): each must be an integer,
+# never a bool or a float. A path the run lacks (a member of an empty object, a field of a null
+# one) is created to check it.
+COUNTS = (
+    # PRF-1: planned vs sent, retries, scheduling-lag samples; per step; hitgen's summary line.
+    *(f"load.total.{name}" for name in (*LOAD_COUNTS, "scheduled")),
+    "load.total.sched_lag_ns.count",
+    *(
+        f"load.steps.0.{name}"
+        for name in (
+            *LOAD_COUNTS,
+            "scheduled",
+            "status_200",
+            "status_429",
+            "unknown_acquires",
+            "unknown_application_outcomes",
+        )
+    ),
+    "load.steps.0.sched_lag_ns.count",
+    *(
+        f"load.summary.{name}"
+        for name in ("planned", "launched", "unsent", "log_drops", "skipped_no_eligible")
+    ),
+    # PRF-2: the results by kind and attempt outcome, transport errors, refunds, DB rows.
+    "results.requests",
+    "results.releases",
+    *(f"results.by_err.{row}" for row in ERR_ROWS),
+    "results.decisions.allowed",
+    "results.decisions.degraded",
+    "results.attempt_outcomes.initial.200",
+    *(f"results.refunds.{result}" for result in REFUND_RESULTS),
+    "results.unresolved_reasons.closed",
+    "results.unmatched.418 teapot",
+    "results.transport_errors.total",
+    "results.transport_errors.by_kind.initial.timeout",
+    *(f"results.unexpected_errors.total.{name}" for name in UNEXPECTED),
+    *(f"results.unexpected_errors.steps.0.{name}" for name in UNEXPECTED),
+    *(f"results.steps.0.{name}" for name in ("requests", "new_rows", "allowed", "limited")),
+    "results.db_rows",
+    *(key for key in FIELDS if key.startswith("results.prf2.")),
+    # PRF-3: each percentile summary's sample count.
+    *(f"timing.limiter_ns.{cls}.count" for cls in ("allowed", "limited", "degraded", "error")),
+    "timing.db_ns.count",
+    "timing.api_total_ns.count",
+    *(f"timing.refund_ns.{name}.count" for name in ("all", *REFUND_RESULTS)),
+    *(
+        f"timing.end_to_end_ns.{cls}.count"
+        for cls in ("all", "success", "limited", "error", "retries")
+    ),
+    "timing.steps.0.latency_ns.count",
+    "timing.rewrite_latency_ns.count",
+    # PRF-4: samples and reads, each process's and instance series' readings.
+    "resources.samples",
+    "resources.health_reads",
+    *(
+        f"resources.processes.{proc}.{name}"
+        for proc in ("postgres", "valkey-server")
+        for name in ("cpu_readings", "rss_readings")
+    ),
+    *(f"resources.store_state.{name}.readings" for name in STORE_STATE),
+    "resources.instance_series.0.readings",
+    # The run-log schedule and routing.
+    "traffic.schedule_entries",
+    "traffic.planned_per_step.0",
+    "traffic.instances",
+    "traffic.requests_per_instance.1",
+    "traffic.served_per_instance.1",
+    "traffic.instances_used",
+    "traffic.users",
+    "traffic.busiest_user.first_attempts",
+    # check_bud11's counts, and a violation's excess units.
+    "correctness.known_credits",
+    "correctness.unknown_credits",
+    "correctness.listener_drops",
+    "correctness.pre_kill_lines",
+    "correctness.pre_kill_read_ok_false",
+    "correctness.violation.excess_units",
+    # The capacity steps' counts and the spike's.
+    *(
+        f"capacity.steps.0.{name}"
+        for name in (
+            "admitted",
+            "limited_429",
+            "unique_rows",
+            "window_attempts",
+            "window_unexpected",
+            "unsent",
+            "unknown_outcomes",
+        )
+    ),
+    *(
+        f"capacity.spike.{name}"
+        for name in (
+            "window_latency_ns.count",
+            "window_attempts",
+            "window_unexpected",
+            "window_planned",
+            "window_unsent",
+            "planned_before_deadline",
+            "first_attempts_before_deadline",
+            "finished_by_deadline",
+            "not_judged",
+            "outstanding",
+            "outstanding_detail.never_written",
+            "outstanding_detail.ended_after_deadline",
+            "outstanding_detail.no_line",
+        )
+    ),
+    # The §B8 evidence counts no rule reads in every run.
+    *EVIDENCE_COUNTS,
+)
+# PRF-4's instance series by name, as the report builder writes them (report/build.py; DESIGN
+# §A5.11): those whose max and last are counts, null without a reading (hitapi's /health counts,
+# the store-state gauges, pending refunds, the listener-drop counter and a labelled series of each
+# cleanup counter family), and the lags, whose max and last are measurements (orchestrator decision
+# W2 of the H6 round-2 review). The valid spike run's series 0 is in_flight, a count series.
+COUNT_SERIES = (
+    "in_flight",
+    "listener_drops",
+    "log_drops",
+    'rl_cleanup_entries_total{action="moved"}',
+    'rl_cleanup_passes_total{status="complete"}',
+    'rl_cleanup_stops_total{result="unavailable"}',
+    "rl_listener_drops_total",
+    "rl_live_markers",
+    "rl_pending_refunds",
+    "rl_quarantined_keys",
+    "rl_tracked_buckets",
+)
+LAG_SERIES = ("rl_cleanup_lag_seconds", "rl_clock_lag_microseconds")
+SERIES_0 = "resources.instance_series.0"
+# The counts that are null without a reading (hitgen's drop counts without its "sending done"
+# line, the in-flight maximum without a /health read, a store-state count's max and last, and a
+# count series' max and last: series 0's, in_flight's): each must be null or such an integer.
+NULLABLE_COUNTS = (
+    "load.retry_drops",
+    "load.generator_drops",
+    "resources.max_in_flight",
+    *(f"resources.store_state.{name}.{value}" for name in STORE_STATE for value in ("max", "last")),
+    f"{SERIES_0}.max",
+    f"{SERIES_0}.last",
+)
+# The integers of the valid spike run left out of the count check (the dotted path, each list index
+# as 0): PRF-5's run context and settings, the evidence counts a §B8 rule reads in every run
+# (EVIDENCE_RULE_COUNTS, each shown read by test_evidence_rule_reads_its_count), step indexes,
+# times and durations in ns and percentiles, instance numbers and PIDs, and RSS bytes. (Its
+# instance series' integer max and last are its count series', NULLABLE_COUNTS: its one lag
+# series, rl_cleanup_lag_seconds, holds fractions there.)
+NOT_COUNT_LEAVES = re.compile(
+    "|".join(
+        (
+            r"context\..*",
+            *(re.escape(f"{EVIDENCE}.{path}") for path, _ in EVIDENCE_RULE_COUNTS),
+            r".*\.(step|stopped_after_step|excluded_step|spike_step|post_spike_step|"
+            r"sustainable_step)|.*_ns(_p99)?|.*\.p(50|95|99)|.*\.instance|"
+            r"traffic\.busiest_user\.instances\.0|.*\.pid|"
+            r"resources\.processes\.[a-z-]+\.rss_bytes_\w+",
+        )
+    )
+)
+
+
+def put_report(run_dir: Path, path: str, value: object) -> str:
+    """Sets the report.json value at a dotted path (a number is a list index where the node is a
+    list), making each object on the way that is missing or null an empty one, and returns the
+    path as validate.py shows it (a list index in brackets)."""
+    report = read_json(run_dir.joinpath("report.json"))
+    node: object = report
+    shown = ""
+    *parents, last = path.split(".")
+    for part in parents:
+        if isinstance(node, list):
+            node, shown = node[int(part)], f"{shown}[{part}]"
+            continue
+        assert isinstance(node, dict)
+        if node.get(part) is None:
+            node[part] = {}
+        node, shown = node[part], f"{shown}.{part}" if shown else part
+    if isinstance(node, list):
+        node[int(last)] = value
+        shown = f"{shown}[{last}]"
+    else:
+        assert isinstance(node, dict)
+        node[last] = value
+        shown = f"{shown}.{last}"
+    run_dir.joinpath("report.json").write_text(json.dumps(report, indent=2) + "\n")
+    return shown
+
+
+def count_fail(shown: str, value: object, nullable: bool = False) -> str:
+    """validate.py's line for a count, shown as validate.py shows its path, that is no integer
+    from 0 to 2^63 − 1 (nor null, where it may be)."""
+    want = "null or an integer" if nullable else "an integer"
+    return f"FAIL required_keys: {shown}: {json.dumps(value)}: want {want} from 0 to 2^63 − 1"
+
+
+# (case, the run checked: the limiter run in full mode or its baseline in baseline mode, the count,
+# a value that is no integer from 0 to 2^63 − 1): one of each count table's kind, true, a float
+# and the range's two ends.
+NOT_COUNTS: list[tuple[str, str, str, object]] = [
+    ("by_err true", "run", "results.by_err.ERR-1", True),
+    ("by_err 1.0", "run", "results.by_err.ERR-1", 1.0),
+    ("by_err negative", "run", "results.by_err.ERR-1", -1),
+    ("by_err beyond int64", "run", "results.by_err.ERR-1", 2**63),
+    ("requests true", "run", "results.requests", True),
+    ("requests negative", "run", "results.requests", -1),
+    ("requests beyond int64", "run", "results.requests", 2**63),
+    ("requests null", "run", "results.requests", None),
+    ("a step's planned null", "run", "load.steps.0.planned", None),
+    ("a step's planned true", "run", "load.steps.0.planned", True),
+    ("a step's status_200 negative", "run", "load.steps.0.status_200", -1),
+    ("known_credits 0.0", "run", "correctness.known_credits", 0.0),
+    ("unexpected total true", "run", "results.unexpected_errors.total.unexpected", True),
+    ("instances_used 1.0", "run", "traffic.instances_used", 1.0),
+    ("decisions allowed beyond int64", "run", "results.decisions.allowed", 2**63),
+    ("an attempt outcome 1.0", "run", "results.attempt_outcomes.initial.200", 1.0),
+    ("requests_per_instance negative", "run", "traffic.requests_per_instance.1", -1),
+    ("a planned_per_step entry true", "run", "traffic.planned_per_step.0", True),
+    ("a process's cpu_readings negative", "run", "resources.processes.postgres.cpu_readings", -1),
+    ("a store-state reading count 1.0", "run", "resources.store_state.live_markers.readings", 1.0),
+    ("by_err true in baseline mode", "base", "results.by_err.ERR-1", True),
+    ("a step's scheduled true in baseline mode", "base", "load.steps.0.scheduled", True),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "which", "path", "value"), NOT_COUNTS, ids=[c for c, _, _, _ in NOT_COUNTS]
+)
+def test_count_not_an_integer(
+    tmp_path: Path, case: str, which: str, path: str, value: object
+) -> None:
+    """A count that is true or a float, even one equal to an integer (Python's True == 1 == 1.0),
+    or an integer below 0 or above 2^63 − 1 makes validate.py exit 1 naming required_keys, the
+    count and its value, and nothing else."""
+    runs = valid_runs(tmp_path)
+    run_dir, args = (runs.run, ()) if which == "run" else (runs.base, ("--mode", "baseline"))
+    shown = put_report(run_dir, path, value)
+    code, lines = run_validate(run_dir, *args)
+    assert (code, failed(lines)) == (1, {"required_keys"}), (case, lines)
+    assert count_fail(shown, value) in lines, (case, lines)
+
+
+# The counts refused at 2^63 above and in test_nullable_count_out_of_range, each taken at 2^63 − 1,
+# the range's upper end (orchestrator decision W3 of the H6 round-2 review: both ends pinned).
+AT_INT64_MAX = (
+    "results.by_err.ERR-1",
+    "results.requests",
+    "results.decisions.allowed",
+    "resources.store_state.tracked_buckets.max",
+)
+
+
+@pytest.mark.parametrize("path", AT_INT64_MAX)
+def test_count_at_int64_max(tmp_path: Path, path: str) -> None:
+    """A count may be 2^63 − 1, int64's largest: each count refused at 2^63, set to 2^63 − 1, leaves
+    the spike run valid."""
+    runs = valid_runs(tmp_path)
+    put_report(runs.run, path, 2**63 - 1)
+    assert run_validate(runs.run) == (0, [f"validate: {runs.run}: valid (full mode)"])
+
+
+@pytest.mark.parametrize("value", [True, 1.0, -1, 2**63])
+@pytest.mark.parametrize("part", ["max", "last"])
+def test_count_series_not_a_count(tmp_path: Path, part: str, value: object) -> None:
+    """A count series' max or last (series 0's, in_flight's) that is true, a float (1.0 included),
+    below 0 or beyond int64 makes validate.py exit 1 naming required_keys, the value and its path,
+    and nothing else (orchestrator decision W2 of the H6 round-2 review)."""
+    runs = valid_runs(tmp_path)
+    shown = put_report(runs.run, f"{SERIES_0}.{part}", value)
+    code, lines = run_validate(runs.run)
+    assert (code, failed(lines)) == (1, {"required_keys"}), lines
+    assert count_fail(shown, value, nullable=True) in lines, lines
+
+
+def test_every_count_series_a_count(tmp_path: Path) -> None:
+    """Each count series, named on series 0 (a labelled series of each cleanup counter family among
+    them), is held to the count check by its name: its max true, or its last -1, makes validate.py
+    exit 1 with a required_keys line naming it, and nothing else."""
+    runs = valid_runs(tmp_path)
+    good = runs.run.joinpath("report.json").read_bytes()
+    for name in COUNT_SERIES:
+        for part, value in (("max", True), ("last", -1)):
+            put_report(runs.run, f"{SERIES_0}.series", name)
+            shown = put_report(runs.run, f"{SERIES_0}.{part}", value)
+            code, lines = run_validate(runs.run)
+            assert (code, failed(lines)) == (1, {"required_keys"}), (name, part, lines)
+            assert count_fail(shown, value, nullable=True) in lines, (name, part, lines)
+            runs.run.joinpath("report.json").write_bytes(good)
+
+
+def test_count_series_bounds_pass(tmp_path: Path) -> None:
+    """Each count series' max and last, named on series 0, may be null (no reading), 0 or
+    2^63 − 1: the spike run stays valid."""
+    runs = valid_runs(tmp_path)
+    for name in COUNT_SERIES:
+        for top, last in ((2**63 - 1, None), (None, 0), (0, 2**63 - 1)):
+            put_report(runs.run, f"{SERIES_0}.series", name)
+            put_report(runs.run, f"{SERIES_0}.max", top)
+            put_report(runs.run, f"{SERIES_0}.last", last)
+            code, lines = run_validate(runs.run)
+            assert code == 0, (name, top, last, lines)
+
+
+@pytest.mark.parametrize("name", LAG_SERIES)
+def test_lag_series_not_counts(tmp_path: Path, name: str) -> None:
+    """A lag series' max and last are measurements, not counts (durations, in seconds or in µs):
+    named on series 0, fractions there (1.5, 0.25), which no count may be, leave the spike run
+    valid."""
+    runs = valid_runs(tmp_path)
+    put_report(runs.run, f"{SERIES_0}.series", name)
+    put_report(runs.run, f"{SERIES_0}.max", 1.5)
+    put_report(runs.run, f"{SERIES_0}.last", 0.25)
+    assert run_validate(runs.run) == (0, [f"validate: {runs.run}: valid (full mode)"])
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "rl_slots_in_use",
+        "rl_cleanup_entries_total",
+        "rl_cleanup_passes_total",
+        "rl_cleanup_stops_total",
+        'rl_cleanup_lag_seconds{instance="1"}',
+        "in_flight_max",
+        "",
+        7,
+        None,
+    ],
+)
+def test_unknown_series_fails(tmp_path: Path, name: object) -> None:
+    """An instance series the report builder never writes (its names are a closed set: a metric it
+    does not follow, each cleanup family's name without labels, a labelled lag, another name, no
+    string) makes validate.py exit 1 naming required_keys and the name, and nothing else."""
+    runs = valid_runs(tmp_path)
+    shown = put_report(runs.run, f"{SERIES_0}.series", name)
+    code, lines = run_validate(runs.run)
+    assert (code, failed(lines)) == (1, {"required_keys"}), lines
+    detail = f"{shown}: {json.dumps(name)}: not a series the report builder writes"
+    assert f"FAIL required_keys: {detail}" in lines, lines
+
+
+def test_every_count_an_integer(tmp_path: Path) -> None:
+    """Each count (COUNTS) set to true makes validate.py exit 1 with a required_keys line naming
+    it (a check that reads the count may fail as well), and each nullable count (NULLABLE_COUNTS)
+    too, saying null is allowed."""
+    runs = valid_runs(tmp_path)
+    good = runs.run.joinpath("report.json").read_bytes()
+    for path, nullable in (*((p, False) for p in COUNTS), *((p, True) for p in NULLABLE_COUNTS)):
+        shown = put_report(runs.run, path, True)
+        code, lines = run_validate(runs.run)
+        assert code == 1 and count_fail(shown, True, nullable) in lines, (path, lines)
+        runs.run.joinpath("report.json").write_bytes(good)
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [("load.generator_drops", -1), ("resources.store_state.tracked_buckets.max", 2**63)],
+)
+def test_nullable_count_out_of_range(tmp_path: Path, path: str, value: int) -> None:
+    """A nullable count is still an integer from 0 to 2^63 − 1 when it is not null."""
+    runs = valid_runs(tmp_path)
+    shown = put_report(runs.run, path, value)
+    code, lines = run_validate(runs.run)
+    assert (code, failed(lines)) == (1, {"required_keys"}), lines
+    assert count_fail(shown, value, nullable=True) in lines, lines
+
+
+def test_nullable_counts_null(tmp_path: Path) -> None:
+    """Each nullable count may be null (the run gave no reading): the spike run stays valid."""
+    runs = valid_runs(tmp_path)
+    for path in NULLABLE_COUNTS:
+        put_report(runs.run, path, None)
+    assert run_validate(runs.run) == (0, [f"validate: {runs.run}: valid (full mode)"])
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "detail"),
+    [
+        ("results.decisions", True, "results.decisions: true: want an object"),
+        (
+            "results.attempt_outcomes.initial",
+            3,
+            "results.attempt_outcomes.initial: 3: want an object",
+        ),
+        (
+            "results.transport_errors.by_kind",
+            [],
+            "results.transport_errors.by_kind: []: want an object",
+        ),
+        ("traffic.requests_per_instance", 1, "traffic.requests_per_instance: 1: want an object"),
+        ("traffic.planned_per_step", {"0": 1}, 'traffic.planned_per_step: {"0": 1}: want a list'),
+    ],
+)
+def test_count_container_not_one(tmp_path: Path, path: str, value: object, detail: str) -> None:
+    """An object or a list of counts that is none holds no count to check, so it fails
+    required_keys itself."""
+    runs = valid_runs(tmp_path)
+    put_report(runs.run, path, value)
+    code, lines = run_validate(runs.run)
+    assert (code, failed(lines)) == (1, {"required_keys"}), lines
+    assert f"FAIL required_keys: {detail}" in lines, lines
+
+
+def int_leaves(node: object, path: str = "") -> list[str]:
+    """The dotted path of each integer (never a bool) at any depth of node, a list index as 0."""
+    if isinstance(node, dict):
+        return [p for key, item in node.items() for p in int_leaves(item, f"{path}.{key}")]
+    if isinstance(node, list):
+        return [p for item in node for p in int_leaves(item, f"{path}.0")]
+    return [path.removeprefix(".")] if type(node) is int else []
+
+
+def test_every_integer_classified(tmp_path: Path) -> None:
+    """Each integer of the valid spike run's report.json is a count (COUNTS, NULLABLE_COUNTS) or
+    one of NOT_COUNT_LEAVES, never both, so no count is left out of the count check unnoticed and
+    no exemption is wide enough to cover a count."""
+    runs = valid_runs(tmp_path)
+    counts = {*COUNTS, *NULLABLE_COUNTS}
+    leaves = int_leaves(read_json(runs.run.joinpath("report.json")))
+    left = [p for p in leaves if p not in counts and NOT_COUNT_LEAVES.fullmatch(p) is None]
+    assert len(leaves) > 200 and left == [], left
+    both = [p for p in leaves if p in counts and NOT_COUNT_LEAVES.fullmatch(p) is not None]
+    assert both == [], both
+
+
+def valid_test_run(root: Path) -> Path:
+    """A valid one-step test run (run_kind test, its scenario forcing no AOF rewrite), its report
+    built: no rule reads its fixtures_off values (they apply to benchmark runs) or its rewrite
+    windows."""
+    run = rows_run(
+        root,
+        "20261007-130000-tst-1",
+        [(1.0, 20.0)],
+        [ok_row(6 * SECOND)],
+        name="tst",
+        run_kind="test",
+    )
+    assert build_main([str(run)]) == 0
+    assert run_validate(run) == (0, [f"validate: {run}: valid (full mode)"])
+    return run
+
+
+@pytest.mark.parametrize("value", [True, False, 1.0, 0.0, -1, "x"])
+@pytest.mark.parametrize("path", EVIDENCE_COUNTS)
+def test_evidence_count_not_an_integer(tmp_path: Path, path: str, value: object) -> None:
+    """Each §B8 evidence count no evidence rule reads in every run is held to the count check
+    (orchestrator decision V1): in a test run, where no rule reads any of them, true, false, 1.0,
+    0.0, -1 or "x" there makes validate.py exit 1 naming required_keys, the count and its value,
+    and nothing else."""
+    run = valid_test_run(tmp_path)
+    shown = put_report(run, path, value)
+    code, lines = run_validate(run)
+    assert (code, failed(lines)) == (1, {"required_keys"}), lines
+    assert count_fail(shown, value) in lines, lines
+
+
+@pytest.mark.parametrize("value", [True, False, 1.0, 0.0, -1, "x"])
+@pytest.mark.parametrize(("path", "check"), EVIDENCE_RULE_COUNTS)
+def test_evidence_rule_reads_its_count(
+    tmp_path: Path, path: str, check: str, value: object
+) -> None:
+    """Each evidence count the count check leaves out (NOT_COUNT_LEAVES) is read by its §B8 rule
+    in every run, a test run included: true, false, 1.0, 0.0, -1 or "x" there fails that rule's
+    evidence check, and that check alone. false and 0.0, which Python holds equal to 0, show the
+    rule takes nothing but an integer, not any value equal to 0 (orchestrator decision V5)."""
+    run = valid_test_run(tmp_path)
+    put_report(run, f"{EVIDENCE}.{path}", value)
+    code, lines = run_validate(run)
+    assert (code, failed(lines)) == (1, {f"evidence_validity.{check}"}), lines
 
 
 # (case, the change, the detail of the one FAIL scenario_file line; {path} is the scenario file).
@@ -1571,11 +2089,10 @@ def test_missing_baseline_run_named(tmp_path: Path) -> None:
     assert (baseline["run_id"], baseline["problem"]) == (runs.base.name, cause)
 
 
-def test_fault_times_required(tmp_path: Path) -> None:
-    """A run with faults records each one's actual start and end (PRF-5; plan H5 step 2's
-    context): a test run with a store pause passes full mode, and removing the fault's cmd,
-    start_ns or end_ns from report.json's context makes validate.py exit 1 naming
-    required_keys; a run with no fault (faults null) needs none."""
+def pause_run(root: Path, *, baseline: bool) -> Path:
+    """A one-instance test run with a store pause at 2 s (context.json's faults, with the fault's
+    actual start and end), its report built: a limiter run, or with baseline its baseline (the
+    limiter off)."""
     pause = {
         "at_s": 2,
         "cmd": "faultctl store pause 4.5s",
@@ -1586,9 +2103,9 @@ def test_fault_times_required(tmp_path: Path) -> None:
         "outage_ns": 4_600 * MS,
         "targets": None,
     }
-    spec = RunSpec(name="flt", instances=1, steps=[(1.0, 20.0)], faults=[pause])
+    spec = RunSpec(name="flt", instances=1, steps=[(1.0, 20.0)], faults=[pause], baseline=baseline)
     run = write_run(
-        tmp_path,
+        root,
         spec,
         schedule=[entry(0, 6 * SECOND)],
         gen=[attempt(0, 6 * SECOND), summary(1)],
@@ -1596,12 +2113,24 @@ def test_fault_times_required(tmp_path: Path) -> None:
         samples=[sample(T0_WALL_NS + SECOND)],
     )
     assert build_main([str(run)]) == 0
-    assert run_validate(run)[0] == 0
-    good = run.joinpath("report.json").read_bytes()
-    for key in ("cmd", "start_ns", "end_ns"):
-        drop_report_key(run, f"context.faults.0.{key}")
-        code, lines = run_validate(run)
-        assert (code, failed(lines)) == (1, {"required_keys"}), (key, lines)
-        run.joinpath("report.json").write_bytes(good)
-    edit_report(run, "context.faults", None)
-    assert run_validate(run)[0] == 0
+    return run
+
+
+def test_fault_times_required(tmp_path: Path) -> None:
+    """A run with faults records each one's actual start and end (PRF-5; plan H5 step 2's
+    context), in both modes: a test run with a store pause passes full mode, and its baseline
+    (the same run with the limiter off) baseline mode; removing the fault's cmd, start_ns or
+    end_ns from report.json's context makes validate.py exit 1 naming required_keys in either
+    (context.faults is checked in baseline mode too: a skip there fails here); a run with no
+    fault (faults null) needs none."""
+    for baseline, mode in ((False, ()), (True, ("--mode", "baseline"))):
+        run = pause_run(tmp_path.joinpath(f"baseline-{baseline}"), baseline=baseline)
+        assert run_validate(run, *mode)[0] == 0, (mode, run_validate(run, *mode)[1])
+        good = run.joinpath("report.json").read_bytes()
+        for key in ("cmd", "start_ns", "end_ns"):
+            drop_report_key(run, f"context.faults.0.{key}")
+            code, lines = run_validate(run, *mode)
+            assert (code, failed(lines)) == (1, {"required_keys"}), (mode, key, lines)
+            run.joinpath("report.json").write_bytes(good)
+        edit_report(run, "context.faults", None)
+        assert run_validate(run, *mode)[0] == 0, mode

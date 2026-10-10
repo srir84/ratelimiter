@@ -1,0 +1,44 @@
+# s6-pause-open (HARNESS TRF-S6, §6 FLT-2; DESIGN §B4, §B5, §B6, §B10; IMPLEMENTATION_PLAN H6
+# step 1): a blackhole outage under load in open mode, a test-build run (bin/test) of three
+# instances, one 300 req/s step of 120 s, with 3 % of the allowed requests refused after their
+# acquire (refuse_after_acquire_bp = 300, ERR-15), so refunds run all along. Its one store outage
+# segment is FLT-2's store pause. The report shows the acquires the pause caught after sending as
+# ERR-9 (outcome_unknown, both modes), those never sent as ERR-3 degraded admissions (open: bypass
+# only on unavailable), the refunds it held back confirmed within refund_deadline (30 s) + the
+# outage, and budgets kept (BUD-11). s6-pause-closed.toml is the same run in closed mode.
+# Plan choices, each with its reason:
+# - 100 users, Zipf 1.1 (the default): u000000-u000004 offer about 70, 33, 21, 15 and 12 req/s,
+#   above the policy's 10 tokens/s (harness.toml's, capacity 20), so their keys sit at their bound
+#   and the BUD-11 check (correctness) sees a wrong credit or charge; about 200 req/s are allowed,
+#   so the refusals give about 6 refunds/s (9/s at most, within §B4's 50/s per instance).
+# - failure_mode = "open": the open twin of s6-pause-closed.toml, with the same fault and time.
+# - The pause at 60 s, mid-run: a minute of steady load before it, and 55 s after it for the refunds
+#   it held back (each confirmed within 30 s + the outage) and the traffic to recover before the
+#   end.
+name = "s6-pause-open"
+seed = 1
+run_kind = "test"
+instances = 3
+
+[policy]
+failure_mode = "open"
+
+[api]
+refuse_after_acquire_bp = 300
+
+[[steps]]
+rate_per_s = 300
+duration_s = 120
+
+[users]
+count = 100
+zipf_s = 1.1
+
+# FLT-2, the run's one store outage segment: HARNESS §6 "Blackhole outage, 5 s | Pause the store
+# process; wrapper or store-side evidence records which commands were sent | Sent:
+# `outcome_unknown` → `503` both modes. Never sent: may be `unavailable`"; DESIGN §B6 "`FLT-2`
+# blackhole | `SIGSTOP` / `SIGCONT` on the store process … scenarios arm 4.5 s so it stays within
+# the 5 s limit | `faultctl store pause 4.5s`".
+[[faults]]
+at_s = 60
+cmd = "faultctl store pause 4.5s"

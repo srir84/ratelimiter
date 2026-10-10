@@ -1,0 +1,46 @@
+# s3-busy-user (HARNESS TRF-S3; DESIGN §B4 [[streams]], §B5; IMPLEMENTATION_PLAN H6 step 1): one
+# busy user among well-behaved ones, a benchmark (bin/bench) with no capacity verdict, three
+# instances, 120 s: u000000 at 100 req/s and u000001-u000100 at 5 req/s each, each user its own
+# Poisson stream (the one busy user routed across all three instances, TRF-4). The report shows the
+# busy user within BUD-11 (shared enforcement) and the 5 req/s users with 0 429s. The H6 run order
+# runs it once more with seed 1 (the rerun), which must give the same schedule_sha256.
+# Plan choices, each with its reason:
+# - The one [[steps]] entry has rate 0 for 120 s: it only fixes the run length, so every arrival
+#   comes from the two streams and no user gets arrivals drawn by Zipf weight.
+# - The policy is 10 tokens/s with a capacity of 20 (harness.toml's values, set here because the
+#   scenario's point rests on them), between the two rates with margin: the busy user offers 10 ×
+#   the rate and gets about 90 % 429s (and their TRF-5 retries), while a 5 req/s user stays at half
+#   the rate with a bucket of 20 to absorb bursts: to see a 429 it would need over 20 + 10t arrivals
+#   in some t seconds, against 5t expected (at t = 1 s, more than 30 against 5), which a Poisson
+#   stream never gives in 100 users × 120 s.
+# - No [[faults]] (a benchmark has none, HAR-24), no refunds (refuse_after_acquire_bp 0) and no
+#   forced_aof_rewrites_s, so the store runs with auto-aof-rewrite-percentage 0 (DESIGN §A2;
+#   runlog.StoreArgs).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s3-busy-user"
+seed = 1
+run_kind = "bench"
+instances = 3
+
+[policy]
+rate_tokens = 10
+rate_period_ns = 1_000_000_000
+capacity = 20
+
+[[steps]]
+rate_per_s = 0
+duration_s = 120
+
+[users]
+count = 101
+
+# The busy user: u000000 at 100 req/s.
+[[streams]]
+users = [0, 0]
+rate_per_s = 100
+
+# The well-behaved users: u000001-u000100 at 5 req/s each.
+[[streams]]
+users = [1, 100]
+rate_per_s = 5

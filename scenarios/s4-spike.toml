@@ -1,0 +1,65 @@
+# s4-spike (HARNESS TRF-S4; DESIGN §B4, §B5, §B9 "Spike recovery"; IMPLEMENTATION_PLAN H6 steps 1
+# and 2): a spike, a benchmark (bin/bench) judged by the spike verdict (T-RPT-2, PRF-6), three
+# instances: the sustainable rate S = 100 req/s for 60 s, 5 × S = 500 req/s for 10 s (spike_step 1,
+# 0-based), then S again for 90 s, over 10,000 users drawn by Zipf 1.1. Its baseline freezes
+# runs/thresholds/s4-spike-1.json with the recovery deadline (the spike's end + 30 s = 100 s) and
+# window ([100 s, 160 s], judged against the post-spike step's thresholds) before the limiter run
+# (PRF-6, PRF-7); the post-spike step lasts 90 s, the least the orchestrator accepts.
+# S (plan H6 step 2: s1-ramp's sustainable_capacity rounded down to a multiple of 100): the s1-ramp
+# limiter report (runs/20261010-132845-s1-ramp-1, valid) has sustainable_capacity null. Its step 0
+# (100 req/s offered, 100.2 achieved, 0 unexpected errors) failed only on p99 (503.9 ms against the
+# frozen threshold 61.0 ms) because of a disk flush stall 28-30 s into the run: every slow request
+# (251 over 100 ms) falls in that window and is dominated by limiter (store) time of up to 550 ms,
+# the F_FULLFSYNC behaviour under appendfsync always that H5 recorded as an environment fact; then
+# stop_early ended the run. Rounding null down is undefined, so the orchestrator set S = 100 req/s,
+# the lowest S1 rung: it is also s1-ramp-1api's sustainable_capacity (100.2,
+# runs/20261010-133338-s1-ramp-1api-1) rounded down to a multiple of 100, and S = 0 would give this
+# file and s7-long.toml no load (and divide by zero in s7's refuse_after_acquire_bp formula).
+# Plan choices, each with its reason:
+# - Users, Zipf and policy as s1-ramp.toml (10,000 users, Zipf 1.1, harness.toml's 10 tokens/s and
+#   capacity 20 per user, TRF-5's default retries): S is that workload's measured rate, so the base
+#   steps offer the load S1 measured. u000000 gets about 15 % of each step (15 req/s at S, 75 during
+#   the spike), so its 429s and their retries (at most 2 extra, each after at least 1 s) add load
+#   just after the spike, counted apart from the initial attempts (TRF-3, PRF-10). The seed-1
+#   schedule, built in memory as hitgen builds it (no run), has 19,961 entries, none skipped:
+#   6,002, 4,950 and 9,009 per step (u000000 906, 749 and 1,426 of them, 15.1 %, 15.1 % and
+#   15.8 %), and 6,654, 6,654 and 6,653 per instance.
+# - The spike is generator-feasible (checked against the S1 runs' report.json and gen.jsonl): hitgen
+#   sent every step up to 10,000 req/s in both S1 baselines with a scheduling-lag p99 of at most
+#   2.11 ms (§B9 allows 5 ms). 500 req/s is about 167 req/s per instance, or about 240 counting two
+#   retries for each of the about 113 429s per second the users above 10 req/s get. By Little's law
+#   that puts about 87 (127 with the retries) requests in flight per instance at the s1-ramp limiter
+#   run's end-to-end p99 (519 ms), 96 (140) at its worst latency (572 ms, in the flush stall) and
+#   273 (401) at the worst of s1-ramp-1api's (1,636 ms), all under the 512 caps per instance (hitapi
+#   max_in_flight, HAR-14, where a full cap gives 503 ERR-7; hitgen's 512 connections per instance)
+#   and hitgen's 20,000 attempts in flight. The measured peaks (gen.jsonl) were 29 in flight per
+#   instance at 100 req/s on three instances and 177 at 200 req/s on one (s1-ramp-1api step 1, more
+#   initial attempts per instance than the spike's 167/s), with no ERR-7, generator drops or unsent
+#   attempts.
+# - No [[faults]] (a benchmark has none, HAR-24), no refunds (refuse_after_acquire_bp 0) and no
+#   forced_aof_rewrites_s, so the store runs with auto-aof-rewrite-percentage 0 (DESIGN §A2;
+#   runlog.StoreArgs).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s4-spike"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "spike"
+spike_step = 1
+
+[[steps]]
+rate_per_s = 100
+duration_s = 60
+
+[[steps]]
+rate_per_s = 500
+duration_s = 10
+
+[[steps]]
+rate_per_s = 100
+duration_s = 90
+
+[users]
+count = 10000
+zipf_s = 1.1

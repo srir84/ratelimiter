@@ -1,0 +1,111 @@
+# s6-state-closed (HARNESS TRF-S6, §6 FLT-7, FLT-11, FLT-1b; DESIGN §B4, §B5, §B6, §B10;
+# IMPLEMENTATION_PLAN H6 step 1): state loss under load in closed mode, a test-build run (bin/test)
+# of three instances, one 300 req/s step of 120 s, with 3 % of the allowed requests refused after
+# their acquire (refuse_after_acquire_bp = 300, ERR-15), so refunds run all along. The tamper tool
+# damages three keys (FLT-7), each quarantined (STA-10) by the next operation that reads it, whose
+# requests then get ERR-11 while the other keys keep serving; then it deletes the high-water mark
+# 10 s before the end (FLT-11), after which every acquire is an epoch-wide state_integrity_error
+# (CLK-7). Its one store outage segment is FLT-1b's wrapper refusal. s6-state-open.toml is the same
+# run in open mode.
+# Plan choices, each with its reason:
+# - 100 users, Zipf 1.1 (the default): u000000-u000004 offer about 70, 33, 21, 15 and 12 req/s,
+#   above the policy's 10 tokens/s (harness.toml's, capacity 20), so their keys sit at their bound
+#   and the BUD-11 check (correctness) sees a wrong credit or charge; about 200 req/s are allowed,
+#   so the refusals give about 6 refunds/s (9/s at most, within §B4's 50/s per instance).
+# - failure_mode = "closed", harness.toml's default, set here so the file names its mode.
+# - The three keys and ops, one per FLT-7 kind: u000001 (del-k: an indexed bucket deleted early;
+#   its refunds leave live markers, so mi exists and check_key quarantines it as
+#   marker_index_without_bucket, the DESIGN §A3.3 row before index_without_bucket), u000002
+#   (corrupt-field u: malformed data, malformed_bucket) and u000003 (del-ix: bucket_without_index),
+#   the busiest keys after u000000 (about 33, 21 and 15 req/s), so each has a bucket when it is
+#   tampered with and its next acquire finds the damage at once; at 40, 45 and 50 s, apart, so each
+#   quarantine shows on its own in the run log.
+# - The store outage segment: plan step 1 gives every S6 file one, and FLT-7 and FLT-11 arm none, so
+#   this file arms FLT-1b, the wrapper refusal of acquires (5 s on instance 2 at 70 s), which
+#   changes no stored state and leaves refunds alone (match "acquire"): the state faults stay the
+#   only thing that touches the store, and closed mode answers the refused acquires with ERR-8.
+# - FLT-11 at 110 s, 10 s before the end (the plan's time). A refund still pending when the hwm goes
+#   invalidates the run: its refund fails hwm_missing (state_integrity_error, retried) until Close's
+#   35 s drain ends, before its retention (acquire + 60 s), and its unresolved (closed) event comes
+#   after the listener's deadline, the drain's, which drops and counts it (internal/core/close.go):
+#   listener_drops > 0, an invalid run (HAR-13). Seed 1 does not reliably avoid it: the schedule
+#   fixes which attempts the application refuses after their acquire, but timing decides whether
+#   such an attempt is allowed and whether its refund is still pending at the HDEL. In the H6 plan
+#   audit's seed-1 simulation the nearest refusal-selected attempts are u000000 retries at about
+#   109.87 s and 110.05 s (and at least 165 ms before each FLT-7 tamper), which a del-hwm landing at
+#   once clears. Four seed-1 runs on 2026-10-10: three valid (the builder's closed and open runs,
+#   and a closed rerun in which del-hwm took 8 ms and the last refund before it was confirmed at
+#   109.387 s, 613 ms earlier; 601 of 601 refunds confirmed); in the fourth, del-hwm ran from
+#   110.002 s to 111.164 s through a store stall (del-ix also took 1.26 s there, 50.003-51.266 s),
+#   four acquires the store decided at 110.89-110.91 s, before its HDEL, were refused after their
+#   acquire, and their refunds stayed pending: four listener drops, an invalid run.
+#   Decision (H6 task 1 repair; the owner's standing instruction: take the recommended option): no
+#   scenario or HARNESS change. A run that comes out invalid with listener drops at the drain's end
+#   (make run fails: the orchestrator exits 1; report.json evidence_validity.checks.listener_drops
+#   not ok) is rerun, as HAR-13 ("invalid (rerun)") and the plan's Watch out ("After a failed run,
+#   rerun only the scenarios that lack a valid run") say; a failed run gets no runs/index.jsonl
+#   line, so completion.py's manifest takes the valid rerun. Removing the risk needs an owner rule
+#   (REF-9 (d) excluded in step 4 and in validity); an earlier FLT-11 alone would turn the drop into
+#   a refund-completion failure (its refund would end unresolved (retention) before the drain ends).
+#   completion.py has no REF-9 (d) exclusion (a quarantine or epoch-wide state loss before the
+#   refund is confirmed), so a refund FLT-7 catches, ending unresolved (retention), fails its
+#   refund completion (none did in these runs). A seed, rate or fault-time change needs both
+#   rechecked.
+name = "s6-state-closed"
+seed = 1
+run_kind = "test"
+instances = 3
+
+[policy]
+failure_mode = "closed"
+
+[api]
+refuse_after_acquire_bp = 300
+
+[[steps]]
+rate_per_s = 300
+duration_s = 120
+
+[users]
+count = 100
+zipf_s = 1.1
+
+# FLT-7 (an indexed bucket deleted early): HARNESS §6 "State loss | Tamper tool: delete an indexed
+# bucket early; write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6
+# "`FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): delete bucket fields, delete `k`, … |
+# `faultctl tamper <op> --key K`".
+[[faults]]
+at_s = 40
+cmd = "faultctl tamper del-k --key u000001"
+
+# FLT-7 (malformed data): HARNESS §6 "State loss | Tamper tool: delete an indexed bucket early;
+# write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6 "`FLT-7`,
+# `FLT-11` | Tamper tool (`rl_fixture` user): … corrupt a field, … | `faultctl tamper <op> --key
+# K`".
+[[faults]]
+at_s = 45
+cmd = "faultctl tamper corrupt-field --key u000002 --field u --value tampered"
+
+# FLT-7 (the bucket's index entry deleted): HARNESS §6 "State loss | Tamper tool: delete an indexed
+# bucket early; write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6
+# "`FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): … delete the `ix` member, … | `faultctl
+# tamper <op> --key K`".
+[[faults]]
+at_s = 50
+cmd = "faultctl tamper del-ix --key u000003"
+
+# FLT-1b, the run's one store outage segment: HARNESS §6 "Refused-connection outage, 5 s | … (b)
+# store-adapter wrapper refuses before any command is sent | `unavailable` → closed `503` / open
+# bypass"; DESIGN §B6 "`FLT-1` (b) refuse | Adapter wrapper returns `unavailable` without sending |
+# `POST /_test/faults {target:"store", mode:"refuse", match:"acquire", duration_ms}`".
+[[faults]]
+at_s = 70
+cmd = '{"target":"store","mode":"refuse","match":"acquire","duration_ms":5000}'
+instance = 2
+
+# FLT-11: HARNESS §6 "High-water mark loss | Tamper tool deletes or corrupts it mid-epoch |
+# Epoch-wide `state_integrity_error` (`CLK-7`)"; DESIGN §B6 "`FLT-7`, `FLT-11` | Tamper tool
+# (`rl_fixture` user): … delete `hwm`, … | `faultctl tamper <op> --key K`" (del-hwm takes no key).
+[[faults]]
+at_s = 110
+cmd = "faultctl tamper del-hwm"

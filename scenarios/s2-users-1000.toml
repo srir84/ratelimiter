@@ -1,0 +1,62 @@
+# s2-users-1000 (HARNESS TRF-S2; DESIGN §B4, §B5; IMPLEMENTATION_PLAN H6 step 1): many users and
+# cleanup, a benchmark (bin/bench) with no capacity verdict, three instances: a main cohort of
+# 1,000 users active in [0, 60 s) and back from 150 s, plus a background cohort of 10 always-active
+# users; steps of 500 req/s × 60 s, 10 req/s × 90 s, then 500 req/s × 60 s. The main cohort's
+# buckets grow, are reclaimed while it is away, and are made again on its revisit: tracked buckets
+# fall to 10 (the background cohort) plus quarantined keys before the revisit, and the returning
+# users stay within BUD-11 (no extra allowance; the report's correctness). The TRF-S2 review reads
+# the fall from samples.jsonl (each 1 s tick's rl_tracked_buckets and rl_quarantined_keys of every
+# API and rladmin status's tracked_buckets and quarantined_keys): report.json and report.md give
+# tracked_buckets only as its max and last (orchestrator decision D4, H6 task 1).
+# s2-users-100.toml and the other s2-users file differ only in the main cohort's size.
+# Plan choices, each with its reason:
+# - users.count = 1010: the main cohort is u000000-u000999, the 1,000 distinct users the name gives
+#   (TRF-S2), and the background cohort u001000-u001009 comes after it, so its Zipf weights are the
+#   lowest and the main cohort gets almost every arrival of the 500/s steps; during the 10/s step
+#   only the background cohort is active, about 1 req/s each, so its 10 buckets stay tracked. Zipf
+#   1.1 is the default (unequal activity, TRF-1).
+# - The policy is harness.toml's (10 tokens/s, capacity 20; receipt_lifetime_ns 60 s,
+#   cleanup_interval_ns 5 s), and it makes the reclamation fit the 90 s gap: a bucket is due once
+#   full (2 s of refill) and past its latest receipt's expiry (its last allowed acquire + 60 s). The
+#   main cohort's last arrivals come before 60 s and their 429 retries by about 62.2 s (at most 2
+#   extra, each after max(retry_after_ms, Retry-After) = 1 s here plus ≤ 50 ms jitter), so every
+#   main bucket is due by about 122.2 s and removed by the next pass (every 4.5-5 s) by about 128 s,
+#   over 20 s before the revisit at 150 s. No refunds (refuse_after_acquire_bp 0), so no markers
+#   outlive the buckets.
+# - No [[faults]] (a benchmark has none, HAR-24) and no forced_aof_rewrites_s, so the store runs
+#   with auto-aof-rewrite-percentage 0 (DESIGN §A2; runlog.StoreArgs).
+# - Thresholds are frozen per scenario and seed and never edited (PRF-7): to change a value here,
+#   change the seed or the name.
+name = "s2-users-1000"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "none"
+
+[[steps]]
+rate_per_s = 500
+duration_s = 60
+
+[[steps]]
+rate_per_s = 10
+duration_s = 90
+
+[[steps]]
+rate_per_s = 500
+duration_s = 60
+
+[users]
+count = 1010
+zipf_s = 1.1
+
+# The main cohort: active in [0, 60 s), back from 150 s.
+[[cohorts]]
+users = [0, 999]
+start_s = 0
+stop_s = 60
+revisit_s = 150
+
+# The background cohort: always active (no stop_s).
+[[cohorts]]
+users = [1000, 1009]
+start_s = 0

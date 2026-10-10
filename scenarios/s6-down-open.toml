@@ -1,0 +1,108 @@
+# s6-down-open (HARNESS TRF-S6, §6 FLT-1a, FLT-3, FLT-4, FLT-5, FLT-6, FLT-9, FLT-10; DESIGN §B4,
+# §B5, §B6, §B10; IMPLEMENTATION_PLAN H6 step 1): faults under load in open mode, a test-build run
+# (bin/test) of three instances, one 300 req/s step of 120 s, with 3 % of the allowed requests
+# refused after their acquire (refuse_after_acquire_bp = 300, ERR-15), so refunds run all along. Its
+# one store outage segment is FLT-1a's store down. The report shows refunds confirmed in time,
+# budgets kept (BUD-11), bypass only on unavailable (open: ERR-3 degraded admissions while the store
+# is down), and the unknown outcomes (ERR-9 from FLT-3 and the acquires the outage caught after
+# sending, ERR-16 from FLT-9) counted apart. s6-down-closed.toml is the same run in closed mode.
+# Plan choices, each with its reason:
+# - 100 users, Zipf 1.1 (the default): u000000-u000004 offer about 70, 33, 21, 15 and 12 req/s,
+#   above the policy's 10 tokens/s (harness.toml's, capacity 20), so their keys sit at their bound
+#   and the BUD-11 check (correctness) sees a wrong credit or charge; about 200 req/s are allowed,
+#   so the refusals give about 6 refunds/s (9/s at most, within §B4's 50/s per instance).
+# - failure_mode = "open": the open twin of s6-down-closed.toml, with the same faults and times.
+# - One fault every 5-10 s, each at its offset from hitgen's start, so each one's effects stand
+#   apart in the run log, and each /_test/faults body on one named instance (§B4), spread over the
+#   three: 10 s FLT-3 (instance 1), 20 s FLT-4 (instance 2), 30 s FLT-5 fail_before (instance 3),
+#   35 s FLT-5 fail_after_commit (instance 1), 40 s FLT-9 (instance 2), 50 s FLT-10 (instance 3).
+#   The store outage at 60 s, once the one-call faults are spent; the refunds it holds back are
+#   confirmed within refund_deadline (30 s) + the outage. The kill at 85 s, after them, leaving 35 s
+#   for the instance's restart (its pre-kill wait is at most P + 1 s) and recovery before the end;
+#   the refunds the killed instance still holds are lost (REF-8).
+# - count 5 for each one-call fault: enough to count apart in the report, few enough to stay far
+#   inside the supported failure load (≤ 5 % refunded, §B10).
+name = "s6-down-open"
+seed = 1
+run_kind = "test"
+instances = 3
+
+[policy]
+failure_mode = "open"
+
+[api]
+refuse_after_acquire_bp = 300
+
+[[steps]]
+rate_per_s = 300
+duration_s = 120
+
+[users]
+count = 100
+zipf_s = 1.1
+
+# FLT-3: HARNESS §6 "Lost acquire reply | Store-adapter wrapper drops the reply after the store
+# executed the deduction | `outcome_unknown`"; DESIGN §B6 "`FLT-3` / `FLT-4` lost reply | Wrapper
+# calls the real adapter, discards the reply, returns `outcome_unknown` | `mode:"drop_reply",
+# match:"acquire"/"refund", count`".
+[[faults]]
+at_s = 10
+cmd = '{"target":"store","mode":"drop_reply","match":"acquire","count":5}'
+instance = 1
+
+# FLT-4: HARNESS §6 "Lost refund reply | Store-adapter wrapper drops the reply after the store
+# applied the refund | Retry → `already_applied`"; DESIGN §B6 "`FLT-3` / `FLT-4` lost reply |
+# Wrapper calls the real adapter, discards the reply, returns `outcome_unknown` |
+# `mode:"drop_reply", match:"acquire"/"refund", count`".
+[[faults]]
+at_s = 20
+cmd = '{"target":"store","mode":"drop_reply","match":"refund","count":5}'
+instance = 2
+
+# FLT-5 (before insert): HARNESS §6 "Confirmed failure before insert / after commit | DB client
+# wrapper | `release()` → refund (`REF-2`)"; DESIGN §B6 "`FLT-5` | DB wrapper: fail before insert /
+# fail after commit | `target:"db", mode:"fail_before"/"fail_after_commit"`".
+[[faults]]
+at_s = 30
+cmd = '{"target":"db","mode":"fail_before","count":5}'
+instance = 3
+
+# FLT-5 (after commit): HARNESS §6 "Confirmed failure before insert / after commit | DB client
+# wrapper | `release()` → refund (`REF-2`)"; DESIGN §B6 "`FLT-5` | DB wrapper: fail before insert /
+# fail after commit | `target:"db", mode:"fail_before"/"fail_after_commit"`".
+[[faults]]
+at_s = 35
+cmd = '{"target":"db","mode":"fail_after_commit","count":5}'
+instance = 1
+
+# FLT-9: HARNESS §6 "Lost database commit reply | DB client wrapper drops the commit
+# acknowledgement | `ERR-16`, `done()`, no refund"; DESIGN §B6 "`FLT-9` | DB wrapper: commit, then
+# return an unknown-outcome error | `target:"db", mode:"lose_commit_reply"`".
+[[faults]]
+at_s = 40
+cmd = '{"target":"db","mode":"lose_commit_reply","count":5}'
+instance = 2
+
+# FLT-10: HARNESS §6 "Signing failure | Signer wrapper fails after a confirmed deduction |
+# `receipt_error` (`API-12a`)"; DESIGN §B6 "`FLT-10` | Signer wrapper: fail / corrupt / unusable |
+# `target:"signer", mode:…`".
+[[faults]]
+at_s = 50
+cmd = '{"target":"signer","mode":"fail","count":5}'
+instance = 3
+
+# FLT-1a, the run's one store outage segment: HARNESS §6 "Refused-connection outage, 5 s | (a)
+# Close the store's port, no wrapper, so the production adapter classifies it | `unavailable` →
+# closed `503` / open bypass"; DESIGN §B6 "`FLT-1` (a) closed port | `faultctl store down <d>` …
+# Scenarios arm `d` = 4 s | `faultctl store down 4s`".
+[[faults]]
+at_s = 60
+cmd = "faultctl store down 4s"
+
+# FLT-6: HARNESS §6 "API restart mid-run | Kill and restart one instance | Shared state and other
+# instances' receipts survive; the killed instance's pending refunds are lost (`STA-2`,
+# `REF-8`)"; DESIGN §B6 "`FLT-6` | `faultctl api kill N --restart` … | `faultctl api kill N
+# --restart`".
+[[faults]]
+at_s = 85
+cmd = "faultctl api kill 2 --restart"

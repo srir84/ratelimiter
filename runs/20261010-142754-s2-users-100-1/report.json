@@ -1,0 +1,1819 @@
+{
+  "run_id": "20261010-142754-s2-users-100-1",
+  "context": {
+    "run_id": "20261010-142754-s2-users-100-1",
+    "epoch_id": "67cc8982f2730bec613e423ff70d264f",
+    "run_kind": "bench",
+    "run_label": "benchmark",
+    "baseline": false,
+    "outcome": "ok",
+    "start_ns": 1791642474194309000,
+    "end_ns": 1791642686887628000,
+    "scenario": {
+      "name": "s2-users-100",
+      "path": "scenarios/s2-users-100.toml",
+      "sha256": "285f8d7f653f5871d7ac0c11e26c0330fc675b3b75921862d86d0d655cafda0a"
+    },
+    "seed": 1,
+    "instances": 3,
+    "hardware": {
+      "model": "Mac15,9",
+      "ncpu": 16,
+      "memsize_bytes": 137438953472
+    },
+    "os": {
+      "BuildVersion": "25G83",
+      "ProductName": "macOS",
+      "ProductVersion": "26.6.2"
+    },
+    "versions": {
+      "go": "go1.27.1",
+      "valkey": "Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=1af85cd1d1bb3237",
+      "valkey_path": "/opt/homebrew/bin/valkey-server",
+      "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
+    },
+    "store_settings": {
+      "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-142754-s2-users-100-1/store/acl.conf",
+      "aof-use-rdb-preamble": "yes",
+      "appendfsync": "always",
+      "appendonly": "yes",
+      "auto-aof-rewrite-min-size": "1073741824",
+      "auto-aof-rewrite-percentage": "0",
+      "bind": "127.0.0.1",
+      "maxclients": "4096",
+      "maxmemory": "536870912",
+      "maxmemory-policy": "noeviction",
+      "no-appendfsync-on-rewrite": "no",
+      "port": "6390",
+      "protected-mode": "yes",
+      "save": ""
+    },
+    "postgres_settings": {
+      "fsync": "on",
+      "max_connections": "300",
+      "statement_timeout": "2500ms",
+      "synchronous_commit": "on"
+    },
+    "conformance": {
+      "crash": [
+        {
+          "acked": 4716,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 17
+        },
+        {
+          "acked": 4982,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 14
+        },
+        {
+          "acked": 3279,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 11
+        }
+      ],
+      "eligible": true,
+      "fsync": {
+        "durable_script_p50_us": 6460.5,
+        "f_fullfsync_floor_p50_us": 5667.9,
+        "plain_fsync_p50_us": 41.6
+      },
+      "generated_at": "2026-10-05T16:54:35Z",
+      "go": "go1.27.1",
+      "os": "darwin/arm64",
+      "passed": true,
+      "product": "Valkey",
+      "recommended_store_conns": 16,
+      "reload_ms_a7": 468.7,
+      "row13": [
+        {
+          "conns": 2,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 161.7,
+          "p50_us": 12789.1,
+          "p99_us": 16013.8,
+          "ops": 485
+        },
+        {
+          "conns": 2,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 2549.3,
+          "p50_us": 12866,
+          "p99_us": 17634.8,
+          "ops": 7648
+        },
+        {
+          "conns": 2,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 9514.7,
+          "p50_us": 13786.9,
+          "p99_us": 17045.8,
+          "ops": 28544
+        },
+        {
+          "conns": 4,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 323.7,
+          "p50_us": 12232.2,
+          "p99_us": 16004.5,
+          "ops": 971
+        },
+        {
+          "conns": 4,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 1898.7,
+          "p50_us": 12942.5,
+          "p99_us": 463328.4,
+          "ops": 5696
+        },
+        {
+          "conns": 4,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 18453.3,
+          "p50_us": 13980.8,
+          "p99_us": 17923.8,
+          "ops": 55360
+        },
+        {
+          "conns": 8,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 640,
+          "p50_us": 12750.1,
+          "p99_us": 16603.6,
+          "ops": 1920
+        },
+        {
+          "conns": 8,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 9386.7,
+          "p50_us": 13821.9,
+          "p99_us": 17747.1,
+          "ops": 28160
+        },
+        {
+          "conns": 8,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 32448,
+          "p50_us": 15927.6,
+          "p99_us": 19109.6,
+          "ops": 97344
+        },
+        {
+          "conns": 16,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 1281.7,
+          "p50_us": 12758.2,
+          "p99_us": 16881.6,
+          "ops": 3845
+        },
+        {
+          "conns": 16,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 517.3,
+          "p50_us": 508771.4,
+          "p99_us": 530600.4,
+          "ops": 1552
+        },
+        {
+          "conns": 16,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 31445.3,
+          "p50_us": 31420,
+          "p99_us": 61230.8,
+          "ops": 94336
+        },
+        {
+          "conns": 2,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 93,
+          "p50_us": 22394,
+          "p99_us": 54675.4,
+          "ops": 279
+        },
+        {
+          "conns": 2,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1664,
+          "p50_us": 19317.3,
+          "p99_us": 23440.8,
+          "ops": 4992
+        },
+        {
+          "conns": 2,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 3242.7,
+          "p50_us": 39107.3,
+          "p99_us": 44113.4,
+          "ops": 9728,
+          "samples": [
+            {
+              "ops_per_s": 3242.7,
+              "p50_us": 39107.3,
+              "p99_us": 44113.4,
+              "ops": 9728
+            },
+            {
+              "ops_per_s": 3242.7,
+              "p50_us": 39034.8,
+              "p99_us": 44834.3,
+              "ops": 9728
+            },
+            {
+              "ops_per_s": 3157.3,
+              "p50_us": 40180.7,
+              "p99_us": 47179.4,
+              "ops": 9472
+            }
+          ]
+        },
+        {
+          "conns": 4,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 315.7,
+          "p50_us": 12842.8,
+          "p99_us": 23946.7,
+          "ops": 947
+        },
+        {
+          "conns": 4,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1685.3,
+          "p50_us": 20234.8,
+          "p99_us": 768276,
+          "ops": 5056
+        },
+        {
+          "conns": 4,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 6144,
+          "p50_us": 42006.3,
+          "p99_us": 47831.8,
+          "ops": 18432,
+          "samples": [
+            {
+              "ops_per_s": 6400,
+              "p50_us": 40046.3,
+              "p99_us": 46061.8,
+              "ops": 19200
+            },
+            {
+              "ops_per_s": 6144,
+              "p50_us": 42006.3,
+              "p99_us": 47831.8,
+              "ops": 18432
+            },
+            {
+              "ops_per_s": 192,
+              "p50_us": 1383685.6,
+              "p99_us": 1432940.2,
+              "ops": 576
+            }
+          ]
+        },
+        {
+          "conns": 8,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 649,
+          "p50_us": 12106.3,
+          "p99_us": 17120.1,
+          "ops": 1947
+        },
+        {
+          "conns": 8,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 6314.7,
+          "p50_us": 20396.8,
+          "p99_us": 25607.4,
+          "ops": 18944
+        },
+        {
+          "conns": 8,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 11434.7,
+          "p50_us": 45407.2,
+          "p99_us": 51959.4,
+          "ops": 34304,
+          "samples": [
+            {
+              "ops_per_s": 11093.3,
+              "p50_us": 46036,
+              "p99_us": 52877,
+              "ops": 33280
+            },
+            {
+              "ops_per_s": 11434.7,
+              "p50_us": 45407.2,
+              "p99_us": 51959.4,
+              "ops": 34304
+            },
+            {
+              "ops_per_s": 11434.7,
+              "p50_us": 45746.6,
+              "p99_us": 51687.3,
+              "ops": 34304
+            }
+          ]
+        },
+        {
+          "conns": 16,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1254.3,
+          "p50_us": 12946.9,
+          "p99_us": 16894.7,
+          "ops": 3763
+        },
+        {
+          "conns": 16,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1984,
+          "p50_us": 21427.9,
+          "p99_us": 765305.3,
+          "ops": 5952
+        },
+        {
+          "conns": 16,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 20138.7,
+          "p50_us": 50788.9,
+          "p99_us": 56848.5,
+          "ops": 60416,
+          "samples": [
+            {
+              "ops_per_s": 20821.3,
+              "p50_us": 49100.7,
+              "p99_us": 66090,
+              "ops": 62464
+            },
+            {
+              "ops_per_s": 20138.7,
+              "p50_us": 50788.9,
+              "p99_us": 56848.5,
+              "ops": 60416
+            },
+            {
+              "ops_per_s": 19797.3,
+              "p50_us": 51887.7,
+              "p99_us": 58964.4,
+              "ops": 59392
+            }
+          ]
+        }
+      ],
+      "row14": {
+        "idle_p50_us": 49.4,
+        "loaded_p50_us": 12994,
+        "writers": 16
+      },
+      "row9": [
+        {
+          "clients": 50,
+          "appendfsync": "always",
+          "ops_per_s": 3641.7,
+          "p50_us": 13927.9,
+          "p99_us": 20129.8,
+          "ops": 10925
+        },
+        {
+          "clients": 600,
+          "appendfsync": "always",
+          "ops_per_s": 36418.7,
+          "p50_us": 17220.8,
+          "p99_us": 22973.2,
+          "ops": 109256
+        },
+        {
+          "clients": 50,
+          "appendfsync": "everysec",
+          "ops_per_s": 96507.3,
+          "p50_us": 512.8,
+          "p99_us": 823.7,
+          "ops": 289522
+        }
+      ],
+      "scan_calls_200k": 200,
+      "store_bin": "/opt/homebrew/bin/valkey-server",
+      "store_version": "9.1.2"
+    },
+    "settings": {
+      "api": {
+        "db_dsn": "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conns=64",
+        "limiter_enabled": true,
+        "max_in_flight": 512,
+        "refuse_after_acquire_bp": 0
+      },
+      "instance": {
+        "margin_ns": 1000000000,
+        "max_held_receipts": 1152,
+        "max_pending_refunds": 1152,
+        "max_release_delay_ns": 5000000000,
+        "refund_workers": 128
+      },
+      "policy": {
+        "capacity": 20,
+        "cleanup_interval_ns": 5000000000,
+        "clock_source": "store",
+        "failure_mode": "closed",
+        "max_live_markers": 50000,
+        "max_markers_per_key": 1000,
+        "max_tracked_buckets": 100000,
+        "outage_tolerance_ns": 5000000000,
+        "rate_period_ns": 1000000000,
+        "rate_tokens": 10,
+        "receipt_lifetime_ns": 60000000000,
+        "refund_deadline_ns": 30000000000
+      },
+      "store": {
+        "addr": "127.0.0.1:6390"
+      }
+    },
+    "instance_configs": null,
+    "controlled_clock_ns": null,
+    "schedule_sha256": "9788be47a4623141617357302a7daa79fce242988a055b0355d90fa495d69ac9",
+    "thresholds_sha256": "dcea33716937f5ad12307753ef389b68d17d38536b8e93ea3a57e04fa8b59946",
+    "faults": [],
+    "rewrites": [],
+    "children": [
+      {
+        "name": "hitgen",
+        "role": "hitgen",
+        "pid": 47012,
+        "exit": "exit 0",
+        "exited_before_stop": true,
+        "grace_ns": 35000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-1",
+        "role": "hitapi",
+        "instance": 1,
+        "pid": 47008,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-2",
+        "role": "hitapi",
+        "instance": 2,
+        "pid": 47009,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-3",
+        "role": "hitapi",
+        "instance": 3,
+        "pid": 47010,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "sampler",
+        "role": "sampler",
+        "pid": 47011,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 10000000000,
+        "killed": false
+      }
+    ],
+    "label": "benchmark",
+    "policy": {
+      "capacity": 20,
+      "cleanup_interval_ns": 5000000000,
+      "clock_source": "store",
+      "failure_mode": "closed",
+      "max_live_markers": 50000,
+      "max_markers_per_key": 1000,
+      "max_tracked_buckets": 100000,
+      "outage_tolerance_ns": 5000000000,
+      "rate_period_ns": 1000000000,
+      "rate_tokens": 10,
+      "receipt_lifetime_ns": 60000000000,
+      "refund_deadline_ns": 30000000000
+    },
+    "instance_settings": {
+      "margin_ns": 1000000000,
+      "max_held_receipts": 1152,
+      "max_pending_refunds": 1152,
+      "max_release_delay_ns": 5000000000,
+      "refund_workers": 128
+    },
+    "p_ns": 5000000000,
+    "limiter_enabled": true,
+    "conformance_floor": {
+      "durable_script_p50_us": 6460.5,
+      "f_fullfsync_floor_p50_us": 5667.9,
+      "plain_fsync_p50_us": 41.6
+    },
+    "workload": {
+      "scenario_file": "scenarios/s2-users-100.toml",
+      "steps": [
+        {
+          "rate_per_s": 500.0,
+          "duration_s": 60.0
+        },
+        {
+          "rate_per_s": 10.0,
+          "duration_s": 90.0
+        },
+        {
+          "rate_per_s": 500.0,
+          "duration_s": 60.0
+        }
+      ],
+      "step_bounds_ns": [
+        0,
+        60000000000,
+        150000000000,
+        210000000000
+      ],
+      "users": 110,
+      "instances": 3,
+      "verdict": "none",
+      "spike_step": null,
+      "forced_aof_rewrites_s": [],
+      "stop_early": false
+    }
+  },
+  "load": {
+    "steps": [
+      {
+        "step": 0,
+        "rate_per_s": 500.0,
+        "duration_s": 60.0,
+        "start_ns": 0,
+        "end_ns": 60000000000,
+        "ran": "full",
+        "scheduled": 29985,
+        "planned": 29985,
+        "sent": 29985,
+        "initial": 29985,
+        "duplicates": 0,
+        "retries_429": 28659,
+        "unsent": 0,
+        "achieved_sent_per_s": 499.75,
+        "offered_per_s": 499.75,
+        "sched_lag_ns": {
+          "count": 29985,
+          "p50": 592099,
+          "p95": 1486895,
+          "p99": 3451539
+        },
+        "got_conn_wait_ns_p99": 233375,
+        "generator_limited": false,
+        "status_200": 17608,
+        "status_429": 41036,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 1,
+        "rate_per_s": 10.0,
+        "duration_s": 90.0,
+        "start_ns": 60000000000,
+        "end_ns": 150000000000,
+        "ran": "full",
+        "scheduled": 894,
+        "planned": 894,
+        "sent": 894,
+        "initial": 894,
+        "duplicates": 0,
+        "retries_429": 0,
+        "unsent": 0,
+        "achieved_sent_per_s": 9.933333333333334,
+        "offered_per_s": 9.933333333333334,
+        "sched_lag_ns": {
+          "count": 894,
+          "p50": 655994,
+          "p95": 1179646,
+          "p99": 2516659
+        },
+        "got_conn_wait_ns_p99": 95792,
+        "generator_limited": false,
+        "status_200": 894,
+        "status_429": 0,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 2,
+        "rate_per_s": 500.0,
+        "duration_s": 60.0,
+        "start_ns": 150000000000,
+        "end_ns": 210000000000,
+        "ran": "full",
+        "scheduled": 30154,
+        "planned": 30154,
+        "sent": 30154,
+        "initial": 30154,
+        "duplicates": 0,
+        "retries_429": 28261,
+        "unsent": 0,
+        "achieved_sent_per_s": 502.56666666666666,
+        "offered_per_s": 502.56666666666666,
+        "sched_lag_ns": {
+          "count": 30154,
+          "p50": 585687,
+          "p95": 1451260,
+          "p99": 3349976
+        },
+        "got_conn_wait_ns_p99": 444792,
+        "generator_limited": false,
+        "status_200": 17924,
+        "status_429": 40491,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      }
+    ],
+    "total": {
+      "scheduled": 61033,
+      "planned": 61033,
+      "sent": 61033,
+      "initial": 61033,
+      "duplicates": 0,
+      "retries_429": 56920,
+      "unsent": 0,
+      "sched_lag_ns": {
+        "count": 61033,
+        "p50": 590077,
+        "p95": 1463100,
+        "p99": 3389002
+      },
+      "got_conn_wait_ns_p99": 318792
+    },
+    "stopped_after_step": null,
+    "excluded_step": null,
+    "summary": {
+      "planned": 61033,
+      "launched": 61033,
+      "unsent": 0,
+      "log_drops": 0,
+      "stopped_after_step": null,
+      "excluded_step": null,
+      "skipped_no_eligible": 0
+    },
+    "retry_drops": 0,
+    "generator_drops": 0,
+    "rule": "steps by planned_ns; sent = first attempts written (sent_ns set); unsent = planned \u2212 sent; generator_limited: step p99 of sent_ns \u2212 planned_ns over every planned first attempt, an unwritten one counting above any bound, > 5 ms (\u00a7B9)"
+  },
+  "results": {
+    "requests": 117953,
+    "by_err": {
+      "ERR-1": 36426,
+      "ERR-2": 0,
+      "ERR-3": 0,
+      "ERR-4": 81527,
+      "ERR-5": 0,
+      "ERR-6": 0,
+      "ERR-7": 0,
+      "ERR-8": 0,
+      "ERR-9": 0,
+      "ERR-9a": 0,
+      "ERR-10": 0,
+      "ERR-11": 0,
+      "ERR-12": 0,
+      "ERR-12a": 0,
+      "ERR-12b": 0,
+      "ERR-12c": 0,
+      "ERR-12d": 0,
+      "ERR-13": 0,
+      "ERR-14": 0,
+      "ERR-15": 0,
+      "ERR-16": 0
+    },
+    "unmatched": {},
+    "attempt_outcomes": {
+      "initial": {
+        "200": 31076,
+        "429 rate_limited": 29957
+      },
+      "duplicate": {},
+      "retry": {
+        "200": 5350,
+        "429 rate_limited": 51570
+      }
+    },
+    "transport_errors": {
+      "total": 0,
+      "by_kind": {}
+    },
+    "decisions": {
+      "allowed": 36426,
+      "degraded": 0
+    },
+    "releases": 0,
+    "refunds": {
+      "applied": 0,
+      "already_applied": 0,
+      "receipt_expired": 0,
+      "receipt_invalid": 0,
+      "unresolved": 0
+    },
+    "unresolved_reasons": {},
+    "db_rows": 36426,
+    "prf2": {
+      "new_rows": 36426,
+      "duplicate_rows_avoided": 0,
+      "degraded_admissions": 0,
+      "quota_rejections": 81527,
+      "capacity_refusals": 0,
+      "integrity_failures": 0,
+      "unavailable": 0,
+      "unknown_acquires": 0,
+      "unknown_application_outcomes": 0,
+      "server_failures": 0,
+      "transport_errors": 0,
+      "expired_refunds": 0,
+      "unresolved_refunds": 0,
+      "db_rows": 36426
+    },
+    "unexpected_errors": {
+      "rule": "attempt-1 requests (\u00a7B9): a transport error or timeout (no HTTP response), or a 5xx other than service_aborted_after_acquire whose wall-clock span, from its write to its response, overlaps no fault window [start_ns, end_ns + P]; steps count their observation window: the step minus its first 5 s, by planned_ns",
+      "fault_windows": [],
+      "total": {
+        "attempts": 61033,
+        "unexpected": 0,
+        "rate": 0.0,
+        "transport_errors": 0,
+        "server_errors": 0,
+        "excluded_service_aborted_after_acquire": 0,
+        "excluded_fault_window": 0
+      },
+      "steps": [
+        {
+          "step": 0,
+          "window_start_ns": 5000000000,
+          "window_end_ns": 60000000000,
+          "attempts": 27504,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 1,
+          "window_start_ns": 65000000000,
+          "window_end_ns": 150000000000,
+          "attempts": 852,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 2,
+          "window_start_ns": 155000000000,
+          "window_end_ns": 210000000000,
+          "attempts": 27595,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        }
+      ]
+    },
+    "steps": [
+      {
+        "step": 0,
+        "requests": 57945,
+        "new_rows": 17475,
+        "allowed": 17475,
+        "limited": 40470
+      },
+      {
+        "step": 1,
+        "requests": 1593,
+        "new_rows": 1027,
+        "allowed": 1027,
+        "limited": 566
+      },
+      {
+        "step": 2,
+        "requests": 58415,
+        "new_rows": 17924,
+        "allowed": 17924,
+        "limited": 40491
+      }
+    ]
+  },
+  "timing": {
+    "limiter_ns": {
+      "allowed": {
+        "count": 36426,
+        "p50": 11854583,
+        "p95": 447113083,
+        "p99": 743811250
+      },
+      "limited": {
+        "count": 81527,
+        "p50": 11415042,
+        "p95": 391285750,
+        "p99": 666406625
+      },
+      "degraded": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "error": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "db_ns": {
+      "count": 36426,
+      "p50": 780459,
+      "p95": 6491958,
+      "p99": 15598959
+    },
+    "api_total_ns": {
+      "count": 117953,
+      "p50": 11896916,
+      "p95": 415752791,
+      "p99": 706668417
+    },
+    "refund_ns": {
+      "all": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "applied": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "already_applied": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "receipt_expired": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "receipt_invalid": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "unresolved": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "end_to_end_ns": {
+      "all": {
+        "count": 61033,
+        "p50": 12750291,
+        "p95": 458020375,
+        "p99": 767972833
+      },
+      "success": {
+        "count": 31076,
+        "p50": 13296917,
+        "p95": 463410292,
+        "p99": 771773875
+      },
+      "limited": {
+        "count": 29957,
+        "p50": 12191000,
+        "p95": 453319042,
+        "p99": 765427584
+      },
+      "error": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "retries": {
+        "count": 56920,
+        "p50": 12204375,
+        "p95": 366520792,
+        "p99": 628084500
+      }
+    },
+    "steps": [
+      {
+        "step": 0,
+        "window_start_ns": 5000000000,
+        "window_end_ns": 60000000000,
+        "latency_ns": {
+          "count": 27504,
+          "p50": 12616833,
+          "p95": 409869958,
+          "p99": 526455625
+        }
+      },
+      {
+        "step": 1,
+        "window_start_ns": 65000000000,
+        "window_end_ns": 150000000000,
+        "latency_ns": {
+          "count": 852,
+          "p50": 9615541,
+          "p95": 20411042,
+          "p99": 414744500
+        }
+      },
+      {
+        "step": 2,
+        "window_start_ns": 155000000000,
+        "window_end_ns": 210000000000,
+        "latency_ns": {
+          "count": 27595,
+          "p50": 13272375,
+          "p95": 545004875,
+          "p99": 966587292
+        }
+      }
+    ],
+    "rewrite_windows": [],
+    "rewrite_p99_ns": null,
+    "rewrite_latency_ns": null,
+    "rule": "limiter_ns by acquire result (every result other than allowed, limited and degraded is an error); db_ns where the DB work ran (db_ns > 0); refund_ns = final_mono_ns \u2212 release_mono_ns; end_to_end_ns from gen.jsonl, attempt 1 with an HTTP response, by status (success 200, limited 429, error other), retries apart; steps: the \u00a7B9 latency population over each observation window; rewrite: attempt-1 responses whose wall-clock span overlaps a rewrite window (TRF-S7)"
+  },
+  "clocks": {
+    "fields": {
+      "context.start_ns, end_ns, faults[].start_ns, end_ns, rewrites[]": "wall clock, ns since the UTC epoch",
+      "api request arrival_ns": "wall clock, ns since the UTC epoch",
+      "samples t_ns": "wall clock, ns since the UTC epoch",
+      "api decision_ns, request decision_ns, gen decision_ns": "budget time: the store's clock in \u00b5s \u00d7 1,000 (API-4); compared only with budget time",
+      "refund credit_decision_ns": "budget time: the store's clock in \u00b5s \u00d7 1,000 (API-4); compared only with budget time",
+      "gen planned_ns, sent_ns": "hitgen's monotonic clock, ns from its t0",
+      "gen latency, got_conn_wait_ns": "hitgen's monotonic clock, ns (durations)",
+      "api limiter_ns, db_ns, total_ns": "hitapi's monotonic clock, ns (durations)",
+      "release release_mono_ns": "hitapi's monotonic clock, ns since the process started",
+      "refund release_mono_ns, final_mono_ns": "the limiter's monotonic clock, ns since it was built"
+    },
+    "t0_wall_ns": 1791642474724653000,
+    "t0_rule": "hitgen's t0 on the wall clock: the time of its sending log line (hitgen.stderr), written just before it takes t0; it places planned_ns and sent_ns on the wall clock for the fault and rewrite windows and arrival_ns on hitgen's steps"
+  },
+  "resources": {
+    "samples": 212,
+    "health_reads": 636,
+    "max_in_flight": 278,
+    "processes": {
+      "hitapi-1": {
+        "cpu_pct_mean": 7.24,
+        "cpu_pct_max": 15.17,
+        "rss_bytes_mean": 47498375,
+        "rss_bytes_max": 58851328,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "hitapi-2": {
+        "cpu_pct_mean": 7.24,
+        "cpu_pct_max": 15.85,
+        "rss_bytes_mean": 47863382,
+        "rss_bytes_max": 55410688,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "hitapi-3": {
+        "cpu_pct_mean": 7.18,
+        "cpu_pct_max": 13.95,
+        "rss_bytes_mean": 48059449,
+        "rss_bytes_max": 55476224,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "hitgen": {
+        "cpu_pct_mean": 17.62,
+        "cpu_pct_max": 38.58,
+        "rss_bytes_mean": 67188697,
+        "rss_bytes_max": 87097344,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "postgres": {
+        "cpu_pct_mean": 4.35,
+        "cpu_pct_max": 16.93,
+        "rss_bytes_mean": 1386665481,
+        "rss_bytes_max": 2248687616,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "sampler": {
+        "cpu_pct_mean": 9.12,
+        "cpu_pct_max": 11.94,
+        "rss_bytes_mean": 29420254,
+        "rss_bytes_max": 30359552,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      },
+      "valkey-server": {
+        "cpu_pct_mean": 7.09,
+        "cpu_pct_max": 15.15,
+        "rss_bytes_mean": 9813938,
+        "rss_bytes_max": 10076160,
+        "cpu_readings": 212,
+        "rss_readings": 212
+      }
+    },
+    "store_state": {
+      "live_markers": {
+        "max": 0,
+        "last": 0,
+        "readings": 200
+      },
+      "quarantined_keys": {
+        "max": 0,
+        "last": 0,
+        "readings": 200
+      },
+      "tracked_buckets": {
+        "max": 110,
+        "last": 110,
+        "readings": 200
+      }
+    },
+    "instance_series": [
+      {
+        "instance": 1,
+        "series": "in_flight",
+        "max": 261,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 26,
+        "last": 26,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 0.292269,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 44,
+        "last": 44,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 1,
+        "series": "rl_tracked_buckets",
+        "max": 110,
+        "last": 110,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "in_flight",
+        "max": 267,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 41,
+        "last": 41,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 3.487533,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 44,
+        "last": 44,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 2,
+        "series": "rl_tracked_buckets",
+        "max": 110,
+        "last": 110,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "in_flight",
+        "max": 278,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 33,
+        "last": 33,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 0.794964,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 43,
+        "last": 43,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 212
+      },
+      {
+        "instance": 3,
+        "series": "rl_tracked_buckets",
+        "max": 110,
+        "last": 110,
+        "readings": 212
+      }
+    ],
+    "pids": [
+      {
+        "role": "valkey-server",
+        "pid": 47002
+      },
+      {
+        "role": "hitapi",
+        "instance": 1,
+        "pid": 47008
+      },
+      {
+        "role": "hitapi",
+        "instance": 2,
+        "pid": 47009
+      },
+      {
+        "role": "hitapi",
+        "instance": 3,
+        "pid": 47010
+      },
+      {
+        "role": "sampler",
+        "pid": 47011
+      },
+      {
+        "role": "hitgen",
+        "pid": 47012
+      }
+    ]
+  },
+  "traffic": {
+    "schedule_path": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-142754-s2-users-100-1/schedule.jsonl",
+    "schedule_sha256": "9788be47a4623141617357302a7daa79fce242988a055b0355d90fa495d69ac9",
+    "schedule_sha256_context": "9788be47a4623141617357302a7daa79fce242988a055b0355d90fa495d69ac9",
+    "schedule_sha256_matches": true,
+    "schedule_entries": 61033,
+    "planned_per_step": [
+      29985,
+      894,
+      30154
+    ],
+    "instances": 3,
+    "requests_per_instance": {
+      "1": 20345,
+      "2": 20344,
+      "3": 20344
+    },
+    "served_per_instance": {
+      "1": 39219,
+      "2": 39336,
+      "3": 39398
+    },
+    "instances_used": 3,
+    "users": 110,
+    "busiest_user": {
+      "user": "u000000",
+      "first_attempts": 13787,
+      "instances": [
+        1,
+        2,
+        3
+      ]
+    }
+  },
+  "baseline": {
+    "run_id": "20261010-142421-s2-users-100-1",
+    "source": "thresholds.json",
+    "schedule_sha256": "9788be47a4623141617357302a7daa79fce242988a055b0355d90fa495d69ac9",
+    "same_schedule": true,
+    "steps": [
+      {
+        "step": 0,
+        "p99_ns": 526455625,
+        "baseline_p99_ns": 10745958,
+        "p99_delta_ns": 515709667,
+        "unexpected_rate": 0.0,
+        "baseline_unexpected_rate": 0.0,
+        "unexpected_rate_delta": 0.0,
+        "baseline_ran": "full",
+        "baseline_step_exists": true,
+        "baseline_generator_limited": false
+      },
+      {
+        "step": 1,
+        "p99_ns": 414744500,
+        "baseline_p99_ns": 8236417,
+        "p99_delta_ns": 406508083,
+        "unexpected_rate": 0.0,
+        "baseline_unexpected_rate": 0.0,
+        "unexpected_rate_delta": 0.0,
+        "baseline_ran": "full",
+        "baseline_step_exists": true,
+        "baseline_generator_limited": false
+      },
+      {
+        "step": 2,
+        "p99_ns": 966587292,
+        "baseline_p99_ns": 10395792,
+        "p99_delta_ns": 956191500,
+        "unexpected_rate": 0.0,
+        "baseline_unexpected_rate": 0.0,
+        "unexpected_rate_delta": 0.0,
+        "baseline_ran": "full",
+        "baseline_step_exists": true,
+        "baseline_generator_limited": false
+      }
+    ],
+    "problem": null
+  },
+  "correctness": {
+    "verdict": "pass",
+    "known_credits": 0,
+    "unknown_credits": 0,
+    "listener_drops": 0,
+    "pre_kill_lines": 0,
+    "pre_kill_read_ok_false": 0,
+    "invalid_reasons": [],
+    "violation": null
+  },
+  "capacity": null,
+  "evidence_validity": {
+    "checks": {
+      "log_drops": {
+        "ok": true,
+        "value": 0,
+        "detail": "log_drops summed over every stop and pre_kill line of every api-N.jsonl"
+      },
+      "listener_drops": {
+        "ok": true,
+        "value": {
+          "sum": 0,
+          "stop_lines": 3,
+          "pre_kill_lines": 0,
+          "pre_kill_unread": 0,
+          "segments_without_count": 0
+        },
+        "detail": "HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process ended with one of the two"
+      },
+      "fixtures_off": {
+        "ok": true,
+        "value": {
+          "applies": true,
+          "health_reads": 636,
+          "fixtures_on": 0,
+          "clock_not_store": 0,
+          "faults": 0
+        },
+        "detail": "benchmark runs: every /health read shows fixtures false on the store clock, at least one was read, and no fault ran"
+      },
+      "outage": {
+        "ok": true,
+        "value": {
+          "max_outage_ns": null,
+          "unmeasured": 0
+        },
+        "detail": "every store outage measured (context.json outage_ns of each faultctl store down or pause that ran) and at most 5 s"
+      },
+      "outage_segments": {
+        "ok": true,
+        "value": 0,
+        "detail": "store outage segments armed: faultctl store down or pause, and timed store refusals"
+      },
+      "gen_summary": {
+        "ok": true,
+        "value": 0,
+        "detail": "gen.jsonl ends with its summary line, whose log_drops is 0"
+      },
+      "rewrite_windows": {
+        "ok": true,
+        "value": {
+          "applies": false,
+          "windows": 0
+        },
+        "detail": "a scenario with forced_aof_rewrites_s observed at least one AOF rewrite window"
+      },
+      "correctness": {
+        "ok": true,
+        "value": {
+          "verdict": "pass",
+          "invalid_reasons": []
+        },
+        "detail": "HAR-13: refmodel.check_bud11's BUD-11a verdict (correctness) is pass or violation, not invalid: an invalid verdict means the run's refund evidence is incomplete (invalid_reasons say why; rerun)"
+      }
+    },
+    "valid": true
+  }
+}
