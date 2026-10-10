@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -44,6 +45,15 @@ def pytest_sessionfinish(session, exitstatus):
 
 // pyPluginModule is the plugin's module name.
 const pyPluginModule = "mutate_report"
+
+var (
+	// pyFromRe is a `from a.b import c` line; its group is the top-level module.
+	pyFromRe = regexp.MustCompile(`^\s*from\s+([A-Za-z_][A-Za-z0-9_]*)[A-Za-z0-9_.]*\s+import\b`)
+	// pyImportRe is an `import a.b, c as d` line; its group is the list of modules.
+	pyImportRe = regexp.MustCompile(`^\s*import\s+([A-Za-z_][A-Za-z0-9_., \t]*)`)
+	// pyNameRe is the top-level module at the start of one entry of that list.
+	pyNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*`)
+)
 
 // pyResult is what one pytest run showed.
 type pyResult struct {
@@ -218,6 +228,11 @@ func pytest(ctx context.Context, cfg config, pkg string, m *mutant, names []stri
 			return pyResult{}, err
 		}
 	}
+	// The package's tests may import sibling packages (report imports refmodel): copy them in
+	// next to it, unpatched; the patched package is in the copy already and is never replaced.
+	if err := copyPySiblings(ctx, cfg.root, tree); err != nil {
+		return pyResult{}, err
+	}
 	env := pyEnv(cfg.environ, pluginDir)
 	if m != nil {
 		target := filepath.Join(tree, filepath.FromSlash(m.file))
@@ -309,6 +324,101 @@ func pyEnv(environ []string, pluginDir string) []string {
 		}
 	}
 	return append(env, "PYTHONPATH="+pythonPath, "PYTHONDONTWRITEBYTECODE=1")
+}
+
+// copyPySiblings copies into tree each sibling Python package of root (a top-level
+// directory holding __init__.py) that a Python file in tree imports, and those that the copied
+// ones import in turn, so the named tests import what they import in the repository. A name
+// already in tree (the patched package) is never copied over. A done ctx stops it.
+func copyPySiblings(ctx context.Context, root, tree string) error {
+	seen := map[string]bool{}
+	queue := []string{tree}
+	for len(queue) > 0 {
+		dir := queue[0]
+		queue = queue[1:]
+		names, err := pyImports(ctx, dir)
+		if err != nil {
+			return err
+		}
+		for _, name := range names {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			switch _, err := os.Lstat(filepath.Join(tree, name)); {
+			case err == nil:
+				continue // in the copy already: the patched package
+			case !errors.Is(err, os.ErrNotExist):
+				return err
+			}
+			ok, err := fileExists(ctx, filepath.Join(root, name, "__init__.py"))
+			if err != nil {
+				return err
+			}
+			if !ok {
+				continue // the standard library or an installed module
+			}
+			dst := filepath.Join(tree, name)
+			if err := copyPyTree(ctx, filepath.Join(root, name), dst); err != nil {
+				return err
+			}
+			queue = append(queue, dst)
+		}
+	}
+	return nil
+}
+
+// pyImports returns the top-level module names the Python files under dir import, sorted:
+// `import a.b, c as d` names a and c, `from a.b import c` names a (a relative import names
+// none). It reads lines, not the grammar: a line of a string that looks like an import may add
+// a name, which only costs a copy when a sibling package has that name.
+func pyImports(ctx context.Context, dir string) ([]string, error) {
+	found := map[string]bool{}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() || !strings.HasSuffix(d.Name(), ".py") {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if m := pyFromRe.FindStringSubmatch(line); m != nil {
+				found[m[1]] = true
+				continue
+			}
+			if m := pyImportRe.FindStringSubmatch(line); m != nil {
+				for part := range strings.SplitSeq(m[1], ",") {
+					if name := pyNameRe.FindString(strings.TrimSpace(part)); name != "" {
+						found[name] = true
+					}
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading the imports under %s: %w", dir, err)
+	}
+	names := make([]string, 0, len(found))
+	for name := range found {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // copyPyTree copies a Python package directory, leaving out the tools' caches. A done ctx

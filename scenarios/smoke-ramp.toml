@@ -1,0 +1,26 @@
+# smoke-ramp (DESIGN §C5, §C8; IMPLEMENTATION_PLAN H5 step 9; rates are a plan choice): a short
+# benchmark of three steps, 100, 200 and 400 req/s for 20 s each, over 1,000 users and three
+# instances, judged by the capacity verdict (T-RPT-2, PRF-8, PRF-11). make test-report runs its
+# baseline (BASELINE=1), which freezes runs/thresholds/smoke-ramp-1.json once, then the limiter
+# run judged against it; test_t_rpt_1 and test_t_rpt_2 read both reports. Thresholds are never
+# edited (PRF-7): to change these rates, change the seed or the name.
+name = "smoke-ramp"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "capacity"
+
+[[steps]]
+rate_per_s = 100
+duration_s = 20
+
+[[steps]]
+rate_per_s = 200
+duration_s = 20
+
+[[steps]]
+rate_per_s = 400
+duration_s = 20
+
+[users]
+count = 1000

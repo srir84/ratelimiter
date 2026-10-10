@@ -1,0 +1,29 @@
+# smoke-spike (DESIGN §C5, §C8, §B9 "Spike recovery"; IMPLEMENTATION_PLAN H5 step 9; rates are a
+# plan choice): a short benchmark of a base of 100 req/s for 30 s, a 5x spike of 500 req/s for
+# 10 s (spike_step 1, 0-based) and the base again for 90 s, over 1,000 users and three instances,
+# judged by the spike verdict (T-RPT-2, PRF-6): recovery deadline = the spike's end + 30 s = 70 s,
+# window [70 s, 130 s], against the post-spike step's thresholds. make test-report runs its
+# baseline (BASELINE=1), which freezes runs/thresholds/smoke-spike-1.json once with the deadline
+# and window, then the limiter run judged against it. Thresholds are never edited (PRF-7): to
+# change these rates, change the seed or the name.
+name = "smoke-spike"
+seed = 1
+run_kind = "bench"
+instances = 3
+verdict = "spike"
+spike_step = 1
+
+[[steps]]
+rate_per_s = 100
+duration_s = 30
+
+[[steps]]
+rate_per_s = 500
+duration_s = 10
+
+[[steps]]
+rate_per_s = 100
+duration_s = 90
+
+[users]
+count = 1000

@@ -126,6 +126,41 @@ test-e2e: bin/trace build
 test-py: bin/trace
 	$(PYTHON) -m pytest $(PY_PKGS) -m 'not run_evidence' --junitxml=.out/test-py.xml
 
+# The run-evidence tests (DESIGN §C5, §C8; IMPLEMENTATION_PLAN H5 step 10). Each smoke scenario's
+# baseline (BASELINE=1), then its limiter run, through make run, one run at a time: benchmarks
+# need a machine with no other heavy load. A baseline freezes runs/thresholds/<scenario>-<seed>.json
+# once (never overwritten: a later pass reuses it). Keep the baseline run that froze it,
+# runs/<its baseline_run_id>/, while the frozen file is in use: report/validate.py recomputes the
+# frozen values from that run's report.json and fails every later limiter run without it (to
+# start over, remove runs/ whole, or change the scenario's seed or name). Each run's ID is the
+# runs/index.jsonl line make run appended (the orchestrator appends one only for a finished run
+# whose report passed report/validate.py); the IDs go into .out/test-report-runs.json as
+# {"smoke-ramp-baseline", "smoke-ramp", "smoke-spike-baseline", "smoke-spike"} -> run ID (plan
+# choice). Then the report builder's budget on a synthetic 12,000,000-line run (at most 300 s and
+# 2 GB), and the run_evidence tests (T-RPT-1, T-RPT-2) on those runs.
+SMOKE_SCENARIOS := smoke-ramp smoke-spike
+
+.PHONY: test-report
+test-report: bin/trace build
+	mkdir -p .out
+	rm -f .out/test-report-runs.json
+	ids=; \
+	for s in $(SMOKE_SCENARIOS); do \
+		for b in 1 ""; do \
+			if [ -n "$$b" ]; then key="$$s-baseline"; flag=true; else key="$$s"; flag=false; fi; \
+			$(SUBMAKE) run SCENARIO="scenarios/$$s.toml" BASELINE="$$b"; \
+			line="$$(tail -n 1 runs/index.jsonl)"; \
+			want="{\"scenario\":\"$$s\",\"baseline\":$$flag,\"run_id\":\""; \
+			id="$${line#"$$want"}"; id="$${id%'"}'}"; \
+			case "$$line" in "$$want"*) ;; *) echo "test-report: runs/index.jsonl ends with $$line, not $$key's run" >&2; exit 1 ;; esac; \
+			case "$$id" in "" | *[!A-Za-z0-9_-]*) echo "test-report: $$key's run ID $$id is not one" >&2; exit 1 ;; esac; \
+			ids="$$ids$${ids:+, }\"$$key\": \"$$id\""; \
+		done; \
+	done; \
+	printf '{%s}\n' "$$ids" > .out/test-report-runs.json
+	$(PYTHON) -m report.budget
+	$(PYTHON) -m pytest report -m run_evidence --junitxml=.out/pytest-report.xml
+
 # Mutation testing (DESIGN §C9; IMPLEMENTATION_PLAN S4 step 17): the curated planted bugs whose
 # files exist, or, when SWEEP lists files, the operator sweep over them (make mutate
 # SWEEP="internal/scripts/acquire.lua …"; survivors and untried mutants go to .out/mutants.txt).

@@ -113,6 +113,12 @@ func curatedEntries() []curatedEntry {
 			From: `checks.append(("u", expected.u, actual["u"]))`, // Replay stops comparing units (BUD-12)
 			To:   `checks.append(("u", actual["u"], actual["u"]))`,
 		},
+		{
+			ID: "PB18", File: "report/validate.py", Tests: []string{"report/test_validate.py::test_each_value_check_fails"},
+			// validate.py skips the thresholds hash check (PRF-6, T-RPT-2): the line is deleted.
+			From: `checks.expect("thresholds_hash", copied is not None and copied == recorded == frozen, hashes)`,
+			To:   "",
+		},
 	}
 }
 

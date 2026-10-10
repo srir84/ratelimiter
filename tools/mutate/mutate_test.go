@@ -173,6 +173,11 @@ func TestMutate_Kill(t *testing.T) {
 		{"a Python file of tests", with(pyAdd, "K13", "pkg/calc_check.py"), killed, "", "pkg/calc_check.py::test_add"},
 		{"a TypeError", with(curatedEntry{File: "pkg/calc.py", From: "return str(n)", To: "return str(n) + n"}, "K14", "pkg/calc_check.py::test_label"), notKilled, "TypeError", ""},
 		{"Python that does not compile", with(edit(pyAdd, "return a + b", "return a +"), "K15", "pkg/calc_check.py::test_add"), invalid, "does not compile", ""},
+		// The named test imports a sibling package (helper), copied in next to the patched pkg;
+		// helper imports pkg back and gets the patched copy, so the mutant fails the test...
+		{"a test importing a sibling package", with(pyAdd, "K19", "pkg/cross_check.py::test_twice"), killed, "", "pkg/cross_check.py::test_twice"},
+		// ...and a mutant the test does not reach leaves it passing.
+		{"a sibling-package test the mutant leaves passing", with(curatedEntry{File: "pkg/calc.py", From: "return str(n)", To: `return str(n) + ""`}, "K20", "pkg/cross_check.py::test_twice"), survived, "", ""},
 		// Named tests in two go test runs: each run's baseline answers for its own tests only.
 		{"tests in two builds of a package", with(add, "K16", "TestAdd", "TestTagged"), killed, "", "TestAdd"},
 		{"tests in two packages, the second run killing", with(add, "K17", "TestCheck", "TestAdd"), killed, "", "TestAdd"},

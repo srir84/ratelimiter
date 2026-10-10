@@ -21,15 +21,20 @@ records change no window. A policy and epoch pair begins independent accounting
 for every key in the new epoch, including when the policy remains unchanged.
 """
 
+import json
+import re
 import sys
+import tomllib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
 from refmodel import RecordError
-from refmodel.model import Policy
+from refmodel.model import TBOUND, Policy
 from refmodel.replay import (
     NEUTRAL,
     NUMBERS,
+    REFUND_RESULTS,
     RESULTS,
     UNSENT_CODES,
     decode_key,
@@ -321,13 +326,526 @@ def check_oplog(path: Path) -> tuple[str, Violation] | None:
     return None
 
 
+# Run logs are independent of op logs: kind-based golden shapes, one epoch,
+# user_id keys, and budget times joined by deduction_id across each whole file.
+RUN_FIELDS = {
+    "decision": "deduction_id user_id decision_ns result",
+    "release": "deduction_id release_mono_ns",
+    "refund": (
+        "deduction_id result reason attempts credit_decision_ns release_mono_ns final_mono_ns"
+    ),
+    "request": (
+        "run_id epoch_id instance user_id request_id arrival_ns decision_ns deduction_id "
+        "result existed http_status error limiter_ns db_ns total_ns"
+    ),
+    "start": (
+        "max_in_flight queue_len max_release_delay_ns dependency_deadline_ns drain_timeout_ns "
+        "nofile_limit"
+    ),
+    "ready": "",
+    "stop": "listener_drops log_drops",
+    "pre_kill": "listener_drops log_drops read_ok",
+}
+RUN_STRINGS = {
+    "deduction_id",
+    "user_id",
+    "result",
+    "reason",
+    "run_id",
+    "epoch_id",
+    "request_id",
+    "error",
+}
+
+
+class RunRecordError(RecordError):
+    """Run input error with a printable, unambiguous field name."""
+
+    def __init__(self, record: str, field: str, reason: str) -> None:
+        super().__init__(record, repr(field), reason)
+
+
+def run_integer(record: dict[str, object], field: str, location: str) -> int:
+    value = record.get(field)
+    if type(value) is not int or value < 0:
+        raise RunRecordError(location, field, "expected nonnegative integer")
+    if field in {"listener_drops", "log_drops"} and value > 2**63 - 1:
+        raise RunRecordError(location, field, "expected count in range 0-9223372036854775807")
+    return value
+
+
+def run_string(record: dict[str, object], field: str, location: str) -> str:
+    value = record.get(field)
+    if not isinstance(value, str):
+        raise RunRecordError(location, field, "expected string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise RunRecordError(location, field, "expected UTF-8 string") from error
+    return value
+
+
+def validate_run_record(record: dict[str, object], location: str, instance: int) -> str:
+    kind = run_string(record, "kind", location)
+    event = run_string(record, "event", location) if kind == "lifecycle" else kind
+    if event not in RUN_FIELDS or (
+        kind != "lifecycle" and event in {"start", "ready", "stop", "pre_kill"}
+    ):
+        raise RunRecordError(
+            location, "event" if kind == "lifecycle" else "kind", "unsupported record"
+        )
+    if kind == "lifecycle" and event not in {"start", "ready", "stop", "pre_kill"}:
+        raise RunRecordError(location, "event", "unsupported lifecycle event")
+    fields = set(RUN_FIELDS[event].split()) | {"kind"}
+    if kind == "lifecycle":
+        fields.add("event")
+    for field in sorted(fields - record.keys()):
+        raise RunRecordError(location, field, "missing field")
+    for field in sorted(record.keys() - fields):
+        raise RunRecordError(location, field, "unexpected field")
+    for field in sorted(fields - {"kind", "event"}):
+        if field in RUN_STRINGS:
+            run_string(record, field, location)
+        elif field in {"read_ok", "existed"}:
+            if type(record[field]) is not bool:
+                raise RunRecordError(location, field, "expected boolean")
+        else:
+            value = run_integer(record, field, location)
+            if field in {"decision_ns", "credit_decision_ns"} and (value % 1000 or value >= TBOUND):
+                raise RunRecordError(location, field, "expected bounded microsecond budget time")
+    if event == "decision":
+        result = run_string(record, "result", location)
+        if result not in {"allowed", "degraded"}:
+            raise RunRecordError(location, "result", "decision must be allowed or degraded")
+        user = run_string(record, "user_id", location)
+        if not 1 <= len(user.encode("utf-8")) <= 256:
+            raise RunRecordError(location, "user_id", "expected 1-256 UTF-8 bytes")
+        deduction = run_string(record, "deduction_id", location)
+        if (result == "allowed" and not deduction) or (result == "degraded" and deduction):
+            raise RunRecordError(location, "deduction_id", "invalid permit identity")
+        if result == "degraded" and record["decision_ns"] != 0:
+            raise RunRecordError(location, "decision_ns", "degraded requires zero placeholder")
+    elif event == "refund":
+        result = run_string(record, "result", location)
+        if result not in REFUND_RESULTS:
+            raise RunRecordError(location, "result", "unsupported refund result")
+        reason = run_string(record, "reason", location)
+        if (result == "unresolved" and reason not in {"closed", "retention", "expired"}) or (
+            result != "unresolved" and reason != ""
+        ):
+            raise RunRecordError(location, "reason", "invalid final-event reason")
+        if result in {"applied", "already_applied"}:
+            if record["attempts"] == 0:
+                raise RunRecordError(location, "attempts", "confirmed credit needs a sent attempt")
+        elif record["credit_decision_ns"] != 0:
+            raise RunRecordError(
+                location, "credit_decision_ns", "unknown credit needs zero placeholder"
+            )
+        if run_integer(record, "final_mono_ns", location) < run_integer(
+            record, "release_mono_ns", location
+        ):
+            raise RunRecordError(location, "final_mono_ns", "final event precedes release")
+    elif event == "request":
+        if record["instance"] != instance:
+            raise RunRecordError(location, "instance", "does not match run-log filename")
+        if not 100 <= run_integer(record, "http_status", location) <= 599:
+            raise RunRecordError(location, "http_status", "expected HTTP status 100-599")
+    elif event == "start" and record["queue_len"] != 0:
+        raise RunRecordError(location, "queue_len", "host must not queue requests")
+    return event
+
+
+def read_run_records(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
+    try:
+        stream = path.open("rb")
+    except OSError as error:
+        raise RunRecordError(f"{path}: line 1", "file", str(error)) from error
+    with stream:
+        for line, raw in enumerate(stream, 1):
+            location = f"{path}: line {line}"
+
+            def unique_fields(
+                pairs: list[tuple[str, object]], location: str = location
+            ) -> dict[str, object]:
+                fields: dict[str, object] = {}
+                for field, value in pairs:
+                    if field in fields:
+                        raise RunRecordError(location, field, "duplicate JSON field")
+                    fields[field] = value
+                return fields
+
+            def reject_constant(value: str, location: str = location) -> object:
+                raise RunRecordError(location, "json", f"non-JSON number {value}")
+
+            try:
+                record = json.loads(
+                    raw.decode("utf-8"),
+                    object_pairs_hook=unique_fields,
+                    parse_constant=reject_constant,
+                )
+            except RecordError:
+                raise
+            except UnicodeDecodeError as error:
+                raise RunRecordError(location, "json", str(error)) from error
+            except (ValueError, RecursionError) as error:
+                raise RunRecordError(location, "json", str(error)) from error
+            if not isinstance(record, dict):
+                raise RunRecordError(location, "json", "expected object")
+            yield line, record
+
+
+def config_source_lines(path: Path) -> Iterator[tuple[int, str]]:
+    """Strip comments outside quotes and omit multiline string continuation lines."""
+    quote = ""
+    depth = 0
+    with path.open(encoding="utf-8") as stream:
+        for line, raw in enumerate(stream, 1):
+            continuation = len(quote) == 3 or depth > 0
+            index = 0
+            while index < len(raw):
+                char = raw[index]
+                if quote:
+                    if quote.startswith('"') and char == "\\":
+                        index += 2
+                        continue
+                    if raw.startswith(quote, index):
+                        index += len(quote)
+                        if len(quote) == 3:
+                            # TOML permits one or two extra quotes at the closing delimiter.
+                            for _ in range(2):
+                                if index < len(raw) and raw[index] == quote[0]:
+                                    index += 1
+                        quote = ""
+                        continue
+                elif char == "#":
+                    break
+                elif char in {'"', "'"}:
+                    quote = char * 3 if raw.startswith(char * 3, index) else char
+                    index += len(quote)
+                    continue
+                elif char in "[{":
+                    depth += 1
+                elif char in "]}":
+                    depth -= 1
+                index += 1
+            if not continuation:
+                yield line, raw[:index].strip()
+
+
+def config_location(path: Path, table: str, field: str, *, present: bool = True) -> str:
+    # TOML has no source-position API. Use a line only for an unambiguous key
+    # or table declaration; a missing key points to its table declaration.
+    current: str | None = ""
+    table_lines: list[int] = []
+    key_lines: list[int] = []
+    for line, text in config_source_lines(path):
+        if text.startswith("["):
+            current = None
+            try:
+                header = tomllib.loads(text)
+            except tomllib.TOMLDecodeError:
+                continue
+            if len(header) == 1:
+                name, contents = next(iter(header.items()))
+                if contents == {}:
+                    current = name
+                    if name == table:
+                        table_lines.append(line)
+        elif current == table:
+            key_match = re.match(r"""("(?:[^"\\]|\\.)*"|'[^']*'|[\w-]+)\s*=""", text)
+            if key_match is None:
+                continue
+            try:
+                key = tomllib.loads(f"{key_match.group(1)} = 0")
+            except tomllib.TOMLDecodeError:
+                continue
+            if field in key:
+                key_lines.append(line)
+    candidates = key_lines if field and present else table_lines
+    if len(candidates) == 1:
+        return f"{path}: line {candidates[0]}"
+    key_path = f"{table}.{field}" if field else table
+    return f"{path}: key {key_path}"
+
+
+def config_failure_line(path: Path) -> int:
+    """Locate parser resource failures, which have no TOML source position."""
+    lines: list[str] = []
+    with path.open(encoding="utf-8") as stream:
+        for line, raw in enumerate(stream, 1):
+            lines.append(raw)
+            try:
+                tomllib.loads("".join(lines))
+            except RecordError:
+                raise
+            except tomllib.TOMLDecodeError:
+                continue  # An incomplete prefix may become valid on the next line.
+            except (ValueError, RecursionError):
+                return line
+    return 1
+
+
+def read_run_policy(path: Path) -> Policy:
+    try:
+        lines: list[str] = []
+        with path.open("rb") as stream:
+            for line, raw in enumerate(stream, 1):
+                try:
+                    lines.append(raw.decode("utf-8"))
+                except UnicodeDecodeError as error:
+                    raise RunRecordError(f"{path}: line {line}", "config", str(error)) from error
+        config = tomllib.loads("".join(lines))
+    except RecordError:
+        raise
+    except tomllib.TOMLDecodeError as error:
+        syntax_line = getattr(error, "lineno", None)
+        if not hasattr(error, "lineno"):
+            position = re.search(r"\(at line ([0-9]{1,10}), column [0-9]+\)\Z", str(error))
+            syntax_line = int(position.group(1)) if position else None
+        location = (
+            f"{path}: line {syntax_line}"
+            if type(syntax_line) is int and 0 < syntax_line <= 10**9
+            else str(path)
+        )
+        raise RunRecordError(location, "toml", str(error)) from error
+    except (ValueError, RecursionError) as error:
+        line = config_failure_line(path)
+        raise RunRecordError(f"{path}: line {line}", "toml", str(error)) from error
+    except (OSError, UnicodeError) as error:
+        raise RunRecordError(f"{path}: line 1", "config", str(error)) from error
+    values = config.get("policy")
+    if not isinstance(values, dict):
+        raise RunRecordError(f"{path}: line 1", "policy", "missing policy table")
+    fields = {
+        "rate_tokens",
+        "rate_period_ns",
+        "capacity",
+        "failure_mode",
+        "max_tracked_buckets",
+        "max_live_markers",
+        "max_markers_per_key",
+        "receipt_lifetime_ns",
+        "refund_deadline_ns",
+        "outage_tolerance_ns",
+        "cleanup_interval_ns",
+        "clock_source",
+    }
+    for field, value in values.items():
+        location = config_location(path, "policy", field)
+        if field not in fields:
+            raise RunRecordError(location, field, "unknown config field")
+        if field in {"failure_mode", "clock_source"}:
+            if not isinstance(value, str) or not value:
+                raise RunRecordError(location, field, "expected nonempty string")
+            if field == "failure_mode" and value not in {"open", "closed"}:
+                raise RunRecordError(location, field, "expected open or closed")
+            if field == "clock_source" and value not in {"store", "controlled"}:
+                raise RunRecordError(location, field, "expected store or controlled")
+        else:
+            if type(value) is not int or value < (0 if field == "outage_tolerance_ns" else 1):
+                raise RunRecordError(location, field, "expected integer in range")
+            if field.endswith("_ns") and value % 1000:
+                raise RunRecordError(location, field, "expected microsecond granularity")
+    numbers: dict[str, int] = {}
+    for field in Policy.__dataclass_fields__:
+        if field == "max_tracked_buckets" and field not in values:
+            continue
+        location = config_location(path, "policy", field, present=field in values)
+        numbers[field] = run_integer(values, field, location)
+    try:
+        return Policy(**numbers)
+    except RecordError as error:
+        field = str(error).split(": field ", 1)[1].split(":", 1)[0]
+        raise RunRecordError(config_location(path, "policy", field), field, str(error)) from error
+
+
+@dataclass
+class RunEvidence:
+    allows: dict[str, list[int]]
+    credits: dict[str, list[int]]
+    unknown: dict[str, list[tuple[int, int]]]
+    deductions: set[str]
+    invalid_reasons: list[str]
+    listener_drops: int = 0
+    log_drops: int = 0
+    pre_kill_lines: int = 0
+    pre_kill_read_ok_false: int = 0
+
+
+def collect_run_file(path: Path, instance: int, policy: Policy, evidence: RunEvidence) -> None:
+    decisions: dict[str, tuple[str, int]] = {}
+    releases: dict[str, tuple[int, int, str]] = {}
+    refunds: dict[str, tuple[dict[str, object], str]] = {}
+    # Synthetic logs may omit start; retain an implicit initial segment.
+    segment = 0
+    segment_start = 0
+    has_terminal = False
+    killed_segments: set[int] = set()
+
+    def finish_segment() -> None:
+        if not has_terminal:
+            location = f"{path.name}: line {segment_start}" if segment_start else path.name
+            evidence.invalid_reasons.append(f"{location}: missing stop or pre_kill")
+
+    for line, record in read_run_records(path):
+        location = f"{path}: line {line}"
+        event = validate_run_record(record, location, instance)
+        if event == "decision" and record["result"] == "allowed":
+            deduction = run_string(record, "deduction_id", location)
+            if deduction in evidence.deductions:
+                raise RunRecordError(location, "deduction_id", "duplicate deduction identity")
+            evidence.deductions.add(deduction)
+            user = run_string(record, "user_id", location)
+            time = run_integer(record, "decision_ns", location)
+            decisions[deduction] = (user, time)
+            evidence.allows.setdefault(user, []).append(time)
+        elif event in {"release", "refund"}:
+            deduction = run_string(record, "deduction_id", location)
+            if event == "release" and not deduction:
+                continue  # Degraded permits have neither receipt nor final event.
+            if event == "release":
+                if deduction in releases:
+                    raise RunRecordError(location, "deduction_id", "duplicate release")
+                releases[deduction] = (segment, line, location)
+            else:
+                if deduction in refunds:
+                    raise RunRecordError(location, "deduction_id", "duplicate final event")
+                refunds[deduction] = (record, location)
+        elif event == "start":
+            if segment_start or line > 1:
+                finish_segment()
+            segment += 1
+            segment_start = line
+            has_terminal = False
+        elif event in {"stop", "pre_kill"}:
+            has_terminal = True
+            evidence.listener_drops += run_integer(record, "listener_drops", location)
+            evidence.log_drops += run_integer(record, "log_drops", location)
+            if event == "pre_kill":
+                killed_segments.add(segment)
+                evidence.pre_kill_lines += 1
+                if record["read_ok"] is False:
+                    evidence.pre_kill_read_ok_false += 1
+    finish_segment()
+    for deduction in sorted(releases.keys() | refunds.keys()):
+        location = releases[deduction][2] if deduction in releases else refunds[deduction][1]
+        short_location = location.replace(str(path), path.name, 1)
+        if deduction not in decisions:
+            evidence.invalid_reasons.append(
+                str(
+                    RunRecordError(
+                        short_location, "deduction_id", "no allowed decision in this instance file"
+                    )
+                )
+            )
+            continue
+        if deduction not in releases:
+            evidence.invalid_reasons.append(
+                str(RunRecordError(short_location, "deduction_id", "final event without release"))
+            )
+            continue
+        user, start = decisions[deduction]
+        end = start + policy.receipt_lifetime_ns
+        final = refunds.get(deduction)
+        possible = False
+        if final is None:
+            possible = releases[deduction][0] in killed_segments
+            if not possible:
+                evidence.invalid_reasons.append(
+                    f"{path.name}: line {releases[deduction][1]}: "
+                    "release without final event or segment pre_kill"
+                )
+        else:
+            record, location = final
+            result = run_string(record, "result", location)
+            if result in {"applied", "already_applied"}:
+                time = run_integer(record, "credit_decision_ns", location)
+                if not start <= time < end:
+                    raise RunRecordError(
+                        location, "credit_decision_ns", "credit outside receipt lifetime"
+                    )
+                evidence.credits.setdefault(user, []).append(time)
+            possible = result == "receipt_expired" or (
+                result == "unresolved" and run_integer(record, "attempts", location) >= 1
+            )
+        if possible:
+            evidence.unknown.setdefault(user, []).append((start, end))
+
+
+def check_run(path: Path) -> dict[str, object]:
+    """Judge one run epoch with golden record shapes and deduction joins.
+
+    Plan choices from HAR-13 and DESIGN §B8: log drops, missing terminal
+    evidence in any process segment, join anomalies, and an open release
+    without a pre_kill in its segment invalidate evidence. Invalid outranks violation.
+    The four budget policy keys are required; other §B2 policy settings are optional
+    but validated when supplied. Other config tables are ignored.
+    Instance filenames are contiguous from 1.
+    """
+    policy = read_run_policy(path.joinpath("config.toml"))
+    files: dict[int, Path] = {}
+    for file in path.glob("api-*.jsonl"):
+        number = file.name.removeprefix("api-").removesuffix(".jsonl")
+        if (
+            not number.isascii()
+            or not number.isdecimal()
+            or int(number) < 1
+            or str(int(number)) != number
+        ):
+            raise RunRecordError(f"{file}: line 1", "filename", "expected api-N.jsonl, N >= 1")
+        files[int(number)] = file
+    if not files or sorted(files) != list(range(1, len(files) + 1)):
+        raise RunRecordError(
+            f"{path}: line 1", "api-N.jsonl", "expected contiguous instance files starting at 1"
+        )
+    evidence = RunEvidence({}, {}, {}, set(), [])
+    for instance, file in sorted(files.items()):
+        collect_run_file(file, instance, policy, evidence)
+    reasons = evidence.invalid_reasons
+    if evidence.listener_drops:
+        reasons.append("listener_drops")
+    if evidence.pre_kill_read_ok_false:
+        reasons.append("pre_kill_read_ok_false")
+    if evidence.log_drops:
+        reasons.append("log_drops")
+    violation: dict[str, object] | None = None
+    if not reasons:
+        for user, allows in sorted(evidence.allows.items()):
+            window = check_window(
+                allows, evidence.credits.get(user, []), evidence.unknown.get(user, []), policy
+            )
+            if window is not None:
+                violation = {
+                    "user_id": user,
+                    "start_ns": window.start_ns,
+                    "end_ns": window.end_ns,
+                    "excess_units": window.excess_units,
+                }
+                break
+    return {
+        "verdict": "invalid" if reasons else "violation" if violation is not None else "pass",
+        "known_credits": sum(len(times) for times in evidence.credits.values()),
+        "unknown_credits": sum(len(intervals) for intervals in evidence.unknown.values()),
+        "listener_drops": evidence.listener_drops,
+        "pre_kill_lines": evidence.pre_kill_lines,
+        "pre_kill_read_ok_false": evidence.pre_kill_read_ok_false,
+        "invalid_reasons": reasons,
+        "violation": violation,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) != 1:
         print("arguments: field path: expected one oplog.jsonl")
         return 2
     try:
-        violation = check_oplog(Path(args[0]))
+        path = Path(args[0])
+        if path.is_dir():
+            verdict = check_run(path)
+            print(json.dumps(verdict))
+            return {"pass": 0, "violation": 1, "invalid": 2}[str(verdict["verdict"])]
+        violation = check_oplog(path)
     except (RecordError, OSError, UnicodeError) as error:
         print(str(error))
         return 2

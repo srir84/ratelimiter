@@ -72,20 +72,24 @@ var runIDForm = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}-[^/]+-[0-9]+$`)
 // orchRun is one bin/test/orchestrator run a test started in the repository root, where it
 // finds harness.toml, bin/, deploy/, runs/ and .data/ (the harness PostgreSQL on 5433 and the
 // latest conformance result). Its cleanup removes what the run left (plan choice): runs/<id>/,
-// its runs/index.jsonl line (and the file, when the run created it), and runs/ when the run
+// its runs/index.jsonl line (and the file, when the run created it), the thresholds file a
+// baseline froze (its "thresholds frozen" line names it; IMPLEMENTATION_PLAN H5 step 7) and
+// runs/thresholds/ when the run created it and nothing else is in it, and runs/ when the run
 // created it and nothing else is in it; a test that checks the index line does so before.
 type orchRun struct {
-	root  string
-	code  int              // the orchestrator's exit code
-	out   []byte           // its stdout and stderr: JSON log lines
-	recs  []map[string]any // out's JSON log records, in order
-	runID string           // the run ID its "run directory ready" line names; "" when it refused in preflight
-	dir   string           // <root>/runs/<runID>; "" without a run ID
+	root   string
+	code   int              // the orchestrator's exit code
+	out    []byte           // its stdout and stderr: JSON log lines
+	recs   []map[string]any // out's JSON log records, in order
+	runID  string           // the run ID its "run directory ready" line names; "" when it refused in preflight
+	dir    string           // <root>/runs/<runID>; "" without a run ID
+	frozen string           // the thresholds file the run froze; "" when it froze none
 
-	indexPath    string
-	indexBefore  []byte // runs/index.jsonl as it was before the run
-	indexExisted bool
-	runsExisted  bool
+	indexPath         string
+	indexBefore       []byte // runs/index.jsonl as it was before the run
+	indexExisted      bool
+	runsExisted       bool
+	thresholdsExisted bool // runs/thresholds/ existed before the run
 }
 
 // runOrchestrator runs bin/test/orchestrator with args in the repository root, with PATH and
@@ -123,6 +127,12 @@ func runOrchestrator(t *testing.T, args ...string) *orchRun {
 	case !errors.Is(err, fs.ErrNotExist):
 		t.Fatal(err)
 	}
+	switch _, err := os.Stat(filepath.Join(root, "runs", "thresholds")); {
+	case err == nil:
+		r.thresholdsExisted = true
+	case !errors.Is(err, fs.ErrNotExist):
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { r.cleanup(t) })
 
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
@@ -147,6 +157,7 @@ func runOrchestrator(t *testing.T, args ...string) *orchRun {
 		r.runID, r.dir = id, filepath.Join(root, "runs", id)
 		r.checkChildrenGone(t)
 	}
+	r.frozen = frozenPath(r.recs, filepath.Join(root, "runs", "thresholds"))
 	code, codeErr := exitCode(c.waitErr)
 	if !exited || codeErr != nil || readErr != nil || len(notJSON) > 0 {
 		r.removeStalePIDFile(t, c.PID)
@@ -188,6 +199,68 @@ func splitLog(out []byte) (recs []map[string]any, notJSON []string) {
 		recs = append(recs, rec)
 	}
 	return recs, notJSON
+}
+
+// frozenPath returns the path of the "thresholds frozen" record, a file directly in dir (the
+// frozen thresholds' directory), or "" when there is none such. The directories are compared as
+// files, not as strings: in a checkout reached through a symbolic link the orchestrator, whose
+// environment names no PWD, logs the physical path, while dir may hold the link.
+func frozenPath(recs []map[string]any, dir string) string {
+	want, err := os.Stat(dir)
+	if err != nil {
+		return ""
+	}
+	for _, rec := range recs {
+		if rec["msg"] != "thresholds frozen" {
+			continue
+		}
+		path, _ := rec["path"].(string)
+		if path == "" {
+			continue
+		}
+		if got, err := os.Stat(filepath.Dir(path)); err == nil && os.SameFile(got, want) {
+			return path
+		}
+	}
+	return ""
+}
+
+// TestFrozenPath (IMPLEMENTATION_PLAN H5 step 7, the cleanup of a baseline's frozen file):
+// frozenPath finds the "thresholds frozen" record's file directly in the thresholds directory
+// whether that directory is named through a symbolic link or by its physical path, and nothing
+// for a file in another directory, a record with no path or a directory that does not exist.
+func TestFrozenPath(t *testing.T) {
+	checkout := filepath.Join(t.TempDir(), "checkout")
+	thresholds := filepath.Join(checkout, "runs", "thresholds")
+	if err := os.MkdirAll(thresholds, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(checkout, link); err != nil {
+		t.Fatal(err)
+	}
+	physical := filepath.Join(thresholds, "pf-1.json")
+	rec := func(path any) map[string]any {
+		return map[string]any{"msg": "thresholds frozen", "path": path}
+	}
+	other := []map[string]any{{"msg": "run finished", "path": physical}, rec(filepath.Join(checkout, "runs", "pf-1.json")), rec(nil)}
+	for _, c := range []struct {
+		name string
+		recs []map[string]any
+		dir  string
+		want string
+	}{
+		{"the physical path, the directory through the link", append(other, rec(physical)), filepath.Join(link, "runs", "thresholds"), physical},
+		{"the physical path, the physical directory", []map[string]any{rec(physical)}, thresholds, physical},
+		{"the linked path, the physical directory", []map[string]any{rec(filepath.Join(link, "runs", "thresholds", "pf-1.json"))}, thresholds,
+			filepath.Join(link, "runs", "thresholds", "pf-1.json")},
+		{"no record of a file in the directory", other, filepath.Join(link, "runs", "thresholds"), ""},
+		{"no such directory", []map[string]any{rec(physical)}, filepath.Join(link, "runs", "none"), ""},
+	} {
+		if got := frozenPath(c.recs, c.dir); got != c.want {
+			t.Errorf("%s: frozenPath = %q, want %q", c.name, got, c.want)
+		}
+	}
 }
 
 // runIDOf returns the run_id of the first "run directory ready" record, "" when there is none.
@@ -257,7 +330,8 @@ func (r *orchRun) removeStalePIDFile(t *testing.T, pid int) {
 }
 
 // cleanup removes what the run left: its directory, its runs/index.jsonl line (the file too
-// when the run created it), and runs/ when the run created it and it is empty.
+// when the run created it), the thresholds file it froze and runs/thresholds/ when the run
+// created it and it is empty, and runs/ when the run created it and it is empty.
 func (r *orchRun) cleanup(t *testing.T) {
 	if r.dir != "" {
 		if err := os.RemoveAll(r.dir); err != nil {
@@ -266,6 +340,14 @@ func (r *orchRun) cleanup(t *testing.T) {
 	}
 	if r.runID != "" {
 		r.dropIndexLine(t)
+	}
+	if r.frozen != "" {
+		if err := os.Remove(r.frozen); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("removing the thresholds the run froze: %v", err)
+		}
+	}
+	if !r.thresholdsExisted {
+		_ = os.Remove(filepath.Join(r.root, "runs", "thresholds")) // only an empty directory goes
 	}
 	if !r.runsExisted {
 		_ = os.Remove(filepath.Join(r.root, "runs")) // only an empty directory goes
@@ -831,6 +913,12 @@ func TestDesign_OrchestratorStderrGone(t *testing.T) {
 	switch data, err := os.ReadFile(r.indexPath); {
 	case err == nil:
 		r.indexBefore, r.indexExisted = data, true
+	case !errors.Is(err, fs.ErrNotExist):
+		t.Fatal(err)
+	}
+	switch _, err := os.Stat(filepath.Join(root, "runs", "thresholds")); {
+	case err == nil:
+		r.thresholdsExisted = true
 	case !errors.Is(err, fs.ErrNotExist):
 		t.Fatal(err)
 	}

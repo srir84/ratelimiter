@@ -182,15 +182,16 @@ func rlNames(t *testing.T, who string, output []byte) []string {
 
 // runFiles writes the run files the orchestrator itself produces, for the password checks
 // (AGENTS.md §1 Secrets): rladmin start-epoch's saved stderr, through the run's own step with a
-// stand-in rladmin; the report builder's saved stderr, through the run's own step with a
-// stand-in python3 first on PATH and a report/__main__.py in the site; each child's saved
-// output, started from the run's own child specs (arguments and environment as the run gives
-// them) with a stand-in program that prints its arguments and the names of its RL_ variables;
-// and context.json with the host part gathered. A run without instances gets one. Each child
-// and command must have exactly the RL_ variables of the store users it uses (DESIGN §A2 "Used
-// by"; plan H3 step 2): none for valkey-server, hitgen, the report builder and pg_ctl,
-// RL_LIB_PASSWORD for each hitapi, RL_ADMIN_PASSWORD, RL_OPS_PASSWORD and RL_STORE_ADDR for the
-// sampler, RL_ADMIN_PASSWORD and RL_STORE_ADDR for rladmin. pg_ctl is checked on both of its
+// stand-in rladmin; the report steps' saved output (the builder's, validate.py's, which fails,
+// the marking invalid that follows and the thresholds freeze's), through the run's own steps with
+// a stand-in python3 first on PATH; each child's saved output, started from the run's own child
+// specs (arguments and environment as the run gives them) with a stand-in program that prints
+// its arguments and the names of its RL_ variables; and context.json with the host part
+// gathered. A run without instances gets one. Each child and command must have exactly the RL_
+// variables of the store users it uses (DESIGN §A2 "Used by"; plan H3 step 2): none for
+// valkey-server, hitgen, the report steps and pg_ctl, RL_LIB_PASSWORD for each hitapi,
+// RL_ADMIN_PASSWORD, RL_OPS_PASSWORD and RL_STORE_ADDR for the sampler, RL_ADMIN_PASSWORD and
+// RL_STORE_ADDR for rladmin. pg_ctl is checked on both of its
 // calls (the run's own step, a stand-in first on PATH that answers status with 3, not running,
 // so the step goes on to start the cluster): `-D <data> status`, then `-D <data> -l <log> -w
 // start`, the postmaster that start leaves running inheriting that environment. It returns the
@@ -202,12 +203,14 @@ func runFiles(t *testing.T, r *runner) []string {
 	writeFile(t, standIn, "#!/bin/sh\necho \"$0 $*\" >&2\n"+rlNamesLine+" >&2\n", 0o700)
 	writeFile(t, filepath.Join(fake, "rladmin"),
 		"#!/bin/sh\necho \"$0 $*\" >&2\n"+rlNamesLine+" >&2\necho '{\"epoch_id\":\"5f0c9a3e1b7d4c2a8e6f0b1d3c5a7e9f\",\"t_us\":1}'\n", 0o700)
-	writeFile(t, filepath.Join(fake, "python3"), "#!/bin/sh\necho \"$0 $*\" >&2\n"+rlNamesLine+" >&2\n", 0o700)
+	writeFile(t, filepath.Join(fake, "python3"), "#!/bin/sh\necho \"$0 $*\" >&2\n"+rlNamesLine+" >&2\n"+
+		"[ \"$1\" != report/validate.py ] || exit 1\n", 0o700)
 	pgEnv := filepath.Join(fake, "pg_ctl.env")
 	writeFile(t, filepath.Join(fake, "pg_ctl"), "#!/bin/sh\n{ echo \"CALL $*\"; "+rlNamesLine+"; } >> '"+pgEnv+"'\n"+
 		"for a; do last=$a; done\n[ \"$last\" != status ] || exit 3\n", 0o700)
 	wantNames := map[string][]string{
-		"valkey-server": nil, "hitgen": nil, "report": nil, "pg_ctl status": nil, "pg_ctl start": nil,
+		"valkey-server": nil, "hitgen": nil, "report": nil, "validate": nil, "mark-invalid": nil, "thresholds": nil,
+		"pg_ctl status": nil, "pg_ctl start": nil,
 		"hitapi-1": {"RL_LIB_PASSWORD"}, "hitapi-2": {"RL_LIB_PASSWORD"}, "hitapi-3": {"RL_LIB_PASSWORD"},
 		"sampler": {"RL_ADMIN_PASSWORD", "RL_OPS_PASSWORD", "RL_STORE_ADDR"},
 		"rladmin": {"RL_ADMIN_PASSWORD", "RL_STORE_ADDR"},
@@ -257,19 +260,24 @@ func runFiles(t *testing.T, r *runner) []string {
 		}
 		checkNames("pg_ctl "+wantCalls[i][len(wantCalls[i])-1], []byte(call))
 	}
-	writeFile(t, r.s.path(reportMain), "", 0o600)
-	if err := r.report(t.Context()); err != nil {
-		t.Fatalf("the report through the stand-in python3: %v", err)
+	if err := r.report(t.Context()); err == nil || !strings.Contains(err.Error(), "report/validate.py does not pass the report") {
+		t.Fatalf("the report through the stand-in python3: %v, want validate.py's failure", err)
 	}
-	if data, err = os.ReadFile(filepath.Join(r.runPath, "report.stderr")); err != nil || !bytes.Contains(data, []byte("-m report "+r.runPath)) {
-		t.Fatalf("report.stderr holds %q (%v), want the stand-in's line for python3 -m report %s", data, err, r.runPath)
+	if err := r.freeze(t.Context()); err != nil {
+		t.Fatalf("the thresholds freeze through the stand-in python3: %v", err)
 	}
-	checkNames("report", data)
+	for name, args := range map[string]string{"report": "-m report " + r.runPath, "validate": "report/validate.py " + r.runPath,
+		"mark-invalid": "-m report --mark-invalid " + r.runPath, "thresholds": "-m report.thresholds " + r.runPath + " --out "} {
+		if data, err = os.ReadFile(filepath.Join(r.runPath, name+".stderr")); err != nil || !bytes.Contains(data, []byte(args)) {
+			t.Fatalf("%s.stderr holds %q (%v), want the stand-in's line for python3 %s", name, data, err, args)
+		}
+		checkNames(name, data)
+	}
 
 	if len(r.apis) == 0 {
 		r.apis = []apiInstance{{addr: "127.0.0.1:8081", config: filepath.Join(r.runPath, configFile), grace: 45 * time.Second}}
 	}
-	names := []string{"context.json", "rladmin.stderr", "report.stderr"}
+	names := []string{"context.json", "rladmin.stderr", "report.stderr", "validate.stderr", "mark-invalid.stderr", "thresholds.stderr"}
 	specs := []childSpec{r.storeSpec(), r.samplerSpec(), r.hitgenSpec(newT0Watch())}
 	for i := range r.apis {
 		specs = append(specs, r.apiSpec(i))
@@ -1386,7 +1394,8 @@ func TestRun_ChildOutlivesCtx(t *testing.T) {
 // Stand-in scripts for a run's end: an instance or the sampler that exits 0, or 1, on SIGTERM;
 // an instance that exits 0 by itself 300 ms after it starts; a store that dies 200 ms after it
 // starts; a hitgen that sends 100 ms after it starts and exits 0, or 1, 400 ms later, or that
-// sends for 10 s; a report builder (python3) that prints ready, then runs for 30 s.
+// sends for 10 s; a report builder (python3) that prints ready, then runs for 30 s; a python3
+// whose every report step prints its arguments and passes.
 const (
 	exit0OnTERM = `trap 'exit 0' TERM; echo ready >&2; while :; do sleep 0.05; done`
 	exit1OnTERM = `trap 'exit 1' TERM; echo ready >&2; while :; do sleep 0.05; done`
@@ -1396,7 +1405,82 @@ const (
 	hitgenFails = hitgenOK + `; exit 1`
 	hitgenLong  = `sleep 0.1; echo '` + sendingLine + `' >&2; sleep 10`
 	reportLong  = "#!/bin/sh\necho ready >&2\nexec sleep 30\n"
+	pythonOK    = "#!/bin/sh\necho \"python3 $*\" >&2\n"
 )
+
+// signalStepScript is a stand-in python3 for a signal while validate.py or the thresholds freeze
+// runs: it appends each call's arguments, one line, to the file calls; `-m report --mark-invalid
+// …` runs the real one (the program python, the repository repo on PYTHONPATH); `-m report
+// <run>` copies the files report and markdown to <run>/report.json and <run>/report.md; the
+// step block ("validate": report/validate.py; "thresholds": `-m report.thresholds`) prints ready,
+// then sleeps 30 s (the freeze then creates the frozen file its --out names, as a freeze that
+// ends would: the real python3 does both, so a kill ends it at once); every other step passes.
+func signalStepScript(calls, report, markdown, python, repo, block string) string {
+	validate, freeze := ":", ":"
+	switch block {
+	case "validate":
+		validate = "echo ready >&2; exec sleep 30"
+	case "thresholds":
+		freeze = fmt.Sprintf(`echo ready >&2; exec '%s' -c 'import sys, time; time.sleep(30); open(sys.argv[1], "x").close()' "$5"`, python)
+	}
+	return fmt.Sprintf("#!/bin/sh\n"+
+		"echo \"$*\" >> '%s'\n"+
+		"case \"$1 $2 $3\" in\n"+
+		"'-m report --mark-invalid') PYTHONPATH='%s' exec '%s' \"$@\" ;;\n"+
+		"esac\n"+
+		"case \"$1 $2\" in\n"+
+		"'-m report') cp '%s' \"$3/report.json\"; cp '%s' \"$3/report.md\"; exit 0 ;;\n"+
+		"'-m report.thresholds') %s ;;\n"+
+		"esac\n"+
+		"if [ \"$1\" = report/validate.py ]; then %s; fi\n",
+		calls, repo, python, report, markdown, freeze, validate)
+}
+
+// checkMarked fails t unless the run's report.json and report.md were marked invalid by the
+// real `python3 -m report --mark-invalid` (report/__main__.py) after the step record failed
+// ("validate", or "freeze" with --freeze): evidence_validity.valid false, and
+// evidence_validity.<record> saying passed false and naming the step's output file, out ("" for
+// none: null).
+func checkMarked(t *testing.T, runPath, record, out string) {
+	t.Helper()
+	var rep struct {
+		Evidence map[string]json.RawMessage `json:"evidence_validity"`
+	}
+	data, err := os.ReadFile(filepath.Join(runPath, "report.json"))
+	if err == nil {
+		err = json.Unmarshal(data, &rep)
+	}
+	if err != nil {
+		t.Fatalf("report.json: %v", err)
+	}
+	var step struct {
+		Passed *bool  `json:"passed"`
+		Output string `json:"output"`
+	}
+	if raw, ok := rep.Evidence[record]; !ok || json.Unmarshal(raw, &step) != nil || step.Passed == nil || *step.Passed || step.Output != out {
+		t.Errorf("report.json evidence_validity %s, want valid false and %s {passed: false, output: %q}", data, record, out)
+	}
+	if string(rep.Evidence["valid"]) != "false" {
+		t.Errorf("report.json evidence_validity.valid %s, want false", rep.Evidence["valid"])
+	}
+	md, err := os.ReadFile(filepath.Join(runPath, "report.md"))
+	if err != nil || !strings.Contains(string(md), "| valid | false |") || strings.Contains(string(md), "| valid | true |") ||
+		!strings.Contains(string(md), "| "+record+".output | "+cmp.Or(out, "null")+" |") {
+		t.Errorf("report.md holds (%v):\n%s\nwant it marked invalid with report.json, naming %q", err, md, out)
+	}
+}
+
+// standInPython puts script first on PATH as python3 for the rest of the test: the run's report
+// steps (python3 -m report, report/validate.py, python3 -m report.thresholds) run it.
+func standInPython(t *testing.T, script string) {
+	t.Helper()
+	fake := t.TempDir()
+	writeFile(t, filepath.Join(fake, "python3"), script, 0o700)
+	t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if p, err := exec.LookPath("python3"); err != nil || p != filepath.Join(fake, "python3") {
+		t.Fatalf("python3 resolves to %q (%v), want the stand-in in %s", p, err, fake)
+	}
+}
 
 // TestRun_FinishRun (IMPLEMENTATION_PLAN H3 steps 3 and 4): the run once hitgen has started
 // (afterHitgen: drive, the ctx check, finishRun), with stand-in children, no store and a row
@@ -1408,11 +1492,18 @@ const (
 // step 7); a forced rewrite ends with aof_last_bgrewrite_status err; an instance exits
 // before its stop; an instance or the sampler exits 1 after SIGTERM; the store exits during the
 // run (recorded in context.json); a signal while hitgen sends; a signal once hitgen has exited,
-// before finishRun; a signal while the report builder runs, which stops it at once (the report
-// runs on the caller's ctx: a stand-in python3 that would run 30 s is killed, and finishRun
-// returns within 5 s of the signal); a run index line that cannot be appended
-// (runs/index.jsonl is a directory). Every child is stopped, in order: hitgen, the instances,
-// the sampler.
+// before finishRun; a signal while a report step runs, which stops it at once (the report steps
+// run on the caller's ctx: a stand-in python3 that would run 30 s is killed, finishRun returns
+// within 5 s of the signal, and context.json's error names the step and the signal): the report
+// builder, report/validate.py in a limiter run, and the thresholds freeze in a baseline, none of
+// which then leaves a frozen file, the last two marking the report invalid all the same (the real
+// `python3 -m report --mark-invalid [--freeze]`, after the signal); a signal while the store shuts
+// down, after validate.py passed a baseline's report and before its thresholds freeze (the stub
+// store's SHUTDOWN brings it, then the store exits 0), which keeps the freeze from running and
+// marks the report invalid all the same (the real `python3 -m report --mark-invalid --freeze`,
+// the one call after validate.py, no freeze output named), leaving no frozen file; a run index
+// line that cannot be appended (runs/index.jsonl is a directory). Every child is stopped, in
+// order: hitgen, the instances, the sampler, then the store when there is one.
 func TestRun_FinishRun(t *testing.T) {
 	const (
 		faultTables    = oneStep + "\n[[faults]]\nat_s = 0.1\ncmd = '{\"target\":\"db\",\"mode\":\"fail_before\",\"count\":1}'\ninstance = 1\n"
@@ -1429,9 +1520,13 @@ func TestRun_FinishRun(t *testing.T) {
 		store       string    // a store stand-in; "" runs none
 		faultStatus int       // instance 1's answer to a fault
 		rewriteInfo string    // the stub store's INFO persistence once the rewrite ends
-		report      string    // a stand-in python3 first on PATH, with report/__main__.py; "" runs no report builder
+		report      string    // the stand-in python3 first on PATH for the report steps; "" runs pythonOK
+		block       string    // the stand-in python3 is signalStepScript's, blocking in this step (report is unused)
+		baseline    bool      // a baseline run (limiter off), with no frozen thresholds file before it
 		indexDir    bool      // runs/index.jsonl is a directory
-		signal      string    // "while sending", "after hitgen", "during the report" or ""
+		signal      string    // "while sending", "after hitgen", "during a report step", "while the store shuts down" or ""
+		stepOut     string    // during a report step: the step's output file, whose "ready" brings the signal
+		stepErr     string    // during a report step: the text naming the step in context.json's error
 		wantErr     string    // in context.json's error; "" for a finished run
 	}{
 		{name: "a finished run"},
@@ -1450,23 +1545,43 @@ func TestRun_FinishRun(t *testing.T) {
 		{name: "the store exits during the run", store: storeDies, wantErr: "the store exited during the run (exit 1"},
 		{name: "a signal while hitgen sends", hitgen: hitgenLong, signal: "while sending", wantErr: "the run was stopped"},
 		{name: "a signal once hitgen has exited", signal: "after hitgen", wantErr: "stopped by a signal"},
-		{name: "a signal while the report builder runs", report: reportLong, signal: "during the report", wantErr: "stopped by a signal"},
+		{name: "a signal while the report builder runs", report: reportLong, signal: "during a report step",
+			stepOut: "report.stderr", stepErr: "the report: python3 -m report (see report.stderr): python3: signal: killed", wantErr: "stopped by a signal"},
+		{name: "a signal while validate.py runs", block: "validate", signal: "during a report step",
+			stepOut: "validate.stderr", stepErr: "the report: report/validate.py does not pass the report (see validate.stderr): python3: signal: killed",
+			wantErr: "stopped by a signal"},
+		{name: "a signal while the thresholds freeze runs", block: "thresholds", baseline: true, signal: "during a report step",
+			stepOut: "thresholds.stderr", stepErr: "freezing the thresholds: python3 -m report.thresholds (see thresholds.stderr): python3: signal: killed",
+			wantErr: "stopped by a signal"},
+		{name: "a signal while the store shuts down, before the thresholds freeze", baseline: true, signal: "while the store shuts down",
+			wantErr: "stopped by a signal"},
 		{name: "the run index cannot be appended", indexDir: true, wantErr: "the run index: "},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			r, logs := testRunner(t, scenario("test", c.top, c.tables), flags{})
+			r, logs := testRunner(t, scenario("test", c.top, c.tables), flags{baseline: c.baseline})
 			indexPath := filepath.Join(r.s.root, "runs", "index.jsonl")
 			if c.indexDir {
 				if err := os.Mkdir(indexPath, 0o700); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if c.report != "" {
-				fake := t.TempDir()
-				writeFile(t, filepath.Join(fake, "python3"), c.report, 0o700)
-				t.Setenv("PATH", fake+string(os.PathListSeparator)+os.Getenv("PATH"))
-				writeFile(t, r.s.path(reportMain), "", 0o600)
+			// The site holds runs/thresholds/pf-1.json (a limiter run's preflight needs it, and the
+			// run has copied it): a baseline here has none, so its freeze runs, and a run signalled
+			// during a report step has none either, so the run must not leave one.
+			frozen := filepath.Join(r.s.root, "runs", "thresholds", "pf-1.json")
+			if c.baseline || c.signal == "during a report step" {
+				remove(t, frozen)
 			}
+			script := cmp.Or(c.report, pythonOK)
+			calls := filepath.Join(t.TempDir(), "calls")
+			if c.block != "" || c.signal == "while the store shuts down" { // the latter's stand-in blocks in no step
+				python, repo := realPython(t)
+				report, markdown := filepath.Join(t.TempDir(), "report.json"), filepath.Join(t.TempDir(), "report.md")
+				writeFile(t, report, stepsReport, 0o600)
+				writeFile(t, markdown, stepsMarkdown, 0o600)
+				script = signalStepScript(calls, report, markdown, python, repo, c.block)
+			}
+			standInPython(t, script)
 			if c.faultStatus != 0 {
 				r.apis[0].addr = newFaultAPIWith(t, c.faultStatus, 0).addr
 			}
@@ -1490,6 +1605,17 @@ func TestRun_FinishRun(t *testing.T) {
 				r.store = startStandIn(t, r.runPath, "valkey-server", runlog.RoleValkey, 0, c.store, nil)
 				wantOrder = append(wantOrder, "valkey-server")
 			}
+			// The stub store a signal while the store shuts down needs: a stand-in that runs until
+			// the signal, and the fake RESP server the run sends SHUTDOWN to as rl_ops, which never
+			// answers it (the connection closes once the signal has come, below).
+			var stub *fakeresp.Server
+			if c.signal == "while the store shuts down" {
+				stub = fakeresp.Start(t, "rl_ops", r.rd.pw.ops)
+				stub.Delay("SHUTDOWN", time.Minute)
+				r.storeAddr = stub.Addr()
+				r.store = startStandIn(t, r.runPath, "valkey-server", runlog.RoleValkey, 0, exit0OnTERM, nil)
+				wantOrder = append(wantOrder, "valkey-server")
+			}
 			r.countRows = func(context.Context) (int64, error) { return 7, nil }
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -1505,12 +1631,12 @@ func TestRun_FinishRun(t *testing.T) {
 				r.drive(ctx, t0) // returns once hitgen has exited
 				cancel()
 				code = r.finishRun(ctx)
-			case "during the report":
-				// The signal comes once the builder printed ready, or after 10 s at most.
+			case "during a report step":
+				// The signal comes once the step's stand-in printed ready, or after 10 s at most.
 				signalled := make(chan time.Time, 1)
 				go func() {
 					for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-						if data, _ := os.ReadFile(filepath.Join(r.runPath, "report.stderr")); bytes.Contains(data, []byte("ready")) {
+						if data, _ := os.ReadFile(filepath.Join(r.runPath, c.stepOut)); bytes.Contains(data, []byte("ready")) {
 							break
 						}
 					}
@@ -1520,12 +1646,69 @@ func TestRun_FinishRun(t *testing.T) {
 				code = r.afterHitgen(ctx, t0)
 				returned, at := time.Now(), <-signalled
 				if took := returned.Sub(at); took > 5*time.Second {
-					t.Errorf("finishRun returned %v after the signal during the report, want within 5 s: the report runs on the caller's ctx", took)
+					t.Errorf("finishRun returned %v after the signal during %s, want within 5 s: the report steps run on the caller's ctx", took, c.stepOut)
 				}
 				rc := readContext(t, r.runPath)
-				if !strings.Contains(rc.Error, "the report: python3 -m report") {
-					t.Errorf("context.json error %q, want the report stopped by the signal", rc.Error)
+				if !strings.Contains(rc.Error, c.stepErr) {
+					t.Errorf("context.json error %q, want the step stopped by the signal, %q", rc.Error, c.stepErr)
 				}
+				if _, err := os.Lstat(frozen); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a frozen thresholds file after the signal during %s (%v), want none", c.stepOut, err)
+				}
+				// The step the signal stopped marks the report invalid, after the signal.
+				var wantCalls []string
+				switch c.block {
+				case "validate":
+					wantCalls = []string{"-m report " + r.runPath, "report/validate.py " + r.runPath, "-m report --mark-invalid " + r.runPath}
+					checkMarked(t, r.runPath, "validate", "validate.stderr")
+				case "thresholds":
+					wantCalls = []string{"-m report " + r.runPath, "report/validate.py " + r.runPath + " --mode baseline",
+						"-m report.thresholds " + r.runPath + " --out " + frozen, "-m report --mark-invalid --freeze " + r.runPath}
+					checkMarked(t, r.runPath, "freeze", "thresholds.stderr")
+				}
+				if c.block != "" {
+					if data, err := os.ReadFile(calls); err != nil || !slices.Equal(strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), wantCalls) {
+						t.Errorf("python3 calls %q (%v), want %q", data, err, wantCalls)
+					}
+				}
+			case "while the store shuts down":
+				// The signal comes once the stub store got SHUTDOWN (validate.py has passed, the
+				// freeze is next), or after 10 s at most; then the store exits and the connection
+				// closes with no reply, as a store that shuts down closes it.
+				pid := r.store.proc.PID
+				shut := make(chan struct{})
+				go func() {
+					defer close(shut)
+					for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+						if stub.Count("SHUTDOWN") > 0 {
+							break
+						}
+					}
+					cancel()
+					_ = syscall.Kill(-pid, syscall.SIGTERM)
+					stub.DropConns()
+				}()
+				code = r.afterHitgen(ctx, t0)
+				<-shut
+				rc := readContext(t, r.runPath)
+				if want := "freezing the thresholds: python3 -m report.thresholds did not run: context canceled"; !strings.Contains(rc.Error, want) {
+					t.Errorf("context.json error %q, want the freeze the signal kept from running, %q", rc.Error, want)
+				}
+				if !slices.ContainsFunc(rc.Children, func(rec childRecord) bool {
+					return rec.Name == "valkey-server" && rec.Exit == "exit 0" && !rec.Early && !rec.Killed && rec.Error == ""
+				}) {
+					t.Errorf("context.json children %+v, want the store's record: shut down, exit 0, not killed", rc.Children)
+				}
+				if _, err := os.Lstat(frozen); !errors.Is(err, fs.ErrNotExist) {
+					t.Errorf("a frozen thresholds file after the signal (%v), want none", err)
+				}
+				// The freeze the signal kept from running marks the report invalid, after it.
+				wantCalls := []string{"-m report " + r.runPath, "report/validate.py " + r.runPath + " --mode baseline",
+					"-m report --mark-invalid --freeze " + r.runPath}
+				if data, err := os.ReadFile(calls); err != nil || !slices.Equal(strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), wantCalls) {
+					t.Errorf("python3 calls %q (%v), want %q", data, err, wantCalls)
+				}
+				checkMarked(t, r.runPath, "freeze", "")
 			default:
 				code = r.afterHitgen(ctx, t0)
 			}
@@ -1579,6 +1762,288 @@ func TestRun_FinishRun(t *testing.T) {
 				t.Error("children still held after the run's end")
 			}
 		})
+	}
+}
+
+// reportStepsScript is a stand-in python3 for TestRun_ReportSteps: it appends each call's
+// arguments, one line, to the file calls; `-m report --mark-invalid <run>` runs the real one,
+// `python3 -m report --mark-invalid <run>` (the program python, the repository repo on
+// PYTHONPATH); `-m report <run>` copies the files report and markdown to <run>/report.json and
+// <run>/report.md and exits build; `-m report.thresholds …` exits freeze; report/validate.py
+// prints a FAIL line and its verdict line and exits validate when validate is not 0, else 0.
+func reportStepsScript(calls, report, markdown, python, repo string, build, validate, freeze int) string {
+	return fmt.Sprintf("#!/bin/sh\n"+
+		"echo \"$*\" >> '%s'\n"+
+		"case \"$1 $2 $3\" in\n"+
+		"'-m report --mark-invalid') PYTHONPATH='%s' exec '%s' \"$@\" ;;\n"+
+		"esac\n"+
+		"case \"$1 $2\" in\n"+
+		"'-m report') cp '%s' \"$3/report.json\"; cp '%s' \"$3/report.md\"; exit %d ;;\n"+
+		"'-m report.thresholds') exit %d ;;\n"+
+		"esac\n"+
+		"if [ %d -ne 0 ]; then echo 'FAIL thresholds_hash: a detail'; echo \"validate: $2: invalid\"; exit %d; fi\n",
+		calls, repo, python, report, markdown, build, freeze, validate, validate)
+}
+
+// realPython returns the python3 on PATH, before a test puts a stand-in first, and the
+// repository root: the report package's home, for a stand-in that runs a real report step.
+func realPython(t *testing.T) (python, repo string) {
+	t.Helper()
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Fatalf("python3: %v", err)
+	}
+	if repo, err = filepath.Abs(filepath.Join("..", "..")); err != nil {
+		t.Fatal(err)
+	}
+	return python, repo
+}
+
+// The report.json and report.md the stand-in builder writes, and the report.json `python3 -m
+// report --mark-invalid` writes from it (report/__main__.py): evidence_validity.valid false and
+// evidence_validity.validate naming the check of validate.py's FAIL line and its output file,
+// every other member as written and in order (an integer beyond float64's exact range and text
+// beyond ASCII included, the latter escaped as the report builder writes JSON), indented by two
+// spaces; with --freeze, evidence_validity.freeze naming the freeze's output file instead.
+// report.md, rendered again from it, says valid false.
+const (
+	stepsReport = `{"run_id": "20261008-142233-pf-1", "load": {"planned": 300, "big": 123456789012345678901, "rate": 0.1},
+ "evidence_validity": {"checks": {"log_drops": {"ok": true, "detail": "≤ 5 s"}}, "valid": true}, "tail": ["é", null]}
+`
+	stepsReportInvalid = `{
+  "run_id": "20261008-142233-pf-1",
+  "load": {
+    "planned": 300,
+    "big": 123456789012345678901,
+    "rate": 0.1
+  },
+  "evidence_validity": {
+    "checks": {
+      "log_drops": {
+        "ok": true,
+        "detail": "\u2264 5 s"
+      }
+    },
+    "valid": false,
+    "validate": {
+      "passed": false,
+      "failed_checks": [
+        "thresholds_hash"
+      ],
+      "output": "validate.stderr"
+    }
+  },
+  "tail": [
+    "\u00e9",
+    null
+  ]
+}
+`
+	stepsReportFreezeInvalid = `{
+  "run_id": "20261008-142233-pf-1",
+  "load": {
+    "planned": 300,
+    "big": 123456789012345678901,
+    "rate": 0.1
+  },
+  "evidence_validity": {
+    "checks": {
+      "log_drops": {
+        "ok": true,
+        "detail": "\u2264 5 s"
+      }
+    },
+    "valid": false,
+    "freeze": {
+      "passed": false,
+      "output": "thresholds.stderr"
+    }
+  },
+  "tail": [
+    "\u00e9",
+    null
+  ]
+}
+`
+	stepsMarkdown = "# Run report 20261008-142233-pf-1\n\n## Evidence validity (§B8)\n\n| field | value |\n|---|---|\n| valid | true |\n"
+)
+
+// TestRun_ReportSteps (IMPLEMENTATION_PLAN H5 step 7; DESIGN §B5, §B9 step 2, §C5): at a run's
+// end, with stand-in children and a stand-in python3, the report steps run in order: `python3 -m
+// report <run>`, then `python3 report/validate.py <run>`, with --mode baseline for a baseline
+// run (limiter_enabled = false). A finished limiter run exits 0 with its report.json and report.md
+// untouched and its runs/index.jsonl line. A builder that fails fails the run (exit 1,
+// context.json failed, no index line) and nothing is validated. A report validate.py does not
+// pass fails the run, with validate's FAIL line in context.json's error, and is marked invalid by
+// the real `python3 -m report --mark-invalid <run>`: report.json as stepsReportInvalid, and
+// report.md rendered again from it, saying valid false and naming the failed check and
+// validate.stderr. A valid baseline then freezes its thresholds, `python3 -m
+// report.thresholds <run> --out <site>/runs/thresholds/pf-1.json`, before its index line; a
+// baseline whose frozen file exists leaves it untouched and runs no freeze; a baseline whose
+// report does not pass runs no freeze; a freeze that fails fails the run, with no index line,
+// and marks the report invalid, the real `python3 -m report --mark-invalid --freeze <run>`:
+// report.json as stepsReportFreezeInvalid, report.md saying valid false and naming
+// thresholds.stderr.
+func TestRun_ReportSteps(t *testing.T) {
+	for _, c := range []struct {
+		name                    string
+		baseline                bool
+		frozen                  bool // runs/thresholds/pf-1.json exists before the run
+		build, validate, freeze int  // the stand-in's exit codes
+		wantSteps               []string
+		wantErr                 string // in context.json's error; "" for a finished run
+		wantMark                string // report.json and report.md marked invalid after this step: "validate" or "freeze"
+		wantLog                 string // in the orchestrator's log
+	}{
+		{name: "a limiter run whose report passes", wantSteps: []string{"report", "validate"}},
+		{name: "a limiter run whose builder fails", build: 1, wantSteps: []string{"report"},
+			wantErr: "the report: python3 -m report (see report.stderr): python3: exit status 1"},
+		{name: "a limiter run whose report does not pass", validate: 1, wantSteps: []string{"report", "validate", "mark invalid"},
+			wantErr:  "the report: report/validate.py does not pass the report (see validate.stderr): python3: exit status 1: FAIL thresholds_hash: a detail",
+			wantMark: "validate", wantLog: `"msg":"the report is not valid"`},
+		{name: "a valid baseline freezes its thresholds", baseline: true, wantSteps: []string{"report", "validate baseline", "freeze"},
+			wantLog: `"msg":"thresholds frozen"`},
+		{name: "a baseline whose thresholds are frozen already", baseline: true, frozen: true,
+			wantSteps: []string{"report", "validate baseline"}, wantLog: `"msg":"thresholds already frozen: never overwritten"`},
+		{name: "a baseline whose report does not pass", baseline: true, validate: 1, wantSteps: []string{"report", "validate baseline", "mark invalid"},
+			wantErr: "FAIL thresholds_hash: a detail", wantMark: "validate"},
+		{name: "a baseline whose freeze fails", baseline: true, freeze: 1, wantSteps: []string{"report", "validate baseline", "freeze", "mark invalid freeze"},
+			wantErr:  "freezing the thresholds: python3 -m report.thresholds (see thresholds.stderr): python3: exit status 1",
+			wantMark: "freeze", wantLog: `"msg":"the report is not valid"`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r, logs := testRunner(t, scenario("test", "", ""), flags{baseline: c.baseline})
+			dir := t.TempDir()
+			calls, report, markdown := filepath.Join(dir, "calls"), filepath.Join(dir, "report.json"), filepath.Join(dir, "report.md")
+			writeFile(t, report, stepsReport, 0o600)
+			writeFile(t, markdown, stepsMarkdown, 0o600)
+			python, repo := realPython(t)
+			standInPython(t, reportStepsScript(calls, report, markdown, python, repo, c.build, c.validate, c.freeze))
+			// The site holds runs/thresholds/pf-1.json (for a limiter run's preflight): a baseline
+			// with no frozen file has it removed first.
+			frozen := filepath.Join(r.s.root, "runs", "thresholds", "pf-1.json")
+			if c.frozen {
+				writeFile(t, frozen, "frozen by an earlier baseline\n", 0o444)
+			} else {
+				remove(t, frozen)
+			}
+			for i := range r.apis {
+				r.apis[i].grace = 5 * time.Second
+				r.apiProcs = append(r.apiProcs, startStandIn(t, r.runPath, fmt.Sprintf("hitapi-%d", i+1), runlog.RoleHitAPI, i+1, exit0OnTERM, nil))
+			}
+			r.sampler = startStandIn(t, r.runPath, "sampler", runlog.RoleSampler, 0, exit0OnTERM, nil)
+			r.countRows = func(context.Context) (int64, error) { return 7, nil }
+			t0 := newT0Watch()
+			startHitgenStandIn(t, r, t0, hitgenOK)
+			code := r.afterHitgen(t.Context(), t0)
+
+			want := exitOK
+			if c.wantErr != "" {
+				want = exitFailure
+			}
+			if code != want {
+				t.Errorf("exit code %d, want %d\n%s", code, want, logs.String())
+			}
+			rc := readContext(t, r.runPath)
+			if c.wantErr == "" && (rc.Outcome != "ok" || rc.Error != "") {
+				t.Errorf("context.json outcome %q, error %q; want ok", rc.Outcome, rc.Error)
+			}
+			if c.wantErr != "" && (rc.Outcome != "failed" || !strings.Contains(rc.Error, c.wantErr)) {
+				t.Errorf("context.json outcome %q, error %q; want failed, naming %q", rc.Outcome, rc.Error, c.wantErr)
+			}
+			steps := map[string]string{
+				"report":              "-m report " + r.runPath,
+				"validate":            "report/validate.py " + r.runPath,
+				"validate baseline":   "report/validate.py " + r.runPath + " --mode baseline",
+				"mark invalid":        "-m report --mark-invalid " + r.runPath,
+				"mark invalid freeze": "-m report --mark-invalid --freeze " + r.runPath,
+				"freeze":              "-m report.thresholds " + r.runPath + " --out " + frozen,
+			}
+			var wantCalls []string
+			for _, step := range c.wantSteps {
+				wantCalls = append(wantCalls, steps[step])
+			}
+			data, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"); !slices.Equal(got, wantCalls) {
+				t.Errorf("python3 calls %q, want %q", got, wantCalls)
+			}
+			wantReport, wantMD := stepsReport, []string(nil)
+			switch c.wantMark {
+			case "validate":
+				wantReport = stepsReportInvalid
+				wantMD = []string{"| valid | false |", `| validate.failed_checks | ["thresholds_hash"] |`, "| validate.output | validate.stderr |"}
+			case "freeze":
+				wantReport = stepsReportFreezeInvalid
+				wantMD = []string{"| valid | false |", "| freeze.passed | false |", "| freeze.output | thresholds.stderr |"}
+			}
+			if got, err := os.ReadFile(filepath.Join(r.runPath, "report.json")); err != nil || string(got) != wantReport {
+				t.Errorf("report.json holds (%v):\n%s\nwant:\n%s", err, got, wantReport)
+			}
+			md, err := os.ReadFile(filepath.Join(r.runPath, "report.md"))
+			switch {
+			case c.wantMark == "" && string(md) != stepsMarkdown:
+				t.Errorf("report.md holds %q (%v), want the builder's, untouched:\n%s", md, err, stepsMarkdown)
+			case c.wantMark != "":
+				for _, want := range wantMD {
+					if err != nil || !strings.Contains(string(md), want) {
+						t.Errorf("report.md holds (%v):\n%s\nwant a line %s: marked invalid with report.json", err, md, want)
+					}
+				}
+				if strings.Contains(string(md), "| valid | true |") {
+					t.Errorf("report.md still says valid:\n%s", md)
+				}
+			}
+			if c.wantLog != "" && !strings.Contains(logs.String(), c.wantLog) {
+				t.Errorf("no %s line in the log:\n%s", c.wantLog, logs.String())
+			}
+			index, err := os.ReadFile(filepath.Join(r.s.root, "runs", "index.jsonl"))
+			wantIndex := fmt.Sprintf(`{"scenario":"pf","baseline":%v,"run_id":"20261008-142233-pf-1"}`+"\n", c.baseline)
+			switch {
+			case c.wantErr == "" && string(index) != wantIndex:
+				t.Errorf("runs/index.jsonl holds %q (%v), want the one line %q", index, err, wantIndex)
+			case c.wantErr != "" && !errors.Is(err, fs.ErrNotExist):
+				t.Errorf("runs/index.jsonl after a failed run holds %q (%v), want no file", index, err)
+			}
+			if c.frozen {
+				if got, err := os.ReadFile(frozen); err != nil || string(got) != "frozen by an earlier baseline\n" {
+					t.Errorf("the frozen thresholds file holds %q (%v) after the run, want it untouched", got, err)
+				}
+			}
+		})
+	}
+}
+
+// TestRun_FreezeNotRun (IMPLEMENTATION_PLAN H5 step 7): a valid baseline whose ctx ended (a
+// signal) before its thresholds freeze could run fails the freeze, with no frozen file, and marks
+// its report invalid all the same: the real `python3 -m report --mark-invalid --freeze <run>` is
+// the one python3 call, and with no thresholds.stderr the freeze record names no output.
+func TestRun_FreezeNotRun(t *testing.T) {
+	r, logs := testRunner(t, scenario("test", "", ""), flags{baseline: true})
+	frozen := filepath.Join(r.s.root, "runs", "thresholds", "pf-1.json")
+	remove(t, frozen)
+	dir := t.TempDir()
+	calls, report, markdown := filepath.Join(dir, "calls"), filepath.Join(dir, "report.json"), filepath.Join(dir, "report.md")
+	writeFile(t, report, stepsReport, 0o600)
+	writeFile(t, markdown, stepsMarkdown, 0o600)
+	writeFile(t, filepath.Join(r.runPath, "report.json"), stepsReport, 0o600)
+	writeFile(t, filepath.Join(r.runPath, "report.md"), stepsMarkdown, 0o600)
+	python, repo := realPython(t)
+	standInPython(t, reportStepsScript(calls, report, markdown, python, repo, 0, 0, 0))
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	want := "python3 -m report.thresholds did not run: context canceled"
+	if err := r.freeze(ctx); err == nil || err.Error() != want {
+		t.Errorf("freeze after the signal: %v, want %q\n%s", err, want, logs.String())
+	}
+	if data, err := os.ReadFile(calls); err != nil || string(data) != "-m report --mark-invalid --freeze "+r.runPath+"\n" {
+		t.Errorf("python3 calls %q (%v), want only the mark", data, err)
+	}
+	checkMarked(t, r.runPath, "freeze", "")
+	if _, err := os.Lstat(frozen); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("a frozen thresholds file after the signal (%v), want none", err)
 	}
 }
 
@@ -1840,6 +2305,7 @@ func TestRun_BenchContextPRF5(t *testing.T) {
 			conformance: conformanceWith("null")},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			standInPython(t, pythonOK) // the report steps pass: the outcome is the PRF-5 check's
 			r, logs := testRunnerIn(t, runTestSiteWith(t, bins), scenario(c.kind, "", ""), flags{baseline: c.baseline})
 			if c.conformance != "" {
 				writeFile(t, r.s.path(conformanceFile), c.conformance, 0o600)

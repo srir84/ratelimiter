@@ -224,7 +224,7 @@ func (pw *passwords) childEnv(base []string, storeAddr string, users ...string) 
 // controlled clock) and rl_ops's (CONFIG GET, BGREWRITEAOF, SHUTDOWN) itself, in-process.
 // Formatting or logging a childEnvs value shows none of it.
 type childEnvs struct {
-	plain   []string // valkey-server, pg_ctl, hitgen, the report builder: no password
+	plain   []string // valkey-server, pg_ctl, hitgen, the report steps (python3): no password
 	hitapi  []string // RL_LIB_PASSWORD (harness/config)
 	rladmin []string // RL_ADMIN_PASSWORD and RL_STORE_ADDR (cmd/rladmin)
 	sampler []string // RL_ADMIN_PASSWORD for its rladmin status, RL_OPS_PASSWORD for INFO, RL_STORE_ADDR

@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"ratelimiter/harness/config"
 	"ratelimiter/harness/dbclient"
@@ -46,8 +47,12 @@ const (
 	dbTimeout = 30 * time.Second
 	// commandTimeout bounds the short commands: pg_ctl status, sysctl, sw_vers, --version.
 	commandTimeout = 10 * time.Second
-	// reportTimeout bounds the report builder (H5 sets its budget).
-	reportTimeout = 30 * time.Minute
+	// reportTimeout bounds the report builder: twice its budget, 300 s for a run of 12,000,000
+	// run-log lines (IMPLEMENTATION_PLAN H5 step 10).
+	reportTimeout = 10 * time.Minute
+	// checkTimeout bounds report/validate.py and the thresholds freeze, which read report.json,
+	// context.json, the scenario and the thresholds files, never the run logs.
+	checkTimeout = 2 * time.Minute
 )
 
 // The files and programs the run uses, relative to the repository root or the run directory
@@ -57,22 +62,37 @@ const (
 	pgData        = ".data/pg"
 	pgLog         = ".data/pg.log"
 	runIndex      = "runs/index.jsonl"
-	reportMain    = "report/__main__.py"
 	contextFile   = "context.json"
 	dbRowsFile    = "db_rows.json"
 	scheduleFile  = "schedule.jsonl"
+	reportFile    = "report.json"
 	valkeyProgram = "valkey-server"
-	// reportPending is printed in place of the report until H5 builds it (plan H3 step 3).
-	reportPending = "report builder not built yet (H5)"
+)
+
+// The report steps at a run's end (IMPLEMENTATION_PLAN H5 steps 2, 5, 6 and 7; DESIGN §B5,
+// §B9, §C5), each `python3 …` in the repository root.
+const (
+	pythonProgram  = "python3"
+	reportModule   = "report"             // python3 -m report runs/<id>
+	validateScript = "report/validate.py" // python3 report/validate.py runs/<id> [--mode baseline]
+	freezeModule   = "report.thresholds"  // python3 -m report.thresholds runs/<id> --out <frozen file>
+	markInvalid    = "--mark-invalid"     // python3 -m report --mark-invalid [--freeze] runs/<id>
+	markFreeze     = "--freeze"           // the mark of a baseline whose freeze failed
+	// maxFailedChecks is the most bytes of validate.py's FAIL lines a failure's message carries;
+	// validate.stderr holds them all.
+	maxFailedChecks = 400
 )
 
 // The child output files' stems (plan choice): runs/<id>/<stem>.stderr.
 const (
-	nameStore   = "valkey-server"
-	nameSampler = "sampler"
-	nameHitgen  = "hitgen"
-	nameRladmin = "rladmin"
-	nameReport  = "report"
+	nameStore      = "valkey-server"
+	nameSampler    = "sampler"
+	nameHitgen     = "hitgen"
+	nameRladmin    = "rladmin"
+	nameReport     = "report"
+	nameValidate   = "validate"
+	nameInvalid    = "mark-invalid"
+	nameThresholds = "thresholds"
 )
 
 // The reasons the run sequence refuses a run once it has started something (exit 2, after the
@@ -263,17 +283,21 @@ func (r *runner) afterHitgen(ctx context.Context, t0 *t0Watch) int {
 }
 
 // finishRun is the end of a run whose hitgen has exited (IMPLEMENTATION_PLAN H3 steps 3 and
-// 4): the instances stop gracefully, db_rows.json, the sampler stops, context.json, the
-// report, the store's shutdown and the run index. A failure noted along the way makes it exit
-// 1 without the run index line, and context.json's outcome says failed with the reasons:
-// hitgen's exit; a fault or rewrite that failed; a store that exited during the run; in a
-// benchmark run, a context.json item of PRF-5 it could not record (missingPRF5); an
-// instance or the sampler that exited before it was stopped, or ended other than with exit 0
-// after SIGTERM (judgeStops); the report; the store's shutdown; ctx ending (a signal) before
-// the end; and a run index line that cannot be appended. The teardown's bounded steps (the
-// instances' grace, db_rows, the sampler's stop, SHUTDOWN) run even after a signal, so the
-// evidence is complete; the report runs on ctx, so a signal stops it, and is skipped once ctx
-// has ended.
+// 4, H5 step 7): the instances stop gracefully, db_rows.json, the sampler stops, context.json,
+// the report and its validation, the store's shutdown, a valid baseline's thresholds freeze and
+// the run index. A failure noted along the way makes it exit 1 without the run index line (and
+// without the freeze), and context.json's outcome says failed with the reasons: hitgen's exit; a
+// fault or rewrite that failed; a store that exited during the run; in a benchmark run, a
+// context.json item of PRF-5 it could not record (missingPRF5); an instance or the sampler that
+// exited before it was stopped, or ended other than with exit 0 after SIGTERM (judgeStops); the
+// report builder; a report that report/validate.py does not pass (marked invalid in report.json
+// and report.md); the store's shutdown; the freeze (the report then marked invalid too); ctx
+// ending (a signal) before the end, the freeze included; and a run index line that cannot be
+// appended. The teardown's bounded steps (the instances' grace, db_rows, the sampler's stop,
+// SHUTDOWN) run even after a signal, so the evidence is complete; the report steps (the builder,
+// validate.py, the freeze) run on ctx, so a signal stops them, and are skipped once ctx has
+// ended; only marking a report invalid, when validate.py did not pass it or its baseline's
+// freeze did not complete, runs after a signal too (report, freeze).
 func (r *runner) finishRun(ctx context.Context) int {
 	bounded := context.WithoutCancel(ctx)
 	capture := r.hitgen.capture
@@ -324,13 +348,25 @@ func (r *runner) finishRun(ctx context.Context) int {
 	r.rec.EndNs = r.now().UnixNano()
 	r.writeOutcome()
 	written := len(r.failure)
+	reported := false // the report was built and validate.py passed it
 	if ctx.Err() == nil {
 		if err := r.report(ctx); err != nil {
 			r.fail("the report: %v", err)
+		} else {
+			reported = true
 		}
 	}
 	if err := r.stopStore(bounded); err != nil {
 		r.fail("shutting the store down: %v", err)
+	}
+	// A baseline that ended with no failure, its report valid in baseline mode, freezes its
+	// thresholds when the frozen file does not exist yet (DESIGN §B9 step 2), before its run
+	// index line: a freeze that fails, that a signal stops, or that a signal keeps from running,
+	// fails the run and marks its report invalid.
+	if reported && len(r.failure) == 0 && !r.in.settings.API.LimiterEnabled {
+		if err := r.freeze(ctx); err != nil {
+			r.fail("freezing the thresholds: %v", err)
+		}
 	}
 	if ctx.Err() != nil {
 		r.fail("stopped by a signal")
@@ -773,27 +809,114 @@ func (r *runner) startHitgen(ctx context.Context, t0 *t0Watch) error {
 	return nil
 }
 
-// report runs the report builder, `python3 -m report runs/<id>` in the repository root, once
-// report/__main__.py exists; until then it prints that the builder is not built yet (plan H3
-// step 3; H5 replaces this step). The builder's output goes to runs/<id>/report.stderr.
+// report is the run's report (IMPLEMENTATION_PLAN H5 step 7; DESIGN §B5, §C5): the builder,
+// `python3 -m report runs/<id>`, then `python3 report/validate.py runs/<id>`, with --mode
+// baseline for a run with the limiter off. Each runs on ctx, so a signal stops it, with its
+// output in runs/<id>/report.stderr and runs/<id>/validate.stderr. A builder that fails leaves
+// nothing to validate. A report that validate.py does not pass (it exits other than 0, a signal
+// included) is marked invalid, and the run fails (make run exits 1): `python3 -m report
+// --mark-invalid runs/<id>` sets evidence_validity.valid = false (plan choice: the report's one
+// validity flag) with the checks validate.py failed, and writes report.json and report.md again
+// together, so neither says valid. That step runs even after a signal, bounded by checkTimeout,
+// with its output in runs/<id>/mark-invalid.stderr (markReportInvalid).
 func (r *runner) report(ctx context.Context) error {
-	if _, err := os.Stat(r.s.path(reportMain)); errors.Is(err, fs.ErrNotExist) {
-		r.logger.Info(reportPending, "run_id", r.rd.id)
-		return nil
-	} else if err != nil {
-		return err
-	}
-	errOut, err := os.OpenFile(filepath.Join(r.runPath, nameReport+stderrSuffix), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = errOut.Close() }() // the builder has exited; its lines are on the file
-	ctx, cancel := context.WithTimeout(ctx, reportTimeout)
-	defer cancel()
-	if _, err := runCommand(ctx, r.s.root, r.envs.plain, errOut, "python3", "-m", "report", r.runPath); err != nil {
+	if _, err := r.python(ctx, nameReport, reportTimeout, "-m", reportModule, r.runPath); err != nil {
 		return fmt.Errorf("python3 -m report (see %s%s): %w", nameReport, stderrSuffix, err)
 	}
+	args := []string{validateScript, r.runPath}
+	if !r.in.settings.API.LimiterEnabled {
+		args = append(args, "--mode", "baseline")
+	}
+	out, err := r.python(ctx, nameValidate, checkTimeout, args...)
+	if err == nil {
+		return nil
+	}
+	err = fmt.Errorf("%s does not pass the report (see %s%s): %w%s", validateScript, nameValidate, stderrSuffix, err, failedChecks(out))
+	return r.markReportInvalid(ctx, err)
+}
+
+// markReportInvalid marks the run's report invalid after the failure err of a report step
+// (IMPLEMENTATION_PLAN H5 step 7: a failure sets valid: false): `python3 -m report
+// --mark-invalid [flags…] runs/<id>` (flags: --freeze for a freeze that did not complete), on a
+// ctx that a signal does not end, bounded by checkTimeout, its output in
+// runs/<id>/mark-invalid.stderr. It returns err, naming the mark's own failure too when the
+// mark fails.
+func (r *runner) markReportInvalid(ctx context.Context, err error, flags ...string) error {
+	args := append([]string{"-m", reportModule, markInvalid}, flags...)
+	if _, markErr := r.python(context.WithoutCancel(ctx), nameInvalid, checkTimeout, append(args, r.runPath)...); markErr != nil {
+		return fmt.Errorf("%w; marking the report invalid, python3 %s (see %s%s): %w", err, strings.Join(args, " "), nameInvalid, stderrSuffix, markErr)
+	}
+	r.logger.Error("the report is not valid", "run_id", r.rd.id, "report", filepath.Join(r.runPath, reportFile))
+	return err
+}
+
+// failedChecks is the "FAIL <check>: <detail>" lines of validate.py's output, joined, as an
+// error's tail: "" when there are none; at most maxFailedChecks bytes of them.
+func failedChecks(out []byte) string {
+	var lines []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "FAIL ") {
+			lines = append(lines, line)
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	text := strings.Join(lines, "; ")
+	if len(text) > maxFailedChecks {
+		cut := maxFailedChecks
+		for cut > 0 && !utf8.RuneStart(text[cut]) {
+			cut-- // never inside a character
+		}
+		text = text[:cut] + "…"
+	}
+	return ": " + text
+}
+
+// freeze freezes a valid baseline run's thresholds (IMPLEMENTATION_PLAN H5 steps 5 and 7; DESIGN
+// §B9 step 2): when runs/thresholds/<scenario>-<seed>.json does not exist yet, `python3 -m
+// report.thresholds runs/<id> --out <that file>` on ctx, its output in
+// runs/<id>/thresholds.stderr. The freeze checks the baseline again (validate.py in baseline
+// mode) and creates the file once, mode 0444. A frozen file that exists is never overwritten or
+// edited (PRF-7): the step only logs it. A freeze that does not complete (it fails, a signal
+// stops it, or ctx ended before it could run) marks the report invalid, `python3 -m report
+// --mark-invalid --freeze runs/<id>` (markReportInvalid), and fails the run.
+func (r *runner) freeze(ctx context.Context) error {
+	out := absPath(r.s.path(fmt.Sprintf("%s/%s-%d.json", thresholdsDir, r.in.scenario.Name, r.in.scenario.Seed)))
+	switch _, err := os.Lstat(out); {
+	case err == nil:
+		r.logger.Info("thresholds already frozen: never overwritten", "run_id", r.rd.id, "path", out)
+		return nil
+	case !errors.Is(err, fs.ErrNotExist):
+		return r.markReportInvalid(ctx, err, markFreeze)
+	}
+	if err := ctx.Err(); err != nil {
+		return r.markReportInvalid(ctx, fmt.Errorf("python3 -m %s did not run: %w", freezeModule, err), markFreeze)
+	}
+	if _, err := r.python(ctx, nameThresholds, checkTimeout, "-m", freezeModule, r.runPath, "--out", out); err != nil {
+		return r.markReportInvalid(ctx, fmt.Errorf("python3 -m %s (see %s%s): %w", freezeModule, nameThresholds, stderrSuffix, err), markFreeze)
+	}
+	r.logger.Info("thresholds frozen", "run_id", r.rd.id, "path", out)
 	return nil
+}
+
+// python runs `python3 args…` in the repository root on ctx, bounded by timeout, with the plain
+// environment (no password, DESIGN §A2), and saves its output in runs/<id>/<name>.stderr, a new
+// file: its stderr as it runs, then its stdout, which it also returns.
+func (r *runner) python(ctx context.Context, name string, timeout time.Duration, args ...string) ([]byte, error) {
+	f, err := os.OpenFile(filepath.Join(r.runPath, name+stderrSuffix), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := runCommand(ctx, r.s.root, r.envs.plain, f, pythonProgram, args...)
+	_, werr := f.Write(out)
+	cerr := f.Close()
+	if err == nil {
+		err = errors.Join(werr, cerr)
+	}
+	return out, err
 }
 
 // absPath is path made absolute: children get absolute paths, whatever their working

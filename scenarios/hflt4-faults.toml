@@ -1,0 +1,59 @@
+# T-HFLT-4 (HARNESS §8: BUD-11a, TRF-10, HAR-13, HOST-8; DESIGN §C5; IMPLEMENTATION_PLAN H5 step 9,
+# plan choices): refunds during faulted traffic, a test-build run of three instances, one
+# 200 req/s step of 60 s over 20 users, 5 % of the requests refused after their acquire
+# (refuse_after_acquire_bp = 500, ERR-15), so refunds run all along. The faults, each at its
+# offset from hitgen's start:
+#   10 s  instance 1 drops the replies of its next 5 refund calls (FLT-4): each is sent again and
+#         ends already_applied, a known credit at its logged credit_decision_ns;
+#   20 s  the store paused for 4.5 s (FLT-2): the run's one store outage segment;
+#   39 s  instance 2 holds every refund call's return for 10 s after its reply (the refund
+#         applies, its final event waits): not an outage segment;
+#   40 s  instance 2 killed and restarted (FLT-6): its pre_kill record (read_ok) comes first, and
+#         the refunds it still holds have a release but no final event, the unknown-time
+#         credits of T-HFLT-4 ([acquire decision_ns, + receipt lifetime)).
+# The seed (plan choice) gives instance 2, between 39 s and 40 s, five requests selected for the
+# refusal after acquire (u000017 at 39.49 s, u000002 at 39.62 s and 39.63 s, u000012 at 39.86 s,
+# u000007 at 39.88 s), whose refunds the kill leaves without a final event. The run proves those
+# unknown-time credits are counted, not that the verdict needs them: no key is at its bound where
+# they lie. The users above their 10/s rate (zipf_s 1.1 gives u000000 to u000003 13-62/s) reach
+# the bound only in the run's first seconds, from a full bucket: a window across the store pause
+# keeps at least 25 tokens of slack (the bound counts 45 tokens of refill there, a bucket holds
+# 20), and after it their buckets stay drained, so a window starting there keeps about a capacity
+# of slack; the other users stay below their rate. A search of 120 seeds (their schedules, with
+# the buckets and faults simulated) found none where such a credit binds under these faults. The
+# binding semantics, a credit anywhere in [acquire decision_ns, + receipt lifetime) allowing an
+# admission the bound would refuse without it, are covered by refmodel's unit tests
+# (refmodel/tests/test_check_bud11_runs.py: test_unknown_interval,
+# test_open_release_requires_later_kill).
+name = "hflt4-faults"
+seed = 9
+run_kind = "test"
+instances = 3
+
+[api]
+refuse_after_acquire_bp = 500
+
+[[steps]]
+rate_per_s = 200
+duration_s = 60
+
+[users]
+count = 20
+
+[[faults]]
+at_s = 10
+cmd = '{"target":"store","mode":"drop_reply","match":"refund","count":5}'
+instance = 1
+
+[[faults]]
+at_s = 20
+cmd = "faultctl store pause 4.5s"
+
+[[faults]]
+at_s = 39
+cmd = '{"target":"store","mode":"delay","at":"after_reply","delay_ms":10000,"match":"refund"}'
+instance = 2
+
+[[faults]]
+at_s = 40
+cmd = "faultctl api kill 2 --restart"
