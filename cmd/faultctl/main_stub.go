@@ -1,9 +1,5 @@
 //go:build !rltest
 
-// Command faultctl needs the test build: its faults live in harness/fixtures, which only
-// -tags rltest builds contain (DESIGN §B1, §B6; IMPLEMENTATION_PLAN H4 steps 3 and 8), so
-// bin/test/faultctl is the real tool. This stub keeps untagged builds of ./... compiling: it
-// prints why and exits 2.
 package main
 
 import (

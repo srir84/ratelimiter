@@ -1,9 +1,5 @@
 //go:build rltest
 
-// Package limitertest is the limiter's test-only entry point (DESIGN §A5.12). Every file
-// carries //go:build rltest, so production builds cannot reach it: it builds instances
-// through core.NewWithHooks with the controlled clock, store and signer wrappers, a send
-// observer and a signing-key reader, and stops them at once with Kill.
 package limitertest
 
 import (

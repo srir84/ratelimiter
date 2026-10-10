@@ -1,13 +1,3 @@
-// Command rladmin is the rate limiter's admin tool (DESIGN §A6; SPEC ADM-1…ADM-4): it starts
-// and replaces epochs, restores and clears quarantined keys, shows the epoch's status and a
-// key's state, and reports and rewrites the store's persistence. It connects as rl_admin
-// (DESIGN §A2) and runs only the admin scripts and read_epoch, decoding every reply with the
-// store's §A4.9 decoder.
-//
-// The store address comes from --store or RL_STORE_ADDR, the user from RL_ADMIN_USER
-// (default rl_admin) and the password from RL_ADMIN_PASSWORD, which no output, error or raw
-// reply ever shows. Exit codes: 0 ok; 2 refused ({41}, the reason printed), an invalid policy
-// or a usage error; 3 a store or integrity problem; 4 clock_error.
 package main
 
 import (

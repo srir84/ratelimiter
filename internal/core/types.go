@@ -1,7 +1,3 @@
-// Package core is the limiter (DESIGN §A5): the public types, the acquire flow, the permit
-// state machine, slots, refund workers, the epoch watch and the cleanup runner. Package
-// limiter re-exports its types as aliases. Types owned by a lower internal package are
-// aliased here (§A5.2 "Where things are declared").
 package core
 
 import (

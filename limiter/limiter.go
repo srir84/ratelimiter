@@ -1,12 +1,3 @@
-// Package limiter is the rate limiter's public API (DESIGN §A5.2): several instances, in one
-// process or many, share one token budget per key through a dedicated store. Every type is
-// defined in internal/core (or a lower internal package) and re-exported here as an alias;
-// this package holds only thin wrappers.
-//
-// A host builds an instance with New from DefaultPolicy and DefaultInstance, overwriting the
-// required fields, calls Acquire for each protected operation, finishes each permit (Done, or
-// Release on a confirmed failure, whose refund runs in the background), reads Health and
-// Metrics, and calls Close on shutdown, which drains the pending refunds.
 package limiter
 
 import (
@@ -99,8 +90,12 @@ func WithDrainTimeout(d time.Duration) CloseOption { return core.WithDrainTimeou
 // New builds an instance (production construction, DESIGN §A5.2). It never returns nil:
 // invalid settings, ClockSource = Controlled (CMP-9) or a failed signing-key generation give
 // an instance that is permanently not ready (settings_invalid), which contacts no store, and
-// an error for the host to log. A valid instance joins the store's epoch in the background:
-// Acquire returns not_ready until it has (Health reports no_epoch).
+// an error for the host to log. A valid instance joins the store's epoch in the background
+// (CFG-6). Until it has, Acquire returns not_ready (Health reports no_epoch) while no epoch
+// record exists, or no read has succeeded yet; config_error (fingerprint_mismatch) when the
+// record's fingerprint differs; and an epoch-wide state_integrity_error (state_lost or
+// integrity_hold) when the record is malformed or held, or the high-water mark is missing or
+// malformed.
 func New(p Policy, in Instance, st StoreOptions, opts ...Option) (*Limiter, error) {
 	return core.New(p, in, st, opts...)
 }
