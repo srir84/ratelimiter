@@ -439,7 +439,7 @@ flowchart LR
 </details>
 
 - Balances never depend on this: they live in the store. Shutdown only decides whether **pending refunds** get finished (`STA-15`, `HOST-6`).
-- The drain defaults to `refund_deadline + outage_tolerance` (35 s) so a graceful stop keeps the refund guarantee; `close` returns early once all refunds are final. The platform's kill grace period must exceed the release delay plus the drain (`HOST-6`). Other instances keep serving throughout.
+- The drain defaults to `refund_deadline + outage_tolerance` (35 s) so a graceful stop keeps the refund guarantee; `close` returns early once all refunds are final and the listener has their events; a slow listener holds it until the drain deadline at most (or 100 ms past the drain's end, when that is later). The platform's kill grace period must exceed the release delay plus the drain (`HOST-6`). Other instances keep serving throughout.
 
 ## 5. Failure handling: where each outcome is decided
 

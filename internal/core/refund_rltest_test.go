@@ -430,9 +430,9 @@ func TestListenerPanicAndDrops(t *testing.T) {
 }
 
 // TestListenerCloseBlocked (plan S6, L1; DESIGN §A5.11; SPEC API-1e): a listener blocked in
-// its callback does not keep Close from returning by its drain deadline; after Close, a
-// release() on an OPEN permit ends unresolved (closed) with nothing sent, does not panic, and
-// its event is dropped and counted, never delivered.
+// its callback holds Close no longer than the listener's window, here its drain deadline;
+// after Close, a release() on an OPEN permit ends unresolved (closed) with nothing sent, does
+// not panic, and its event is dropped and counted, never delivered.
 func TestListenerCloseBlocked(t *testing.T) {
 	s := newTestStore(t)
 	unblock := make(chan struct{})
@@ -755,9 +755,8 @@ func TestCloseDeliversDrainEndEvents(t *testing.T) {
 	}
 }
 
-// TestCloseListenerGrace (SPEC API-1d, API-1e, HOST-6; the 100 ms grace is the F1 decision
-// that departs from plan S6 step 7, which let the listener run only until the drain deadline,
-// to meet SPEC API-1d, API-1e, STA-15 and T-REF-6 (b)): both ends of the listener's grace past
+// TestCloseListenerGrace (SPEC API-1d, API-1e, HOST-6; the 100 ms grace of plan S6 step 7, to
+// meet SPEC API-1d, API-1e, STA-15 and T-REF-6 (b)): both ends of the listener's grace past
 // a drain that used its whole timeout. The listener is blocked in its callback for an applied
 // refund, and a second refund, which the store refuses, is pending.
 // Close(WithDrainTimeout(100 ms)) ends it unresolved (closed) at the drain's end and waits for

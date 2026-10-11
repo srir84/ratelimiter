@@ -242,7 +242,7 @@ One function, `check_key(enc)`, used by acquire, refund, cleanup, and `admin_cle
 | `k` and `mi` absent, no `ix` member | `absent` (expected absence when the key is not quarantined) |
 | `k` absent, `mi` exists | quarantine `marker_index_without_bucket` |
 | `k` absent, `ix` member present | quarantine `index_without_bucket` |
-| `k` wrong type, or some but not all bucket fields present, or a bucket field out of range (`u > cap_units`, non-integer) | quarantine `malformed_bucket` |
+| `k` wrong type, or some but not all bucket fields present, or a bucket field out of range (`u > cap_units`, `g < 1`, non-integer) | quarantine `malformed_bucket` |
 | `k` holds marker fields but no bucket fields | quarantine `marker_without_bucket` |
 | A marker field with bad grammar, or generation ≠ `g` | quarantine `malformed_marker` |
 | Number of marker fields ≠ `mc` | quarantine `marker_count` |
@@ -615,7 +615,7 @@ type RefundEvent struct {
 ```
 
 - **Where things are declared:** every type above and every method is defined in `internal/core`, except types owned by a lower internal package, which core aliases (`Policy`, `Instance`, `StoreOptions` in `internal/settings`; `MetricsSnapshot` in `internal/metrics`); package `limiter` re-exports them as type aliases (`type Policy = core.Policy`, …) and holds only thin wrappers (`New`, `DefaultPolicy`, `DefaultInstance`, `WithRefundListener`, `WithDrainTimeout`). This avoids an import cycle with `core.NewWithHooks`; the listing shows the public surface, not where each item is declared.
-- **Defaults and zero values:** hosts start from `DefaultPolicy()` / `DefaultInstance(p)` and overwrite fields. A zero field always means the literal value 0, valid only where SPEC allows it (`drain_timeout`, `clock_rate_bound`). Required settings have no default and fail "positive" validation while 0. Harness TOML decodes onto the defaults, so absent keys keep their defaults.
+- **Defaults and zero values:** hosts start from `DefaultPolicy()` / `DefaultInstance(p)` and overwrite fields. A zero field always means the literal value 0, valid only where SPEC allows it (`drain_timeout`, `clock_rate_bound`). Required settings have no default and fail validation while 0 (each must be > 0). Harness TOML decodes onto the defaults, so absent keys keep their defaults.
 - **`New` (and `limitertest.New`, `core.NewWithHooks`) never return nil.** Invalid settings (`CFG-4`, §A3.1, the §A7 refund inequality) or a failed signing-key generation (`RCP-4`) give a limiter that is permanently not ready (`settings_invalid`): `Acquire` returns `not_ready`, no goroutine contacts the store, and `New` also returns the error for logging.
 - One process may build several `Limiter` values; each has its own connections, slots, runners, and epoch, bound to one deployment and one dedicated store (`F32`).
 
@@ -652,7 +652,7 @@ sequenceDiagram
 
 ### A5.4 Store adapter and classification
 
-![Flowchart](diagrams/DESIGN-d5-1a33564c.png)
+![Flowchart](diagrams/DESIGN-d5-779fb32e.png)
 
 <details><summary>Diagram source (mermaid — flowchart)</summary>
 
@@ -663,7 +663,7 @@ flowchart TB
   get -->|"no: host ctx ended first"| canc["cancelled"]
   get -->|"no: refused, connect or AUTH timeout,<br/>last dial failed within backoff,<br/>dependency deadline"| unav["unavailable"]
   get -->|yes| wr{"write command"}
-  wr -->|"error, 0 bytes written"| nb{"host ctx ended?"}
+  wr -->|"error, 0 bytes written"| nb{"host ctx ended before<br/>the dependency deadline?"}
   nb -->|yes| canc
   nb -->|no| unav
   wr -->|"error after some bytes"| unk["outcome_unknown<br/>(connection closed)"]
@@ -715,7 +715,7 @@ stateDiagram-v2
 </details>
 
 - **Slots:** two counting semaphores (`MaxHeldReceipts`, `MaxPendingRefunds`), reserved together with a non-blocking try, so effective concurrency = min of the two.
-- **Transitions** are a compare-and-swap loop on the permit state: a caller re-reads the state and retries until it either wins a transition below or finds a terminal state (DONE, FINAL, DEGRADED → no-op). The winner alone performs the transition's effects, so slots are freed once and at most one event is emitted.
+- **Transitions** are a compare-and-swap loop on the permit state: a caller re-reads the state and retries until it either wins a transition below or finds a terminal state (DONE, FINAL, DEGRADED → no-op). The winner performs the transition's effects, except in the retention hand-off below, where the timer leaves the slot release and the event to a refund attempt's worker; either way each effect runs once, so slots are freed once and at most one event is emitted.
 
 | Transition | Who | Frees slots | Event | Other effect |
 |---|---|---|---|---|
@@ -725,9 +725,10 @@ stateDiagram-v2
 | OPEN → FINAL (closed) | `release()` after `Close` began | both | `unresolved` (`closed`) | nothing sent |
 | EXPIRED → DONE | `done()` | none | none | — |
 | EXPIRED → FINAL | `release()` | none | `unresolved` (`expired`) | nothing sent |
-| RELEASED → FINAL | worker (final result), retention timer, drain end | both | exactly one (`API-1d`) | losers drop their result; queue and timers skip jobs already FINAL |
+| RELEASED → FINAL | worker (final result), retention timer, drain end | both | exactly one (`API-1d`) | losers drop their result; queue and timers skip jobs already FINAL; a timer win during a refund attempt leaves the slot release and the event to its worker |
 
 - **Retention timer:** started at the monotonic instant just before the acquire command is sent; fires after `receipt_lifetime` (`REF-4a`).
+- **Retention hand-off:** a refund attempt is in flight from the moment its worker takes the job off the queue until that worker has counted the commands it sent. When the timer wins RELEASED → FINAL during one, it cancels the attempt and leaves the slot release and the `unresolved` (`retention`) event to that worker. Once the attempt returns, the worker counts the commands it sent, frees the slots, then emits the event, so the permit holds its slots until its final event (`API-1h`) and the event's `Attempts` count every command sent (`API-1d`); the worker's own result is a loser's.
 
 ### A5.6 Refund workers
 
@@ -800,8 +801,8 @@ flowchart LR
 |---|---|---|---|
 | `rate_tokens` / `rate_period_ns` / `capacity` | 10 / 1 s / 20 | same | §A3.1 bounds |
 | `failure_mode` | `closed` | both, per scenario | — |
-| `max_tracked_buckets` / `max_live_markers` | none (required) | 100,000 / 50,000 | positive |
-| `max_markers_per_key` | 1,000 | same | positive, ≤ `max_live_markers` |
+| `max_tracked_buckets` / `max_live_markers` | none (required) | 100,000 / 50,000 | 1 … 2^31 − 1 |
+| `max_markers_per_key` | 1,000 | same | 1 … 2^31 − 1, ≤ `max_live_markers` |
 | `receipt_lifetime` / `refund_deadline` / `outage_tolerance` | 60 s / 30 s / 5 s | same | µs multiples |
 | `cleanup_interval` | 5 s | same | µs multiple |
 | `max_release_delay` | none (required) | `P` = 5 s | `RCP-8` |
@@ -809,16 +810,16 @@ flowchart LR
 | `clock_rate_bound` | 1,000 ppm (2 × the usual 500 ppm NTP slew limit) | same | ≥ 0 |
 | `dependency_deadline` (`D`) | 2 s | same | — |
 | `drain_timeout` | `refund_deadline + outage_tolerance` (35 s at the default policy) | same | ≥ 0 |
-| `max_held_receipts` / `max_pending_refunds` (`N`) | none (required) | 1,152 / 1,152 | positive |
-| `refund_workers` / backoff | 128 / 50 ms → 1 s | same | §A5.6 inequality |
-| `listener_queue_size` | 10,000 | same | positive |
-| `store_conns` / `refund_conns` / cleanup batch / pipelines / reclaim batch | 8 / 2 / 1,000 / 4 / 1,000 (plus one fixed maintenance connection) | same | positive |
+| `max_held_receipts` / `max_pending_refunds` (`N`) | none (required) | 1,152 / 1,152 | 1 … 2^31 − 1 |
+| `refund_workers` / backoff | 128 / 50 ms → 1 s | same | `refund_workers` 1 … 2^31 − 1; §A5.6 inequality |
+| `listener_queue_size` | 10,000 | same | 1 … 2^31 − 1 |
+| `store_conns` / `refund_conns` / cleanup batch / pipelines / reclaim batch | 8 / 2 / 1,000 / 4 / 1,000 (plus one fixed maintenance connection) | same | 1 … 2^31 − 1 |
 
 - Startup checks with harness values: `RCP-8`: `5 s + 30 s + 5 s + 1 s = 41 s ≤ 60 s` and `1 s ≥ 60 s × 0.001 = 60 ms`; refund inequality: `1 s + 1 s + (ceil(1,152 / 128) + 3) × 2 s = 26 s ≤ 30 s`.
 
 ### A5.11 Listener, health, metrics, diagnostics
 
-- **Listener:** events go into a channel of `ListenerQueueSize`; one dispatcher goroutine calls the listener inside `recover()`. A full channel drops the event and increments `listener_drops` (`API-1d`, `HOST-8`).
+- **Listener:** events go into a channel of `ListenerQueueSize`; one dispatcher goroutine calls the listener inside `recover()`. A full channel drops the event and increments `listener_drops` (`API-1d`, `HOST-8`). After the drain, `Close` lets the dispatcher deliver the queued events until the drain deadline, or for a listener grace of 100 ms past the drain's end when that is later, and goes on as soon as the queue is empty; then it stops the dispatcher without waiting for a blocked callback, and the events still queued, and any emitted later, are dropped and counted.
 - **Health** (struct; the harness serves it as JSON): `status`, `reason`, `epoch_id`, `clock_source`, per-instance settings, `listener_drops`, `store_error` (last), `fixtures` (true only for limiters built through `core.NewWithHooks`).
 - **Metrics** (`MetricsSnapshot`; the harness renders Prometheus text):
 
@@ -859,9 +860,10 @@ func WithStoreWrapper(func(Adapter) Adapter) Option  // Adapter = alias of the i
 func WithSignerWrapper(func(Signer) Signer) Option
 func WithSendObserver(func(cmd string, bytesWritten int)) Option  // cmd = script name for EVALSHA ("acquire"), else the command ("SCRIPT LOAD", "AUTH", "PING")
 func WithKeyReader(r io.Reader) Option              // source of the signing key bytes, so tests can make key generation fail (T-CFG-3)
-func Kill(l *limiter.Limiter)                        // stops goroutines and connections at once, no drain: pending refunds are lost, as in a process kill
+func Kill(l *limiter.Limiter)                        // stops goroutines and connections at once, no drain: pending refunds are lost and none reaches the listener, as in a process kill
 ```
 
+- `Kill` stops the listener dispatcher first: no callback starts after that, one already running finishes, and the events still queued are dropped and counted. Then it stops every armed timer and the refund workers, cancelling their attempts in flight and waiting for them. Every event emitted once the dispatcher has stopped is counted in `rl_refund_results_total` and as a listener drop: a worker's final result (a MAC failure included) or retention hand-off (§A5.5) while `Kill` waits for it, the `unresolved` (`retention`) event of a timer that fired just before `Kill` stopped the timers (`Kill` does not wait for it), a `release()` during or after `Kill`, or the `unresolved` (`closed`) events of a `Close` already draining when `Kill` began.
 - `limiter.New` rejects `ClockSource = Controlled` (`settings_invalid`, `CMP-9`). Without `-tags rltest`, `NewWithHooks` and `limitertest` do not exist, so production code cannot reach them.
 
 ## A6. Admin tool (`rladmin`)
@@ -1186,7 +1188,7 @@ sequenceDiagram
 | `P` (`max_release_delay`) | 5 s (≤ 2 s acquire + 2.5 s statement timeout + slack) |
 | In-flight cap per API | 512, no queue |
 | Supported failure load | ≤ 5 % refunded requests (confirmed failures plus `ERR-15` refusals), in total and per key, at ≤ 3,000 admitted req/s, plus at most one 5 s store outage segment per run |
-| Kill grace | `P + drain_timeout + 5 s` = 45 s |
+| Kill grace | `P + drain_timeout + 5 s` = 45 s; `hitapi`'s timed waits after the drain (listener grace 0.1 s, §A5.11; run-log drain ≤ 4 s) leave 0.9 s for its untimed close steps, which take milliseconds unless the disk or PostgreSQL stalls |
 | PostgreSQL | `max_connections` 300, pool 64 per API (192 total), `statement_timeout` 2.5 s, `fsync on`, `synchronous_commit on` |
 
 ---
@@ -1259,7 +1261,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 - `tools/trace` lints every `.lua` file: correct header for its script (§A4.8 rule 1), no `tostring(`, no `ZRANGEBYSCORE`, and `unpack(` only on a line marked `-- lint:chunked(500)` (the chunked writes of §A4.5).
 - **Store audit after every L2 test:** each L2 script test gets its store from `scriptrun.Store(t, …)` (`internal/testutil/scriptrun`), which registers `storestate.Audit(snapshot, AuditConfig) []string` in `t.Cleanup`, with `AuditConfig{Policy, Damaged []string, Restored []string, FillerPrefixes []string, Canaries [][]byte}`. A test that crafts a malformed state names those keys with `Damaged(keys…)` on the handle `scriptrun.Store` returns. Any finding fails the test. The rules (L3 uses them too, §C4):
   - **Grammar, every key:** only `rl:epoch`, `rl:ctl:time`, `rl:e:<32 hex>:{ix,q,k:<enc>,mi:<enc>}` (`enc` per `is_enc`) and the filler prefixes (`rl:pad:` and `rl:fill:`); a key not in `Damaged` must also have its §A3.2 type.
-  - **Current epoch only** (the namespace that `rl:epoch.id` names; other namespaces, such as one awaiting reclaim, get the grammar check only), for keys not in `Damaged`: every key passes §A3.3 (`ok`); 0 ≤ `u` ≤ `cap_units`; `g` ≤ `gen`; each marker expiry ≤ `x`; every stored `t` and marker credit time ≤ `hwm`; the `ix` score follows the §A3.2 rule (keys in `Restored` exempt).
+  - **Current epoch only** (the namespace that `rl:epoch.id` names; other namespaces, such as one awaiting reclaim, get the grammar check only), for keys not in `Damaged`: every key passes §A3.3 (`ok`); 0 ≤ `u` ≤ `cap_units`; 1 ≤ `g` ≤ `gen`; each marker expiry ≤ `x`; every stored `t` and marker credit time ≤ `hwm`; the `ix` score follows the §A3.2 rule (keys in `Restored` exempt).
   - **Counters, only when `Damaged` is empty:** `nm` = the sum of `mc` = the sum of `ZCARD mi`; `ZCARD ix` = the `k:` key count ≤ `nb` ≤ that count + the `Restored` count (§A3.3 counter rule: a restore may count a key once too many); `q` is empty. With damage, `q` may hold only `Damaged` keys.
   - **Policy:** the limits come from the policy whose fingerprint equals `rl:epoch.fp` (`T-CFG-5` replaces the settings).
   - **Canaries:** L3 only (§C4).

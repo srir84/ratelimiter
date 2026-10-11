@@ -45,12 +45,11 @@ decision R1 of the H6 task 1 repair).
 6. rerun_schedule: the s3-busy-user rerun, a limiter run of s3-busy-user with seed 1 other than
    its limiter run, has the limiter run's schedule_sha256.
 
-Refund completion, as plan step 4 words it: "list every release covered by REF-5/REF-9 — released
-within max_release_delay (P) of just before its acquire, not on an instance killed before the
-release's final event, and not cut by a drain timeout — and require each to be confirmed
-(applied/already_applied) before its expiry and with final_mono_ns − release_mono_ns ≤
-refund_deadline_ns (30 s) + the run's measured outage (context.json faults outage_ns)". The rules
-it applies:
+Refund completion, as plan step 4 words it: "list every release covered by REF-5/REF-9 and require
+each to be confirmed (applied/already_applied) before its expiry and with final_mono_ns −
+release_mono_ns ≤ refund_deadline_ns (30 s) + the run's measured outage (context.json faults
+outage_ns)", excluding only a release after P, one killed or cut by a drain timeout within that
+bound, and one that REF-9 (d) excuses. The rules it applies:
 - SPEC REF-5: "When release() is called within max_release_delay (RCP-8), the refund is confirmed
   (applied or already_applied) within refund_deadline + outage time of the release() call … Always
   before expiry (guaranteed by RCP-8). A release() after max_release_delay is still attempted but

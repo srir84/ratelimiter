@@ -265,8 +265,8 @@ This interface is transport-neutral: it knows nothing about HTTP, databases, or 
 | `rate_tokens`, `rate_period_ns` | shared | tokens, ns | 10 per 1,000,000,000 | positive integers | yes |
 | `capacity` | shared | tokens | 20 | integer ≥ 1 | yes |
 | `failure_mode` | shared | — | `closed` | `closed` or `open` | yes |
-| `max_tracked_buckets`, `max_live_markers` | shared | count | none; each deployment chooses (`STA-7`) | positive | yes |
-| `max_markers_per_key` | shared | count | 1,000 | positive, ≤ `max_live_markers` | yes |
+| `max_tracked_buckets`, `max_live_markers` | shared | count | none; each deployment chooses (`STA-7`) | 1 … 2^31 − 1 | yes |
+| `max_markers_per_key` | shared | count | 1,000 | 1 … 2^31 − 1, ≤ `max_live_markers` | yes |
 | `receipt_lifetime` | shared | ns | 60 s | `RCP-8` | yes |
 | `refund_deadline` | shared | ns | 30 s | `RCP-8` | yes |
 | `outage_tolerance` | shared | ns | 5 s | `RCP-8` | yes |
@@ -279,8 +279,8 @@ This interface is transport-neutral: it knows nothing about HTTP, databases, or 
 | `dependency_deadline` | per instance | ns | 2 s | positive | no |
 | `epoch_reread_interval` | per instance | ns | 1 s | positive | no |
 | `drain_timeout` | per instance | ns | `refund_deadline + outage_tolerance` | ≥ 0 (shorter than default: `REF-9`) | no |
-| `max_held_receipts`, `max_pending_refunds` | per instance | count | none; required | positive | no |
-| `listener_queue_size` | per instance | events | chosen by the design doc | positive | no |
+| `max_held_receipts`, `max_pending_refunds` | per instance | count | none; required | 1 … 2^31 − 1 | no |
+| `listener_queue_size` | per instance | events | chosen by the design doc | 1 … 2^31 − 1 | no |
 | refund retry backoff | per instance | ns | chosen by the design doc | must keep `REF-5` true for an outage anywhere in the window | no |
 
 ## 5. Signed receipts

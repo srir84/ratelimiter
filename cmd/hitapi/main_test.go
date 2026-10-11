@@ -167,3 +167,24 @@ func TestStopRequests(t *testing.T) {
 		t.Errorf("WaitIdle's deadline %v, want Shutdown's %v: P bounds both together", steps.deadlines[2], dl)
 	}
 }
+
+// TestShutdownBudget (SPEC HOST-6; HARNESS HAR-15; DESIGN §B10): hitapi's timed SIGTERM waits
+// fit the orchestrator's kill grace, by DESIGN's harness numbers. P 5 s (stopRequests), the
+// drain_timeout 35 s (Close's drain), the limiter's 100 ms listener grace past the drain
+// (internal/core TestListenerGraceBudget caps it) and logDrainTimeout (the run log's drain)
+// must add up to less than the 45 s kill grace, leaving time for the steps hitapi does not
+// time: the drain's cancel of the attempts in flight, the limiter's shutdown, the run log
+// writing its remaining lines and closing, the database pool's close and the exit.
+func TestShutdownBudget(t *testing.T) {
+	const (
+		p             = 5 * time.Second
+		drainTimeout  = 35 * time.Second
+		listenerGrace = 100 * time.Millisecond
+		killGrace     = 45 * time.Second
+	)
+	worst := p + drainTimeout + listenerGrace + logDrainTimeout
+	if slack := killGrace - worst; slack <= 0 {
+		t.Errorf("P %v + drain_timeout %v + listener grace %v + run-log drain %v = %v, want less than the %v kill grace (slack %v)",
+			p, drainTimeout, listenerGrace, logDrainTimeout, worst, killGrace, slack)
+	}
+}

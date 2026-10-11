@@ -42,7 +42,15 @@ const (
 
 	// logDrainTimeout bounds the wait for the run log's channel to empty before the stop
 	// record, from the limiter's Close returning (plan choice: the lines go to a local file).
-	logDrainTimeout = 5 * time.Second
+	// It is SIGTERM's last timed wait. The timed worst case, P (stopRequests) + drain_timeout +
+	// the limiter's listener grace (at most 100 ms past the drain) + logDrainTimeout = 5 s +
+	// 35 s + 0.1 s + 4 s = 44.1 s at harness values, leaves 0.9 s of the orchestrator's 45 s
+	// kill grace (P + drain_timeout + 5 s, DESIGN §B10) for the steps hitapi does not time, in
+	// order: the drain's cancel of the refund attempts in flight, the limiter's shutdown, the
+	// run log writing its remaining lines and closing, the database pool's close and the exit.
+	// They take milliseconds while the disk and PostgreSQL answer; a disk or PostgreSQL stall
+	// can hold them past the kill grace. TestShutdownBudget pins the timed sum.
+	logDrainTimeout = 4 * time.Second
 )
 
 func main() {

@@ -144,7 +144,7 @@ flowchart LR
 
 </details>
 
-- **Sequence:** stop taking new work, let in-flight work finish or cancel within `P`, then call `Close()`. `Close` drains pending refunds for `DrainTimeoutNs` (default `refund_deadline + outage_tolerance` = 35 s) and returns as soon as all are final.
+- **Sequence:** stop taking new work, let in-flight work finish or cancel within `P`, then call `Close()`. `Close` drains pending refunds for `DrainTimeoutNs` (default `refund_deadline + outage_tolerance` = 35 s) and returns as soon as all are final and the refund listener has received their events. It waits for a slow listener only until the drain deadline, or 100 ms past the drain's end when that is later.
 - **Kill grace** must exceed `P + drain_timeout` plus shutdown overhead. The harness uses `P + drain_timeout + 5 s` = 5 + 35 + 5 = **45 s** (DESIGN [§B10](../DESIGN.md#b10-harness-numbers)). A 30 s platform default is too short for the default drain.
 - `Close(limiter.WithDrainTimeout(d))` overrides the drain. A drain shorter than the default gives up the refund guarantee for the refunds still pending (`REF-9`); those end `unresolved` (`closed`).
 - From the start of `Close`, `Acquire` returns `not_ready` with nothing sent, `Health` reports `closing`, and `Release` on an open permit ends `unresolved` (`closed`) without sending.
@@ -228,7 +228,7 @@ Start from `limiter.DefaultPolicy()` and `limiter.DefaultInstance(p)` and overwr
 | `ListenerQueueSize` | instance | 10,000 | same | 1 … 2^31−1 |
 | `StoreConns` / `RefundConns` / `CleanupBatch` / `CleanupPipelines` / `ReclaimBatch` | instance | 8 / 2 / 1,000 / 4 / 1,000 (plus one maintenance connection) | same | 1 … 2^31−1 |
 
-Every count setting takes 1 … 2^31−1, the `RateTokens` range: an owner decision of 2026-10-05 adds that cap to DESIGN §A5.10's "positive" (`internal/settings`).
+Every count setting takes 1 … 2^31−1, the `RateTokens` range (DESIGN §A5.10, `internal/settings`).
 
 Every `*Ns` setting, shared or per instance, must also be a whole number of microseconds, a multiple of 1,000 ns (DESIGN [§A3.1](../DESIGN.md#a31-time-and-number-domain)); `New` refuses any other value, and the instance is never ready (`settings_invalid`).
 

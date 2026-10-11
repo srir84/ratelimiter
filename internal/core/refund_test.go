@@ -373,16 +373,17 @@ func TestDrainCountsAttemptInFlight(t *testing.T) {
 
 // TestListenerGraceBudget (SPEC HOST-6; DESIGN §B10; the F1 decision on Close's listener
 // grace): listenerGrace, the time Close still gives the listener past a drain that used its
-// whole timeout, is at most 100 ms. The harness's shutdown budget has no room for more: the
+// whole timeout, is at most 100 ms, its share of the harness's shutdown budget: the
 // orchestrator kills a hitapi 45 s after its SIGTERM (P 5 s + drain_timeout 35 s + 5 s,
-// cmd/orchestrator killGrace), and hitapi's bounded waits already add up to P 5 s + drain 35 s
-// + listenerGrace + the run log's 5 s drain (cmd/hitapi logDrainTimeout), 45.1 s at 100 ms (the
-// F1 report records that 0.1 s). TestCloseListenerGrace pins the other side: Close gives a
-// blocked listener the whole 100 ms.
+// cmd/orchestrator killGrace), and hitapi's timed waits add up to P 5 s + drain 35 s +
+// listenerGrace + the run log's 4 s drain (cmd/hitapi logDrainTimeout), 44.1 s at 100 ms,
+// which leaves 0.9 s for the steps hitapi does not time (cmd/hitapi TestShutdownBudget pins
+// the sum). TestCloseListenerGrace pins the other side: Close gives a blocked listener the
+// whole 100 ms.
 func TestListenerGraceBudget(t *testing.T) {
 	const budget = 100 * time.Millisecond
 	if grace := listenerGrace; grace > budget {
-		t.Errorf("listenerGrace = %v, want at most %v: hitapi's shutdown would overrun the 45 s kill grace by more than the 0.1 s the F1 report records", grace, budget)
+		t.Errorf("listenerGrace = %v, want at most %v: hitapi's timed shutdown waits (P 5 s + drain 35 s + the grace + its 4 s run-log drain) would leave less than 0.9 s of the 45 s kill grace", grace, budget)
 	}
 }
 
@@ -485,11 +486,10 @@ func newRetentionRig(t *testing.T, lifetime time.Duration, attempt func(context.
 //   - While the cancelled attempt has not returned yet (the test fires the timer, then lets the
 //     attempt return), the timer has ended the permit as far as the F1 hand-off lets it: FINAL,
 //     out of the pending set, its timers stopped. The slots and the event wait for the attempt:
-//     API-1h keeps the slots until the final event (a departure from DESIGN §A5.5, where the
-//     timer frees them itself, listed in the F1 report). Once the attempt returns, its worker
-//     frees the slots and then emits the one event, counted: while the test holds the slots'
-//     lock the worker cannot emit, and the listener reads no slot in use when the event
-//     arrives.
+//     API-1h keeps the slots until the final event (DESIGN §A5.5's retention hand-off). Once
+//     the attempt returns, its worker frees the slots and then emits the one event, counted:
+//     while the test holds the slots' lock the worker cannot emit, and the listener reads no
+//     slot in use when the event arrives.
 func TestRetentionCountsAttemptInFlight(t *testing.T) {
 	const (
 		wait     = 5 * time.Second

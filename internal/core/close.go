@@ -3,17 +3,20 @@ package core
 import "time"
 
 // listenerGrace is how long past the drain's end Close still lets the listener's dispatcher
-// deliver the events already queued, when the drain deadline leaves it less. It is the F1
-// decision that departs from plan S6 step 7, which let the dispatcher run only until the drain
-// deadline, to meet SPEC API-1d (an event is dropped only on overflow), API-1e and STA-15 (the
-// refunds still pending after the drain are emitted as unresolved (closed)) and T-REF-6 (b).
+// deliver the events already queued, when the drain deadline leaves it less (plan S6 step 7),
+// to meet SPEC API-1d (an event is dropped only on overflow), API-1e and STA-15 (the refunds
+// still pending after the drain are emitted as unresolved (closed)) and T-REF-6 (b).
 // The drain's end queues at most one event per pending refund (MaxPendingRefunds, 1,152 at
 // harness values) besides the odd release() after Close began, and a listener that hands
 // events off (HOST-8) takes microseconds per event, so the queue empties within milliseconds,
 // even under the race detector or behind a scheduling delay; Close moves on as soon as it
 // does. The whole grace is spent only on a slow or blocked listener: it adds up to 100 ms of
-// shutdown overhead (HOST-6). In hitapi's strict worst case that overruns the harness's 45 s
-// kill grace by 0.1 s, as the F1 report records; TestListenerGraceBudget caps it at 100 ms.
+// shutdown overhead (HOST-6). hitapi's timed worst case, P 5 s + drain_timeout 35 s + this
+// 0.1 s + its 4 s run-log drain = 44.1 s, leaves 0.9 s of the harness's 45 s kill grace
+// (DESIGN §B10) for the close steps hitapi does not time, which take milliseconds unless the
+// disk or PostgreSQL stalls (cmd/hitapi's logDrainTimeout lists them in order);
+// TestListenerGraceBudget caps the grace at 100 ms, and cmd/hitapi's TestShutdownBudget pins
+// the timed sum.
 const listenerGrace = 100 * time.Millisecond
 
 // listenerDeadline is the end of the time Close gives the listener to deliver the events

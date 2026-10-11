@@ -35,11 +35,12 @@ func NewWithHooks(p Policy, in Instance, st StoreOptions, h Hooks, opts ...Optio
 }
 
 // Kill stops l at once, as a process kill would (DESIGN §A5.12): the listener dispatcher
-// stops first, so no event is delivered after it begins; then the refund workers and every
-// backoff and retention timer stop, and the epoch watch, the cleanup runner (a pass in
-// progress ends with its calls) and every connection, with no drain.
-// Refunds still pending are lost and emit nothing. Afterwards Acquire returns not_ready, Health
-// reports closing, and Close returns at once (plan choice).
+// stops first, so no callback starts after that (one already running finishes); then the
+// refund workers and every backoff and retention timer stop, and the epoch watch, the cleanup
+// runner (a pass in progress ends with its calls) and every connection, with no drain.
+// Refunds still pending are lost: none reaches the listener, and an event emitted once the
+// dispatcher has stopped is counted and dropped (DESIGN §A5.12 lists the paths). Afterwards
+// Acquire returns not_ready, Health reports closing, and Close returns at once (plan choice).
 func Kill(l *Limiter) {
 	if l == nil {
 		return
