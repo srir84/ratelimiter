@@ -1006,23 +1006,26 @@ func TestDriverReleaseOutsideDriver(t *testing.T) {
 	}
 }
 
-// TestDriverLateRefundAttempt (orchestrator decision, S6 task 2): the retention timer (FastPolicy:
-// 6 s after the acquire) finalizes a released permit, unresolved, while its refund call is in
-// flight: the refusal lifts 1 s before, the next call reaches the store, which applies it, and
-// an after_reply barrier holds the E_APPLIED reply past the timer. The limiter never learns that
-// outcome, so the refund record gets the call as a sent {"outcome_unknown", 0, 0} after the
-// refused calls: added to the written record when the call returns after the event reached the
-// driver, and in place when it returns first (the event waits in the listener queue behind a
-// blocked callback). Either way the record stays well-formed and check_bud11 counts the
-// possible credit: the key's 21st allow at the frozen instant, which only that credit allows,
-// passes the teardown checks (a record of refused calls alone fails BUD-11 with exit status 1,
-// one ending with code 3 under unresolved with exit status 2).
+// TestDriverLateRefundAttempt (orchestrator decision, S6 task 2; SPEC API-1d): the retention
+// timer (FastPolicy: 6 s after the acquire) finalizes a released permit, unresolved, while its
+// refund call is in flight: the refusal lifts 1 s before, the next call reaches the store, which
+// applies it, and an after_reply barrier holds the E_APPLIED reply past the timer. The timer
+// cancels the call, which the barrier then lets return, and the event waits for it: it counts
+// the command the call sent (Attempts 1, API-1d), and the call is captured before the event
+// reaches the driver. The limiter does not act on that outcome (the timer won the permit), so
+// the refund record gets the call as a sent {"outcome_unknown", 0, 0} after the refused calls:
+// written with the record when the event reaches a free listener, and so too when the event
+// first waits in the listener queue behind a blocked callback. Either way the record stays
+// well-formed and check_bud11 counts the possible credit: the key's 21st allow at the frozen
+// instant, which only that credit allows, passes the teardown checks (a record of refused
+// calls alone fails BUD-11 with exit status 1, one ending with code 3 under unresolved with
+// exit status 2).
 func TestDriverLateRefundAttempt(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		eventFirst bool
 	}{
-		{"the call returns after the event", true},
+		{"the event waits for the held call", true},
 		{"the call returns before the event", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -1095,17 +1098,23 @@ func lateRefund(t *testing.T, eventFirst bool) {
 	}
 	for !finalized() {
 		if time.Now().After(retention.Add(wait)) {
-			t.Fatal("the retention timer did not finalize the permit while its call was held")
+			t.Fatalf("no unresolved result counted within %v of the retention timer: the timer cancels the held call, and the permit's event follows once that call has returned", wait)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 	early := slices.Repeat([]string{refusedEntry}, refused)
 	if eventFirst {
+		// The event reaches the free listener only once the held call has returned (the timer
+		// cancelled it): the call is already captured, and the record is written with it,
+		// before the barrier is released.
 		if _, err := d.WaitRefund(op, wait); err != nil {
 			t.Fatal(err)
 		}
-		if got, want := refundAttemptsJSON(t, d, id), attemptsList(early...); got != want {
-			t.Fatalf("refund record before the late call returns\n got %s\nwant %s", got, want)
+		if n := len(d.RefundAttempts(op)); n != refused+1 {
+			t.Fatalf("%d refund calls captured when the event arrived, want %d: the held call returns before the event", n, refused+1)
+		}
+		if got, want := refundAttemptsJSON(t, d, id), attemptsList(append(early, unknownEntry)...); got != want {
+			t.Fatalf("refund record when the event arrived\n got %s\nwant %s", got, want)
 		}
 	}
 	sw.Release("late")
@@ -1129,8 +1138,8 @@ func lateRefund(t *testing.T, eventFirst bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.Result != limiter.Unresolved || ev.Reason != limiter.UnresolvedRetention || ev.Attempts != 0 {
-		t.Errorf("event %+v, want unresolved (retention) with 0 attempts: the late call was not counted", ev)
+	if ev.Result != limiter.Unresolved || ev.Reason != limiter.UnresolvedRetention || ev.Attempts != 1 {
+		t.Errorf("event %+v, want unresolved (retention) with 1 attempt: the held call sent its command (API-1d)", ev)
 	}
 	if got, want := refundAttemptsJSON(t, d, id), attemptsList(append(early, unknownEntry)...); got != want {
 		t.Errorf("refund record attempts\n got %s\nwant %s", got, want)
@@ -1163,9 +1172,10 @@ func capturedReply(code, tUs int64, reason string, extra ...int64) store.Respons
 // retention timer can win the permit between the two: the unresolved event then counts a call
 // that got a final reply. Every captured call with a final code (3, 4, 10, 11) under an
 // unresolved event, whatever its reason, is a sent {"outcome_unknown", 0, 0}, as a call the
-// event did not count is; counted calls with other codes keep theirs, and so does every call of
-// a final event. With a final code kept, the record ends with it under unresolved, which
-// check_bud11 rejects with exit status 2.
+// event did not count is, whatever its code (attemptRecords' guard; the code 22 row pins it,
+// and the row of counted codes 21 and 24 its other side); counted calls with other codes keep
+// theirs, and so does every call of a final event. With a final code kept, the record ends
+// with it under unresolved, which check_bud11 rejects with exit status 2.
 func TestDriverAttemptRecords(t *testing.T) {
 	const tUs = 1_760_000_000_000_000
 	refused := store.Response{Outcome: store.Unavailable}
@@ -1188,8 +1198,10 @@ func TestDriverAttemptRecords(t *testing.T) {
 			unresolved(limiter.UnresolvedRetention, 1), attemptsList(unknownEntry)},
 		{"E_RECEIPT_EXPIRED counted, then the retention timer won", []store.Response{capturedReply(11, tUs, "expired")},
 			unresolved(limiter.UnresolvedRetention, 1), attemptsList(unknownEntry)},
-		{"E_APPLIED not counted: in flight when the timer fired", []store.Response{refused, applied},
+		{"E_APPLIED not counted by the event (its final code rewrites it even without the guard)", []store.Response{refused, applied},
 			unresolved(limiter.UnresolvedRetention, 0), attemptsList(refusedEntry, unknownEntry)},
+		{"code 22, sent but not counted by the event (the guard: past the event's count, a code that is not final is rewritten too)", []store.Response{capturedReply(22, 0, "hwm_missing")},
+			unresolved(limiter.UnresolvedRetention, 0), attemptsList(unknownEntry)},
 		{"counted calls with codes that are not final keep them", []store.Response{capturedReply(21, 0, "clock"), capturedReply(24, tUs, "key_markers")},
 			unresolved(limiter.UnresolvedRetention, 2),
 			attemptsList(`{"code":21,"t_us":0,"credited":0}`, `{"code":24,"t_us":1760000000000000,"credited":0}`)},

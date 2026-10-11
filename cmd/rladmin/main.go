@@ -35,10 +35,26 @@ const (
 )
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	code := run(ctx, os.Args[1:], os.LookupEnv, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
+}
+
+// signalContext is main's root context: the first SIGINT or SIGTERM cancels it, which ends
+// every store wait (exit 3). Handling that first signal also releases both signals
+// (context.AfterFunc(ctx, stop)), so a SIGINT or SIGTERM after the first has been handled takes
+// its default action, which ends rladmin by that signal (with no exit code) wherever it waits
+// without a context, such as a policy file read held in the kernel (loadPolicy) or a write to
+// a pipe nobody reads, unless the kernel holds that call uninterruptibly (a macOS hard mount
+// without intr, where even SIGKILL waits). One that arrives together with the first, before
+// the release, only cancels again. A SIGINT that was ignored when rladmin started (a script's
+// background job) still cancels the first time, since Notify stops it being ignored, but the
+// release ignores it again (os/signal), so from then on only SIGTERM ends rladmin.
+func signalContext() (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 // invocation is a parsed command line and environment.

@@ -328,9 +328,10 @@ func TestT_REF_5(t *testing.T) {
 // before it returns; meanwhile an acquire on that instance is not_ready with no acquire byte
 // sent, and health is not_ready (closing). (b) Refunds refused, 5 released,
 // Close(WithDrainTimeout(500 ms)) returns in 500–800 ms, the 5 counted as unresolved in
-// rl_refund_results_total, every one either received as unresolved (closed) or dropped (plan
-// S6 task notes: events built at the drain deadline are usually dropped). Another instance
-// keeps serving. (c) On a second deployment, the default drain (3.5 s) with T-REF-2 (a)'s
+// rl_refund_results_total, and all 5 received as unresolved (closed), none dropped, when it
+// returns: the drain's end emits them into a queue with room for them, and API-1d drops an
+// event only on overflow (T-REF-6 (b): "the rest emitted as unresolved (closed)"). Another
+// instance keeps serving. (c) On a second deployment, the default drain (3.5 s) with T-REF-2 (a)'s
 // outage (the refunds held at a barrier until 1.5 s after release, then a 0.5 s refuse outage
 // on a store wrapper of the test's, nearer the store, which every refund let go meets): all
 // confirmed within 3.5 s of release, each after at least 2 refund calls, one refused before
@@ -397,13 +398,9 @@ func TestT_REF_6(t *testing.T) {
 	if v := metric(t, d, 1, "rl_refund_results_total", "unresolved"); v != 5 {
 		t.Errorf(`(b) rl_refund_results_total{result="unresolved"} = %v, want 5`, v)
 	}
-	// Past the drain deadline, Close returns without waiting for a dispatcher still inside the
-	// driver's callback (waitExit), and that event is then neither received nor dropped yet:
-	// wait, from start (taken before Close), until all 5 are one or the other, as
-	// internal/core's settled does. The checks below report a shortfall.
-	waitUntil(start.Add(waitMax), func() bool {
-		return uint64(len(d.RefundEvents(1)))+d.Limiter(1).Health().ListenerDrops >= 5
-	})
+	// The drain used its whole timeout; Close then lets the dispatcher deliver the events its end
+	// queued before it stops the dispatcher, and returns once the queue is empty, so the
+	// driver's callback has taken all 5.
 	received := 0
 	for _, ev := range d.RefundEvents(1) {
 		if ev.Result != limiter.Unresolved || ev.Reason != limiter.UnresolvedClosed {
@@ -411,8 +408,8 @@ func TestT_REF_6(t *testing.T) {
 		}
 		received++
 	}
-	if drops := d.Limiter(1).Health().ListenerDrops; uint64(received)+drops != 5 {
-		t.Errorf("(b) %d events received + %d dropped, want 5", received, drops)
+	if drops := d.Limiter(1).Health().ListenerDrops; received != 5 || drops != 0 {
+		t.Errorf("(b) %d events received and %d dropped when Close returned, want 5 and 0: the queue had room for them (API-1d)", received, drops)
 	}
 	d.Done(allowed(t, d, 2, "ref6-other"))
 

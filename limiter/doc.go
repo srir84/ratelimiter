@@ -73,12 +73,14 @@
 // Close is the graceful stop (SPEC API-1e, HOST-6). From its start Acquire returns not_ready;
 // it keeps retrying the pending refunds until all are final or the drain timeout passes
 // (DrainTimeoutNs, refund_deadline + outage_tolerance by default, or WithDrainTimeout), and
-// ends the rest as unresolved (closed). The refund listener gets until the same deadline to
-// take its queued events; then its dispatcher is stopped without waiting for a callback that
-// is still blocked, and later events are dropped and counted. When Close returns, the refund
-// workers, the epoch watch and the cleanup runner have stopped and every connection is
-// closed; every refund event was delivered, dropped and counted, or is in a callback still
-// running, and that callback's dispatcher goroutine ends only when the callback returns (keep
-// the listener fast, HOST-8). The platform's kill grace must exceed MaxReleaseDelayNs + the
-// drain timeout + shutdown overhead.
+// ends the rest as unresolved (closed), queuing their events for the listener. The refund
+// listener gets until the drain deadline, or a short grace (100 ms) past the drain's end when
+// that is later, to take its queued events, and Close moves on as soon as the queue is empty;
+// then its dispatcher is stopped without waiting for a callback that is still blocked, and the
+// events still queued (only behind a slow or blocked callback) and later ones are dropped and
+// counted. When Close returns, the refund workers, the epoch watch and the cleanup runner have
+// stopped and every connection is closed; every refund event was delivered, dropped and
+// counted, or is in a callback still running, and that callback's dispatcher goroutine ends
+// only when the callback returns (keep the listener fast, HOST-8). The platform's kill grace
+// must exceed MaxReleaseDelayNs + the drain timeout + shutdown overhead.
 package limiter

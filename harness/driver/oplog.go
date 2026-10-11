@@ -44,12 +44,15 @@ import (
 //     it arrives; key_b64url, g, s and expiry_us are the acquire record's; attempts are the
 //     captured refund calls in order (RefundAttempt's Code, TUs and Credited: the §A4.9 code
 //     or the outcome's name, the reply's t, and credited units or credit_us), and result the
-//     event's result. A call still in flight when the limiter finalized the permit
-//     (unresolved by the retention timer) is {"outcome_unknown", 0, 0} if it sent a command,
-//     added to the written record when it returns later (orchestrator decision, S6 task 2);
-//     so is every call with a final code (3, 4, 10, 11) in the record of an unresolved
-//     event: the event counted it, but the retention timer took the permit before that reply
-//     could end it (orchestrator decision, S6 review round 1);
+//     event's result. Every call with a final code (3, 4, 10, 11) in the record of an
+//     unresolved event is {"outcome_unknown", 0, 0}: the event counted it, but the retention
+//     timer took the permit before that reply could end it (orchestrator decision, S6 review
+//     round 1). A call still in flight when the retention timer finalized the permit follows
+//     the same rule, and its entry is in the record when the record is written, because the
+//     retention event waits for the call to return (F1; orchestrator decision, S6 task 2). A
+//     call that returns after the record is written is added to it (lateLocked), as
+//     {"outcome_unknown", 0, 0} if it sent a command and with its own code if not: a guard,
+//     which the limiter does not reach;
 //   - cleanup {key_b64url, t_us, code} (S7 step 11): one per cleanup_entry step result (codes
 //     30–33) an instance's store adapter returns, before its store wrapper's faults, written
 //     when it returns: a dropped reply keeps its record, while a refused step, which never

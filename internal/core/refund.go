@@ -255,19 +255,25 @@ func (r *refunds) startWorkers(n int) {
 	}
 }
 
-// work is one refund worker: it takes the earliest ready job, runs one attempt, then ends the
-// job on a final result or schedules its retry; a backoff never holds the worker (§A7 step 2).
+// work is one refund worker: it takes the earliest ready job, whose attempt next has already
+// put in flight, runs that attempt, counts the refund commands it sent, ends the attempt, then
+// ends the job on a final result or schedules its retry; a backoff never holds the worker (§A7
+// step 2). The attempt runs on its own context, which the retention timer cancels when it ends
+// the permit meanwhile; the timer then leaves the permit's slots and its event to this worker,
+// which frees the slots and then emits the event once the commands are counted (endAttempt;
+// API-1d, API-1h).
 func (r *refunds) work() {
 	defer r.wg.Done()
 	for {
-		p, ok := r.next()
+		p, ctx, ok := r.next()
 		if !ok {
 			return
 		}
-		res := r.attempt(r.ctx, p)
+		res := r.attempt(ctx, p)
 		if res.sent > 0 {
 			p.attempts.Add(int64(res.sent)) // only commands that were sent count (API-1d)
 		}
+		r.endAttempt(p)
 		if res.final {
 			p.finish(res)
 			continue
@@ -276,9 +282,36 @@ func (r *refunds) work() {
 	}
 }
 
-// next waits for a ready job and returns it; false once stop ran. A job already FINAL is
-// skipped (its transition removed it from the queue; this is a second guard).
-func (r *refunds) next() (*Permit, bool) {
+// endAttempt ends p's attempt once the worker has added the refund commands it sent: the
+// attempt's context is released, and the effects a transition left to this worker while the
+// attempt was in flight (settle) follow in apply's order: the slots are freed, then the event
+// is emitted, counting those commands (API-1d), so the permit holds its slots until its final
+// event (API-1h). When no transition left any (held is the zero transition), nothing more
+// happens: emit does nothing for emitNone.
+func (r *refunds) endAttempt(p *Permit) {
+	r.mu.Lock()
+	cancel, held := p.cancelAttempt, p.held
+	p.attempting, p.cancelAttempt, p.held = false, noAttempt, transition{}
+	r.mu.Unlock()
+	cancel()
+	if held.freeSlots && p.slots != nil {
+		p.slots.release()
+	}
+	r.emit(p, held.emit, attemptResult{})
+}
+
+// noAttempt is a permit's cancelAttempt while no refund attempt is in flight: there is nothing
+// to cancel.
+func noAttempt() {}
+
+// next waits for a ready job and returns it with the context of its refund attempt (§A5.6),
+// which is in flight from then until endAttempt: the job leaves the queue and its attempt
+// starts under one hold of mu, so no transition's effects (settle) can run in between: a
+// transition that ends the permit meanwhile, or later, finds the attempt in flight and cancels
+// that context; the attempt then sends nothing more. The context is a child of the workers'
+// context. next returns false once stop ran. A job already FINAL is skipped (its transition
+// removed it from the queue; this is a second guard).
+func (r *refunds) next() (*Permit, context.Context, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for {
@@ -286,10 +319,12 @@ func (r *refunds) next() (*Permit, bool) {
 			r.queue.cond.Wait()
 		}
 		if r.stopped {
-			return nil, false
+			return nil, nil, false
 		}
 		if p := r.queue.pop(); p.life.load() == stateReleased {
-			return p, true
+			ctx, cancel := context.WithCancel(r.ctx)
+			p.attempting, p.cancelAttempt = true, cancel
+			return p, ctx, true
 		}
 	}
 }
@@ -358,10 +393,18 @@ func (r *refunds) enqueue(p *Permit) {
 	r.mu.Unlock()
 }
 
-// settle runs first in the effects of every transition but OPEN → RELEASED: p's retention
+// settle runs first in the effects of every transition t but OPEN → RELEASED: p's retention
 // timer is disarmed, and a pending p leaves the pending set, the ready queue and its backoff
-// timer, before its slots are freed (apply).
-func (r *refunds) settle(p *Permit) {
+// timer, before its slots are freed (apply). When a refund attempt for p is in flight (from
+// next to endAttempt), the attempt is cancelled and the rest of t's effects, the slot release
+// and the event, are held for the worker running it: settle reports true, and apply performs
+// nothing more. The worker adds the commands the attempt sent, then frees the slots, then
+// emits the event (endAttempt), so the permit holds its slots until its final event (API-1h)
+// and the event's Attempts counts a command that was sent (API-1d). Only the retention timer
+// can end a permit while an attempt is in flight: the worker's own final result comes after
+// endAttempt, and the drain's end after the workers stopped. The timer is still the
+// transition's winner, as §A5.5 says; it hands the slot release and the event to that worker.
+func (r *refunds) settle(p *Permit, t transition) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if p.retention != nil {
@@ -369,8 +412,13 @@ func (r *refunds) settle(p *Permit) {
 		p.retention = nil
 	}
 	delete(r.timers, p)
+	held := p.attempting
+	if held {
+		p.held = t
+		p.cancelAttempt()
+	}
 	if _, ok := r.pending[p]; !ok {
-		return
+		return held
 	}
 	r.queue.remove(p)
 	if p.backoff != nil {
@@ -383,6 +431,7 @@ func (r *refunds) settle(p *Permit) {
 		close(r.idle)
 		r.idle = nil
 	}
+	return held
 }
 
 // armRetention starts p's retention timer (§A5.5, REF-4a): it fires receipt_lifetime after
@@ -472,9 +521,10 @@ func (r *refunds) waitIdle(deadline time.Time) bool {
 // drain is Close's part of the refunds (SPEC API-1e; plan S6 step 7): it waits until no refund
 // is pending or the deadline passes; then it stops the workers, cancelling the attempts in
 // flight and waiting for them, so each adds the refund commands it sent before any event is
-// built (API-1d: an attempt whose command was sent counts) and one that ends with a final
-// result keeps it; last, the refunds still pending end as unresolved (closed). The cancel
-// ends a store call at once, so drain returns soon after the deadline.
+// built (API-1d: an attempt whose command was sent counts), one that ends with a final result
+// keeps it, and one whose retention timer left it the slots and the event frees the slots and
+// then emits the event (endAttempt); last, the refunds still pending end as unresolved
+// (closed). The cancel ends a store call at once, so drain returns soon after the deadline.
 func (r *refunds) drain(deadline time.Time) {
 	r.waitIdle(deadline)
 	r.stop()

@@ -5,6 +5,7 @@ package e2e
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -347,6 +349,69 @@ func TestDesign_StackReadyDeadline(t *testing.T) {
 	}
 	if took < 10*time.Second || took >= 10*time.Second+500*time.Millisecond {
 		t.Errorf("waitReady gave up %v after it began (%v), want at 10 s, before the late answer at 10.5 s", took, err)
+	}
+}
+
+// TestDesign_StackReadyWaitsForStatus: StartStack's wait for a hitapi takes only the /health
+// answer that means ready (plan H1 step 12: "waits ≤ 10 s for status = ready"): status ready,
+// or on a stack started with NoEpoch, status not_ready with reason no_epoch. /health answers
+// 200 whatever the status, so every other answer must keep it polling. A fake /health gives
+// its answers in turn, then its last one again, and waitReady must return nil right after the
+// first answer it may take: on a stack with an epoch, no_epoch (the NoEpoch stack's answer),
+// settings_invalid and fingerprint_mismatch come first, so it returns after probe 4, at ready;
+// on a NoEpoch stack, settings_invalid, ready (the other stack's answer) and
+// fingerprint_mismatch come first, so it returns after probe 4, at no_epoch. A hitapi that has
+// exited fails the wait with its Wait error before any probe, though /health would say ready.
+func TestDesign_StackReadyWaitsForStatus(t *testing.T) {
+	notReady := func(reason string) string { return `{"status":"not_ready","reason":"` + reason + `"}` }
+	const ready = `{"status":"ready","reason":"ready"}`
+	exited := errors.New("signal: killed") // the exited child's Wait error
+	for _, c := range []struct {
+		name    string
+		noEpoch bool
+		exited  bool
+		answers []string
+		probes  int64 // waitReady returns after this many probes
+		ok      bool  // and returns nil
+	}{
+		{"epoch: ready after probe 4", false, false,
+			[]string{notReady("no_epoch"), notReady("settings_invalid"), notReady("fingerprint_mismatch"), ready}, 4, true},
+		{"NoEpoch: no_epoch after probe 4", true, false,
+			[]string{notReady("settings_invalid"), ready, notReady("fingerprint_mismatch"), notReady("no_epoch")}, 4, true},
+		{"exited: no probe", false, true, []string{ready}, 0, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var probes, stray atomic.Int64 // GET /health requests, and any other request
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/health" {
+					stray.Add(1)
+					http.NotFound(w, r)
+					return
+				}
+				n := min(probes.Add(1), int64(len(c.answers)))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, c.answers[n-1]) // a probe that gave up reads nothing
+			}))
+			defer srv.Close()
+			ch := &child{done: make(chan struct{})}
+			if c.exited {
+				ch.waitErr = exited
+				close(ch.done)
+			}
+			tr := &http.Transport{DisableKeepAlives: true}
+			defer tr.CloseIdleConnections()
+			a := &API{URL: srv.URL, child: ch, stack: &Stack{noEpoch: c.noEpoch, HTTP: &http.Client{Timeout: clientTimeout, Transport: tr}}}
+			err := a.waitReady(t)
+			if got := probes.Load(); got != c.probes || (err == nil) != c.ok {
+				t.Errorf("waitReady returned %v after %d probes, want nil=%v after %d", err, got, c.ok, c.probes)
+			}
+			if c.exited && !errors.Is(err, exited) {
+				t.Errorf("waitReady on an exited hitapi: %v, want its Wait error %q", err, exited)
+			}
+			if n := stray.Load(); n != 0 {
+				t.Errorf("waitReady sent %d requests other than GET /health", n)
+			}
+		})
 	}
 }
 

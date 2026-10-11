@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"strconv"
 	"sync/atomic"
 	"time"
@@ -96,8 +97,10 @@ func (m emission) String() string {
 	return "emission(" + strconv.Itoa(int(m)) + ")"
 }
 
-// transition is one row of §A5.5's table: the new state and the effects that only the
-// goroutine that made the change performs.
+// transition is one row of §A5.5's table: the new state and its effects. The goroutine that
+// made the change performs them (Permit.apply), except that while a refund attempt is in
+// flight, the retention timer, which made the change, hands the slot release and the event to
+// that attempt's worker (refunds.settle, refunds.endAttempt).
 type transition struct {
 	to        permitState
 	freeSlots bool     // free both the receipt and the refund slot
@@ -147,9 +150,12 @@ func transitions(from permitState, ev permitEvent) (transition, bool) {
 // Permit is what an allowed or degraded Acquire returns (DESIGN §A5.5, SPEC API-1h). An
 // allowed permit holds the signed receipt and one slot of each kind until its slots are freed
 // by the transition that ends them; a degraded one holds neither, and every call on it is a
-// no-op. Every event goes through the compare-and-swap loop of lifecycle.fire, and only the
-// caller whose swap won performs the transition's effects (apply), so the slots are freed once
-// and at most one final event is emitted.
+// no-op. Every event goes through the compare-and-swap loop of lifecycle.fire, and the caller
+// whose swap won performs the transition's effects (apply), except that while a refund attempt
+// is in flight the winner, the retention timer, hands the slot release and the event to that
+// attempt's worker, which performs them once it has counted the attempt (refunds.settle,
+// refunds.endAttempt). Either way one goroutine performs them, so the slots are freed once and
+// at most one final event is emitted.
 type Permit struct {
 	life    *lifecycle
 	slots   *slots          // nil for a degraded permit
@@ -162,17 +168,23 @@ type Permit struct {
 	attempts    atomic.Int64 // refund commands sent so far (API-1d)
 
 	// Guarded by r.mu.
-	retention *time.Timer // the armed retention timer; nil once stopped or fired
-	backoff   *time.Timer // the armed backoff timer of a refund waiting to retry
-	index     int         // position in r's ready queue; -1 when not queued
-	seq       uint64      // order of equal release times in the ready queue
-	retries   int         // n of the next backoff (§A5.6)
+	retention     *time.Timer        // the armed retention timer; nil once stopped or fired
+	backoff       *time.Timer        // the armed backoff timer of a refund waiting to retry
+	index         int                // position in r's ready queue; -1 when not queued
+	seq           uint64             // order of equal release times in the ready queue
+	retries       int                // n of the next backoff (§A5.6)
+	attempting    bool               // a refund attempt is in flight (refunds.next to endAttempt)
+	cancelAttempt context.CancelFunc // cancels that attempt; noAttempt while none is in flight
+	held          transition         // the slot release and event a transition left to that attempt's worker (refunds.settle); zero when none
 }
 
 // newPermit returns an OPEN permit that holds one reservation of sl, and arms its retention
 // timer through r (§A5.5, REF-4a). r is nil only in tests of Done alone.
 func newPermit(sl *slots, r *refunds, rc receipt.Receipt, id string, sentAt time.Time) *Permit {
-	p := &Permit{life: newLifecycle(stateOpen), slots: sl, r: r, receipt: rc, id: id, sentAt: sentAt, index: -1}
+	p := &Permit{
+		life: newLifecycle(stateOpen), slots: sl, r: r, receipt: rc, id: id, sentAt: sentAt, index: -1,
+		cancelAttempt: noAttempt,
+	}
 	if r != nil {
 		r.armRetention(p)
 	}
@@ -221,7 +233,10 @@ func (p *Permit) release(closing bool) {
 }
 
 // expire is the retention timer's event (REF-4a): OPEN → EXPIRED frees both slots, RELEASED →
-// FINAL emits unresolved (retention). It does nothing once the timers were stopped.
+// FINAL frees them too and emits unresolved (retention); with a refund attempt in flight, that
+// attempt is cancelled, and its worker frees the slots and then emits the event once it has
+// counted the attempt (refunds.settle, refunds.endAttempt). It does nothing once the timers
+// were stopped.
 func (p *Permit) expire() {
 	if !p.r.timersRunning() {
 		return
@@ -249,11 +264,15 @@ func (p *Permit) drainEnd() {
 // apply performs transition t's effects (§A5.5); only the caller whose compare-and-swap made
 // t calls it. A permit that leaves OPEN or RELEASED disarms its retention timer, and one that
 // leaves RELEASED leaves the pending set (with its queue entry and backoff timer) before its
-// slots are freed, so a freed slot is never counted twice by the queue; then the slots are
-// freed, then the event is emitted. res is the worker's final result for emitResult.
+// slots are freed, so a freed slot is never counted twice by the queue (refunds.settle); then
+// the slots are freed, then the event is emitted. While a refund attempt for p is in flight,
+// settle holds the slot release and the event for that attempt's worker and apply stops there:
+// the worker frees the slots and then emits the event, in the same order, once it has counted
+// the attempt (refunds.endAttempt; API-1d, API-1h). res is the worker's final result for
+// emitResult.
 func (p *Permit) apply(t transition, res attemptResult) {
-	if p.r != nil && t.to != stateReleased {
-		p.r.settle(p)
+	if p.r != nil && t.to != stateReleased && p.r.settle(p, t) {
+		return // held for the worker of the refund attempt in flight
 	}
 	if t.freeSlots && p.slots != nil {
 		p.slots.release()
@@ -289,8 +308,10 @@ func (l *lifecycle) load() permitState { return permitState(l.state.Load()) }
 
 // fire applies ev with a compare-and-swap loop: it reads the state, looks up (state, ev)
 // and swaps in the new state; when another event changed the state first, it reads it
-// again. It returns true only to the caller whose swap succeeded, which alone performs the
-// returned transition's effects, and false when ev is a no-op in the state it found.
+// again. It returns true only to the caller whose swap succeeded, which performs the returned
+// transition's effects (apply; while a refund attempt is in flight it hands the slot release
+// and the event to that attempt's worker, refunds.settle), and false when ev is a no-op in the
+// state it found.
 func (l *lifecycle) fire(ev permitEvent) (transition, bool) {
 	for {
 		cur := l.state.Load()

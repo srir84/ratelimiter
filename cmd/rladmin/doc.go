@@ -57,6 +57,12 @@
 //   - 3: a store or integrity problem: {20}, {22}, {25}, an error reply, a reply that fails
 //     the §A4.9 layout or range checks (printed raw), "epoch changed during read", or a
 //     failed connection, AUTH or exchange, including the command's deadline (30 s; 10 min
-//     for store-rewrite) or a signal ending it.
+//     for store-rewrite) or a signal ending it. A SIGINT or SIGTERM after the first has been
+//     handled takes its default action, which ends rladmin by that signal (with no exit
+//     code) unless the kernel holds the call it waits in uninterruptibly (a macOS hard mount
+//     without intr, where even SIGKILL waits). A SIGINT that was ignored when rladmin
+//     started (a script's background job) still cancels the command the first time, but is
+//     ignored again once the first signal has been handled, so from then on only SIGTERM
+//     ends rladmin.
 //   - 4: clock_error ({21}).
 package main

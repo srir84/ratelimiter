@@ -7,7 +7,18 @@ literals.
 Most cases use make_world's five runs (s3-busy-user's baseline, limiter run and rerun, and two
 S6 runs, closed and open), which list 3 of the 17 H6 scenarios: completion fails each other one
 first (check 0, listed), and failed() and rest() assert exactly those failures before returning
-the others. full_world adds a run of every other H6 scenario, so a clean one exits 0."""
+the others. full_world adds a run of every other H6 scenario, so a clean one exits 0.
+
+Refund completion's exclusions are pinned on both sides of each bound: a killed instance's
+releases against the kill's upper bound (F1 item R2: context.json's kill record, the killed and
+restarted processes' request arrivals and release times, written consistently), and REF-9 (d)
+against context.json's tamper records (F1 item R1), less the clocks' drift (item B6), and the
+final event's latest wall-clock time (item B5); a deferred loss also against the ERR-11 request
+line that shows its event (judgment RP3), done before any epoch-wide loss began (judgment RB3), or
+any store-wide tamper but that loss itself, while a key-scoped tamper voids none (judgment RB5).
+Each fault command completion reads is checked as faultctl's grammar takes it (item B4), each
+fault's times as completion reads them (judgment RP2), and each request line's total_ns against
+the limiter_ns + db_ns it covers (judgment RP4)."""
 
 import io
 import json
@@ -48,6 +59,7 @@ CREATED_NS = T0_WALL_NS - 3600 * SECOND  # thresholds frozen before the runs' st
 DECIDED = T0_WALL_NS + 7 * SECOND  # the budget time of the S6 runs' allowed decisions
 RELEASED = 9 * SECOND  # a refund's release_mono_ns (the limiter's monotonic clock)
 RELEASE_LINE_NS = 8 * SECOND  # a release line's release_mono_ns (hitapi's monotonic clock)
+ARRIVED = T0_WALL_NS + 7 * SECOND  # a released permit's request arrival_ns (wall clock, HTTP-5)
 TOLERANCE_NS = 5 * SECOND  # config.toml's outage_tolerance_ns (synthetic.config_text)
 
 S3 = "s3-busy-user"
@@ -172,10 +184,11 @@ def released(
     user: str = "u000003",
     instance: int = 1,
     release_ns: int = RELEASE_LINE_NS,
+    arrival_ns: int = ARRIVED,
 ) -> list[Line]:
     """A permit released for a confirmed failure, in hitapi's order: its allowed decision, its
     release (release_mono_ns release_ns), its final event (when given) and its request line (from
-    instance), whose limiter_ns and db_ns are elapsed."""
+    instance, arriving at arrival_ns), whose limiter_ns and db_ns are elapsed."""
     lines: list[Line] = [
         decision(deduction, DECIDED, user),
         {"kind": "release", "deduction_id": deduction, "release_mono_ns": release_ns},
@@ -190,7 +203,7 @@ def released(
             request(
                 instance,
                 f"q-{deduction}",
-                arrival_ns=T0_WALL_NS + 7 * SECOND,
+                arrival_ns=arrival_ns,
                 status=503,
                 error=error,
                 user=user,
@@ -228,18 +241,20 @@ def s6_lines(
     killed: Sequence[Line] = (),
     err16: bool = True,
     violation: bool = False,
+    arrival_ns: int = T0_WALL_NS + 6 * SECOND,
 ) -> list[Line]:
     """One instance's run log of an S6 run: an allowed request (ERR-1), an ERR-9 request, an
     ERR-16 one (its permit done, no release), an ERR-8 (closed) or an ERR-3 and a degraded permit
-    refused after its acquire (open: a release with no deduction_id and no final event), a permit
-    refused after its acquire whose refund was applied 7 ms after its release, then extra. killed
-    puts a first process segment, holding those lines and ending with a pre_kill line (FLT-6),
-    before it; violation adds violation_lines()."""
+    refused after its acquire (open: a release with no deduction_id and no final event), each
+    arriving at arrival_ns, a permit refused after its acquire whose refund was applied 7 ms after
+    its release (its request arriving 1 s later), then extra. killed puts a first process segment,
+    holding those lines and ending with a pre_kill line (FLT-6), before it; violation adds
+    violation_lines()."""
     lines: list[Line] = []
     if killed:
         lines.extend([lifecycle_start(), lifecycle("ready"), *killed, lifecycle("pre_kill")])
     lines.extend([lifecycle_start(), lifecycle("ready")])
-    arrival = T0_WALL_NS + 6 * SECOND
+    arrival = arrival_ns
     lines.append(decision("d-err1", DECIDED, "u000001"))
     lines.append(
         request(
@@ -305,7 +320,7 @@ def s6_lines(
                 db_ns=0,
             )
         )
-    lines.extend(released("d-ok", final_event("d-ok")))
+    lines.extend(released("d-ok", final_event("d-ok"), arrival_ns=arrival + SECOND))
     if violation:
         lines.extend(violation_lines())
     lines.extend(extra)
@@ -385,11 +400,12 @@ def s6_run(
     mode: str,
     apis: dict[int, list[Line]],
     faults: list[dict[str, object]] | None = None,
+    config: Callable[[str], str] | None = None,
 ) -> Path:
     """An S6 test run of scenario name with one instance per apis entry (its run log lines), its
-    config.toml in the given failure mode, its report built and its index line appended; its
-    context.json faults are the mode's one outage segment (STORE_DOWN closed, REFUSE open) unless
-    faults gives them."""
+    config.toml in the given failure mode (then changed by config, when given), its report built
+    and its index line appended; its context.json faults are the mode's one outage segment
+    (STORE_DOWN closed, REFUSE open) unless faults gives them."""
     spec = RunSpec(
         name=name,
         instances=len(apis),
@@ -405,9 +421,11 @@ def s6_run(
         apis=apis,
         samples=[sample(T0_WALL_NS + SECOND, instances=len(apis))],
     )
-    config = run.joinpath("config.toml")
-    text = config.read_text(encoding="utf-8")
-    config.write_text(text.replace('failure_mode = "closed"', f'failure_mode = "{mode}"'))
+    path = run.joinpath("config.toml")
+    text = path.read_text(encoding="utf-8").replace(
+        'failure_mode = "closed"', f'failure_mode = "{mode}"'
+    )
+    path.write_text(text if config is None else config(text), encoding="utf-8")
     assert build_main([str(run)]) == 0
     world.add(name, False, run.name)
     return run
@@ -420,12 +438,14 @@ def make_world(
     open_: list[Line] | None = None,
     closed_apis: dict[int, list[Line]] | None = None,
     closed_faults: list[dict[str, object]] | None = None,
+    closed_config: Callable[[str], str] | None = None,
     rerun_planned_s: Sequence[int] | None = None,
     rerun_extra: Sequence[Line] = (),
 ) -> World:
     """The clean set: s3-busy-user's baseline, limiter run and rerun (one schedule), and the two
     S6 runs, closed and open, each one instance with s6_lines unless given (closed_apis: the
-    closed run's instances and their run logs; closed_faults: its context.json faults).
+    closed run's instances and their run logs; closed_faults: its context.json faults;
+    closed_config: a change to its config.toml text, before its report is built).
     rerun_planned_s gives the rerun another schedule, with a baseline of that schedule just before
     it whose thresholds it copies (so validate.py still passes it); rerun_extra adds lines to the
     rerun's run log."""
@@ -440,7 +460,7 @@ def make_world(
         bench_run(world, IDS["s3-rerun"], baseline=False, extra=rerun_extra)
     if closed_apis is None:
         closed_apis = {1: closed if closed is not None else s6_lines("closed")}
-    s6_run(world, IDS["closed"], CLOSED, "closed", closed_apis, closed_faults)
+    s6_run(world, IDS["closed"], CLOSED, "closed", closed_apis, closed_faults, closed_config)
     s6_run(world, IDS["open"], OPEN, "open", {1: open_ if open_ is not None else s6_lines("open")})
     return world
 
@@ -635,7 +655,7 @@ def test_clean_manifest_exits_0(tmp_path: Path) -> None:
     manifest = world.root.joinpath("runs", "h6-manifest.json")
     assert lines == [
         f"completion: {manifest}: every check holds; 27 runs; 8 releases: 8 confirmed in time, "
-        "excluded killed 0, drained 0, after_p 0"
+        "excluded killed 0, drained 0, after_p 0, lost 0, quarantined 0"
     ]
 
 
@@ -696,7 +716,7 @@ def test_unlisted_scenarios_fail(tmp_path: Path) -> None:
     ], lines
     assert lines[-1].endswith(
         ": 14 failed; 5 runs; 2 releases: 2 confirmed in time, excluded killed 0, drained 0, "
-        "after_p 0"
+        "after_p 0, lost 0, quarantined 0"
     ), lines
 
 
@@ -1294,12 +1314,101 @@ def drop_final(deduction: str) -> Callable[[list[Line]], list[Line]]:
     return change
 
 
+# Releases on a killed instance (SPEC REF-9 (c), orchestrator decision D5, F1 item R2). In the kill
+# cases instance 1's first process is killed: it started at P0 on the wall clock, so a permit it
+# released mono ns in (release_mono_ns, its monotonic clock), refused after its acquire with
+# limiter_ns 2 ms, had its request arrive at P0 + mono − 2 ms (released()'s d1: ARRIVED, 8 s in);
+# its kill, faultctl api kill 1 --restart, ran from KILL_START to KILL_END on the wall clock (the
+# record context.json keeps); and the restarted process's requests arrive from RESTARTED on.
+P0 = ARRIVED - (RELEASE_LINE_NS - 2 * MS)
+KILL_START = T0_WALL_NS + 7_500 * MS
+KILL_END = T0_WALL_NS + 8 * SECOND
+RESTARTED = T0_WALL_NS + 10 * SECOND
+BOUND_NS = DEADLINE_NS + OUTAGE_NS
+# The kill's upper bound on the killed process's monotonic clock, K_hi, with d1 its one request
+# joined to a release: d1's arrival at most 8 s − 2 ms into the process, then the 1 s from it to
+# KILL_END on the wall clock, plus completion's 4 % slew allowance over that second (40 ms; F1 item
+# B7: SLEW_PPM 40,000).
+K_HI = RELEASE_LINE_NS - 2 * MS + SECOND + 40 * MS
+
+
+def kill_fault(
+    start_ns: int = KILL_START,
+    end_ns: int = KILL_END,
+    *,
+    instance: int = 1,
+    error: str = "",
+    restart: bool = True,
+) -> dict[str, object]:
+    """context.json's record of faultctl api kill <instance> [--restart] (plan H4 step 7,
+    runFaultctl): the instance it names, the command's own start and end on the wall clock, no
+    outage and no targets; error when it failed (or did not run: start_ns and end_ns 0)."""
+    rec: dict[str, object] = {
+        "at_s": max(start_ns - T0_WALL_NS, 0) / SECOND,
+        "cmd": f"faultctl api kill {instance}" + (" --restart" if restart else ""),
+        "instance": instance,
+        "start_ns": start_ns,
+        "end_ns": end_ns,
+        "outage_start_ns": None,
+        "outage_ns": None,
+        "targets": [],
+    }
+    if error:
+        rec["error"] = error
+    return rec
+
+
+def not_ready(arrival_ns: int, request_id: str) -> Line:
+    """A request a restarted process answered 503 limiter_not_ready (ERR-12a) before it was ready,
+    arriving at arrival_ns."""
+    return request(
+        1,
+        request_id,
+        arrival_ns=arrival_ns,
+        status=503,
+        error="limiter_not_ready",
+        result="not_ready",
+        db_ns=0,
+    )
+
+
+def killed_log(
+    killed: Sequence[Line],
+    extra: Sequence[Line] = (),
+    *,
+    after_kill: Sequence[Line] = (),
+    restart: Sequence[Line] = (),
+    restarted: int = RESTARTED,
+) -> list[Line]:
+    """The closed run's log with a killed first process segment: killed, its pre_kill line, then
+    after_kill (lines the killed process wrote after it); then the restarted process (s6_lines,
+    its requests arriving at restarted, then extra), with restart's lines right after its ready
+    line."""
+    lines = s6_lines("closed", extra, killed=killed, arrival_ns=restarted)
+    kill = lines.index(lifecycle("pre_kill"))
+    return [
+        *lines[: kill + 1],
+        *after_kill,
+        *lines[kill + 1 : kill + 3],
+        *restart,
+        *lines[kill + 3 :],
+    ]
+
+
+def kill_world(root: Path, log: list[Line], *kills: dict[str, object]) -> World:
+    """make_world with the closed run's log, its context.json faults its store down and kills
+    (kill_fault() when none is given)."""
+    return make_world(root, closed=log, closed_faults=[STORE_DOWN, *(kills or (kill_fault(),))])
+
+
 def test_release_on_killed_instance(tmp_path: Path) -> None:
     """A release with no final event on an instance killed before it (its process segment ends
-    with a pre_kill line, FLT-6) need not be confirmed; the same release in a segment that was
-    not killed fails (here its final event is taken out of the log after the report was built);
-    and a release whose final event came before the kill must still be confirmed in time."""
-    world = make_world(tmp_path, closed=s6_lines("closed", killed=released("d1", None)))
+    with a pre_kill line, FLT-6, matched to context.json's kill) need not be confirmed when the
+    kill came within refund_deadline + the measured outage after it; the same release in a
+    segment that was not killed fails (here its final event is taken out of the log after the
+    report was built); and a release whose final event came before the kill must still be
+    confirmed in time."""
+    world = kill_world(tmp_path, killed_log(released("d1", None)))
     holds(world.manifest())
 
     world = make_world(
@@ -1313,7 +1422,7 @@ def test_release_on_killed_instance(tmp_path: Path) -> None:
     assert "no final event, and its instance was not killed" in rest(lines)[0], lines
 
     late = released("d1", final_event("d1", took_ns=DEADLINE_NS + OUTAGE_NS + US))
-    world = make_world(tmp_path.joinpath("late"), closed=s6_lines("closed", killed=late))
+    world = kill_world(tmp_path.joinpath("late"), killed_log(late))
     code, lines = check(world.manifest())
     assert code == 1
     assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], lines
@@ -1323,12 +1432,8 @@ def test_restarted_after_kill(tmp_path: Path) -> None:
     """The kill exclusion ends with the killed process: an instance killed (FLT-6) and restarted
     starts a new process segment, where a covered release with no final event fails (its final
     event is taken out after the report was built) while the killed segment's is excluded."""
-    world = make_world(
-        tmp_path,
-        closed=s6_lines(
-            "closed", released("d2", final_event("d2")), killed=released("d1", None, user="u000007")
-        ),
-    )
+    d2 = released("d2", final_event("d2"), arrival_ns=RESTARTED + 2 * SECOND)
+    world = kill_world(tmp_path, killed_log(released("d1", None, user="u000007"), d2))
     rewrite_log(world.run("closed"), drop_final("d2"))
     code, lines = check(world.manifest())
     assert code == 1
@@ -1346,21 +1451,13 @@ def test_final_event_before_kill(tmp_path: Path, result: str, reason: str) -> No
     unconfirmed (unresolved (retention), receipt_invalid), it fails though the segment ends with
     a pre_kill line."""
     final = final_event("d1", result, reason=reason)
-    world = make_world(tmp_path, closed=s6_lines("closed", killed=released("d1", final)))
+    world = kill_world(tmp_path, killed_log(released("d1", final)))
     code, lines = check(world.manifest())
     assert code == 1
     assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], lines
     shown = f"{result} ({reason})" if reason else result
     assert "deduction d1: " in rest(lines)[0], lines
     assert f"final event {shown}: not confirmed" in rest(lines)[0], lines
-
-
-# The kill exclusion's bound (orchestrator decision D5 of the H6 slice review, SPEC REF-9 (c)): a
-# killed process's release with no final event is excused only when the kill time the run log
-# gives on that process's monotonic clock, the largest release_mono_ns its segment holds (in
-# whatever order its lines were written), is at most refund_deadline + the run's measured outage
-# after the release.
-BOUND_NS = DEADLINE_NS + OUTAGE_NS
 
 
 def degraded_release(release_ns: int) -> list[Line]:
@@ -1372,96 +1469,129 @@ def degraded_release(release_ns: int) -> list[Line]:
     ]
 
 
-def later_release(release_ns: int) -> list[Line]:
-    """Another permit of the same process released at release_ns, its refund applied in time."""
-    return released("d3", final_event("d3"), user="u000008", release_ns=release_ns)
+# The kill's upper bound K_hi decides (F1 item R2). In the calibrated cases the killed process
+# released d3 40 s in, its request at CALIBRATED (P0 + 40 s − 2 ms) and its refund applied in time,
+# and the kill ended 1 s + 1 ns after that request, so K_hi = 40 s − 2 ms + 1 s + 1 ns + 40,000,001
+# ns of slew (4 % of 1 s + 1 ns, rounded up: SLEW_PPM ± 1 moves it by 1,000 ns); d1, released
+# earlier with no final event, is released exactly refund_deadline + the measured outage before
+# K_hi (its own request, 34 s before the kill's end, gives a looser bound), or 1 ns earlier. The
+# restarted process serves from LATE_RESTART on.
+CALIBRATED = P0 + 40 * SECOND - 2 * MS
+CAL_KILL_START = CALIBRATED + 500 * MS
+CAL_KILL_END = CALIBRATED + SECOND + 1
+CAL_K_HI = 40 * SECOND - 2 * MS + SECOND + 1 + 40_000_001
+LATE_RESTART = T0_WALL_NS + 50 * SECOND
 
 
-def killed_log(after_d1: list[Line], *, after_kill: Sequence[Line] = ()) -> list[Line]:
-    """The closed run's log with a killed first segment: d1 released at RELEASE_LINE_NS with no
-    final event, then after_d1, then its pre_kill line, then after_kill (lines the killed process
-    wrote after it, before the restart's start line)."""
-    lines = s6_lines("closed", killed=[*released("d1", None, user="u000007"), *after_d1])
-    kill = lines.index(lifecycle("pre_kill"))
-    return [*lines[: kill + 1], *after_kill, *lines[kill + 1 :]]
+def calibrated(
+    d1_ns: int, *, before: Sequence[Line] = (), after: Sequence[Line] = ()
+) -> list[Line]:
+    """The killed process's lines: d1 released d1_ns in with no final event (its request at P0 +
+    d1_ns − 2 ms), then before, then d3, the calibrating permit, then after."""
+    return [
+        *released("d1", None, user="u000007", release_ns=d1_ns, arrival_ns=P0 + d1_ns - 2 * MS),
+        *before,
+        *released(
+            "d3", final_event("d3"), user="u000008", release_ns=40 * SECOND, arrival_ns=CALIBRATED
+        ),
+        *after,
+    ]
 
 
-# (case, the closed run's log, whether d1 is excused).
-KILL_BOUND: list[tuple[str, list[Line], bool]] = [
+# Two more calibrating permits, released 39 s and 38 s in: their requests, 1 s and 2 s before d3's,
+# give bounds 40 ms and 80 ms looser than d3's (the slew over 1 s and 2 s more).
+D4 = released(
+    "d4", final_event("d4"), user="u000009", release_ns=39 * SECOND, arrival_ns=CALIBRATED - SECOND
+)
+D5 = released(
+    "d5",
+    final_event("d5"),
+    user="u000010",
+    release_ns=38 * SECOND,
+    arrival_ns=CALIBRATED - 2 * SECOND,
+)
+AT_BOUND = CAL_K_HI - BOUND_NS  # d1's release_mono_ns when K_hi is exactly the bound after it
+# (case, the closed run's log, its kills, whether d1 is excused).
+KILL_BOUND: list[tuple[str, list[Line], list[dict[str, object]], bool]] = [
     (
-        "killed at the bound after its release",
-        killed_log(later_release(RELEASE_LINE_NS + BOUND_NS)),
+        "K_hi at refund_deadline + the measured outage after the release",
+        killed_log(calibrated(AT_BOUND), restarted=LATE_RESTART),
+        [kill_fault(CAL_KILL_START, CAL_KILL_END)],
         True,
     ),
     (
-        "killed 1 ns past the bound",
-        killed_log(later_release(RELEASE_LINE_NS + BOUND_NS + 1)),
+        "K_hi 1 ns past it",
+        killed_log(calibrated(AT_BOUND - 1), restarted=LATE_RESTART),
+        [kill_fault(CAL_KILL_START, CAL_KILL_END)],
         False,
     ),
     (
-        "a degraded permit's release 1 ns past the bound",
-        killed_log(degraded_release(RELEASE_LINE_NS + BOUND_NS + 1)),
+        "a lone release whose kill ends 40 s after its request",
+        killed_log(released("d1", None), restarted=LATE_RESTART),
+        [kill_fault(ARRIVED + 39_860 * MS, ARRIVED + 40 * SECOND)],
         False,
     ),
     (
-        "a release after the pre_kill line 1 ns past the bound",
-        killed_log([], after_kill=degraded_release(RELEASE_LINE_NS + BOUND_NS + 1)),
-        False,
+        "the tightest of three joined requests written between the others",
+        killed_log(calibrated(AT_BOUND, before=D4, after=D5), restarted=LATE_RESTART),
+        [kill_fault(CAL_KILL_START, CAL_KILL_END)],
+        True,
     ),
-    # Concurrent requests write their release lines out of mono order: the one written last is
-    # not the latest, so only the largest release_mono_ns gives the kill time (orchestrator
-    # decision W1 of the H6 round-2 review). With the last line's, 1 ns after d1's release, d1
-    # would be excused.
+    # The restarted process ran only after the kill, so its earliest request arrival bounds the
+    # kill too: here 1 s before the kill's end, though written after a later one.
     (
-        "release lines out of mono order, a degraded permit's written last: the largest 1 ns "
-        "past the bound",
+        "the restarted process's earliest arrival, before the kill's end",
         killed_log(
-            [*later_release(RELEASE_LINE_NS + BOUND_NS + 1), *degraded_release(RELEASE_LINE_NS + 1)]
+            calibrated(AT_BOUND),
+            restart=[
+                not_ready(CAL_KILL_END + 500 * MS, "q-late"),
+                not_ready(CAL_KILL_END, "q-first"),
+            ],
+            restarted=LATE_RESTART,
         ),
-        False,
-    ),
-    (
-        "release lines out of mono order, a permit's written last: the largest 1 ns past the bound",
-        killed_log(
-            [
-                *later_release(RELEASE_LINE_NS + BOUND_NS + 1),
-                *released("d4", final_event("d4"), user="u000009", release_ns=RELEASE_LINE_NS + 1),
-            ]
-        ),
-        False,
-    ),
-    (
-        "the restarted process's release 1 ns past the bound (another process's clock)",
-        s6_lines(
-            "closed",
-            released("d2", final_event("d2"), release_ns=RELEASE_LINE_NS + BOUND_NS + 1),
-            killed=released("d1", None, user="u000007"),
-        ),
+        [kill_fault(CAL_KILL_START, CAL_KILL_END + SECOND)],
         True,
     ),
     (
-        "an earlier process's release 1 ns past the bound (another process's clock)",
-        [
-            lifecycle_start(),
-            lifecycle("ready"),
-            *released("d2", final_event("d2"), release_ns=RELEASE_LINE_NS + BOUND_NS + 1),
-            lifecycle("stop"),
-            *s6_lines("closed", killed=released("d1", None, user="u000007")),
-        ],
+        "the restarted process's arrivals all after the kill's end",
+        killed_log(
+            calibrated(AT_BOUND),
+            restart=[not_ready(CAL_KILL_END + 1, "q-first")],
+            restarted=LATE_RESTART,
+        ),
+        [kill_fault(CAL_KILL_START, CAL_KILL_END)],
+        True,
+    ),
+    (
+        "the restarted process's earliest arrival at the kill's start",
+        killed_log(released("d1", None), restart=[not_ready(KILL_START, "q-first")]),
+        [kill_fault()],
+        True,
+    ),
+    # A kill's end at its own start is taken (judgment RP2; KILL_ERRORS refuses it 1 ns earlier).
+    (
+        "a kill ending as it starts",
+        killed_log(released("d1", None)),
+        [kill_fault(KILL_END, KILL_END)],
         True,
     ),
 ]
 
 
-@pytest.mark.parametrize(("case", "log", "ok"), KILL_BOUND, ids=[c for c, _, _ in KILL_BOUND])
-def test_kill_within_deadline(tmp_path: Path, case: str, log: list[Line], ok: bool) -> None:
-    """A release with no final event on a killed instance is excused when the kill came at most
-    refund_deadline + the measured outage after it: the kill time is the largest release_mono_ns
-    its process segment holds, not the last one written (concurrent requests write them out of
-    mono order), a degraded permit's and one written after the pre_kill line included (not
-    another process's, before or after it, on another clock); 1 ns later, the instance kept
-    running past the refund's deadline and REF-5 still covered it."""
-    world = make_world(tmp_path, closed=log)
+@pytest.mark.parametrize(
+    ("case", "log", "kills", "ok"), KILL_BOUND, ids=[c for c, _, _, _ in KILL_BOUND]
+)
+def test_kill_within_deadline(
+    tmp_path: Path, case: str, log: list[Line], kills: list[dict[str, object]], ok: bool
+) -> None:
+    """A release with no final event on a killed instance is excused only when the kill's upper
+    bound K_hi, on its process's monotonic clock, is at most refund_deadline + the measured outage
+    after it: K_hi maps the kill's end on the wall clock (context.json's end_ns, or the restarted
+    process's earliest request arrival if earlier) through the killed process's requests joined to
+    their releases, the least bound any of them gives; 1 ns later, or when the kill ends 40 s after
+    a lone release (which the latest release_mono_ns alone used to excuse), the instance may have
+    kept running past the refund's deadline and REF-5 still covered it."""
+    world = kill_world(tmp_path, log, *kills)
     code, lines = check(world.manifest())
     assert code == 1, case
     if ok:
@@ -1474,20 +1604,2413 @@ def test_kill_within_deadline(tmp_path: Path, case: str, log: list[Line], ok: bo
 
 
 def test_kill_past_deadline_detail(tmp_path: Path) -> None:
-    """A release its killed process outlived by more than refund_deadline + the measured outage
-    fails as a REF-5 miss, saying how long the process ran on after it."""
-    late = RELEASE_LINE_NS + BOUND_NS + 1
-    world = make_world(tmp_path, closed=killed_log(later_release(late)))
+    """A release whose kill's upper bound came more than refund_deadline + the measured outage
+    after it fails as a REF-5 miss, saying how late the kill may have come and how K_hi was found:
+    the kill's end 40 s after d1's request, 4 % of that (1.6 s) for slew."""
+    end = ARRIVED + 40 * SECOND
+    world = kill_world(
+        tmp_path,
+        killed_log(released("d1", None), restarted=LATE_RESTART),
+        kill_fault(end - 140 * MS, end),
+    )
+    k_hi = RELEASE_LINE_NS - 2 * MS + 40 * SECOND + 1600 * MS
     code, lines = check(world.manifest())
     assert code == 1
     assert rest(lines) == [
         f"FAIL {CLOSED} {IDS['closed']} refund_completion: api-1.jsonl: line 4: deduction d1: "
         "released 2000000 ns after just before its acquire (limiter_ns + db_ns, within P "
-        f"5000000000): no final event, and its instance ran on {BOUND_NS + 1} ns after its "
-        f"release before it was killed (release_mono_ns {RELEASE_LINE_NS}, its process's last "
-        f"{late}), above refund_deadline_ns 30000000000 + the measured outage 4085364542 ns = "
-        f"{BOUND_NS}: it kept running past its deadline, so REF-9 (c) still covered it (REF-5)"
+        f"5000000000): no final event, and its instance was killed up to {k_hi - RELEASE_LINE_NS} "
+        f"ns after its release (release_mono_ns {RELEASE_LINE_NS}; K_hi {k_hi}, the kill's upper "
+        f"bound on its process's monotonic clock: context.json faults[1] end_ns {end} on the "
+        f"wall clock, mapped through the request at api-1.jsonl: line 5 (arrival_ns {ARRIVED}) "
+        f"released at api-1.jsonl: line 4 (release_mono_ns {RELEASE_LINE_NS}, limiter_ns + db_ns "
+        "2000000), plus 1600000000 ns of slew), above refund_deadline_ns 30000000000 + the "
+        f"measured outage 4085364542 ns = {BOUND_NS}: nothing shows its instance was killed "
+        "before its deadline, so REF-9 (c) does not excuse it (REF-5)"
     ], lines
+
+
+def test_killed_without_a_joined_request(tmp_path: Path) -> None:
+    """A killed process none of whose request lines joins one of its release lines (here d1, its
+    one release, lost its request line too) gives no upper bound on its kill time: d1, with no
+    final event, is not excused."""
+    world = kill_world(tmp_path, killed_log(released("d1", None, with_request=False)))
+    code, lines = check(world.manifest())
+    assert code == 1
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], lines
+    assert rest(lines) == [
+        f"FAIL {CLOSED} {IDS['closed']} refund_completion: api-1.jsonl: line 4: deduction d1: no "
+        "final event on an instance killed before it (api-1.jsonl: line 5), and no request line "
+        "of that process joins one of its release lines, so nothing bounds the kill's time: REF-9 "
+        "(c) does not excuse it (REF-5); it has no request line, so whether it was released "
+        "within P (5000000000 ns) is unknown"
+    ], lines
+
+
+# The latest release_mono_ns the killed process's segment holds bounds the kill from below (the
+# process still ran then): (case, the closed run's log, whether K_hi falls below it). K_hi is K_HI
+# throughout (d1 is the killed process's one joined request).
+K_EST: list[tuple[str, list[Line], bool]] = [
+    (
+        "a degraded permit's release at K_hi",
+        killed_log([*released("d1", None), *degraded_release(K_HI)]),
+        False,
+    ),
+    (
+        "a degraded permit's release 1 ns after K_hi",
+        killed_log([*released("d1", None), *degraded_release(K_HI + 1)]),
+        True,
+    ),
+    (
+        "a release written after the pre_kill line, 1 ns after K_hi",
+        killed_log(released("d1", None), after_kill=degraded_release(K_HI + 1)),
+        True,
+    ),
+    # Concurrent requests write their release lines out of mono order: the largest counts, not
+    # the one written last (orchestrator decision W1 of the H6 round-2 review).
+    (
+        "release lines out of mono order, the largest written first: 1 ns after K_hi",
+        killed_log(
+            [
+                *released("d1", None),
+                *degraded_release(K_HI + 1),
+                *degraded_release(RELEASE_LINE_NS + 1),
+            ]
+        ),
+        True,
+    ),
+    (
+        "the restarted process's release 1 ns after K_hi (another process's clock)",
+        killed_log(
+            released("d1", None),
+            released(
+                "d2", final_event("d2"), release_ns=K_HI + 1, arrival_ns=RESTARTED + 2 * SECOND
+            ),
+        ),
+        False,
+    ),
+    (
+        "an earlier process's release 1 ns after K_hi (another process's clock)",
+        [
+            lifecycle_start(),
+            lifecycle("ready"),
+            *released("d2", final_event("d2"), release_ns=K_HI + 1),
+            lifecycle("stop"),
+            *killed_log(released("d1", None, user="u000007")),
+        ],
+        False,
+    ),
+]
+
+
+@pytest.mark.parametrize(("case", "log", "stepped"), K_EST, ids=[c for c, _, _ in K_EST])
+def test_kill_bound_below_a_release(
+    tmp_path: Path, case: str, log: list[Line], stepped: bool
+) -> None:
+    """K_hi below the latest release_mono_ns of the killed process's segment (its release lines',
+    a degraded permit's and one written after the pre_kill line included, in whatever order they
+    were written; not another process's, on another clock) means the wall clock stepped: the run
+    fails as input, naming the pre_kill line. At it, or with only other processes' releases past
+    it, d1 is judged, and excused."""
+    world = kill_world(tmp_path, log)
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    if not stepped:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        assert ", excluded killed 1, " in lines[-1], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "input")], (case, lines)
+    assert (
+        f"field event: pre_kill: K_hi {K_HI}, the kill's upper bound on its process's monotonic "
+        "clock (" in rest(lines)[0]
+    ), (case, lines)
+    assert (
+        f"is below the latest release_mono_ns {K_HI + 1} its process segment holds"
+        in rest(lines)[0]
+    ), (case, lines)
+
+
+# Instance 1 killed twice: its first process (d1 released 8 s in, its request at ARRIVED) by the
+# first kill; its second, started at T0 + 8 s, released d2 5 s in (its request at T0 + 13 s − 2
+# ms) and was killed by the second; its third (s6_lines) serves from T0 + 30 s.
+SECOND_KILL_END = T0_WALL_NS + 20_500 * MS
+D2_ARRIVED = T0_WALL_NS + 13 * SECOND - 2 * MS
+
+
+def two_kills_log() -> list[Line]:
+    return [
+        lifecycle_start(),
+        lifecycle("ready"),
+        *released("d1", None, user="u000007"),
+        lifecycle("pre_kill"),
+        lifecycle_start(),
+        lifecycle("ready"),
+        *released("d2", None, user="u000006", release_ns=5 * SECOND, arrival_ns=D2_ARRIVED),
+        lifecycle("pre_kill"),
+        *s6_lines("closed", arrival_ns=T0_WALL_NS + 30 * SECOND),
+    ]
+
+
+SECOND_KILL = kill_fault(T0_WALL_NS + 20 * SECOND, SECOND_KILL_END)
+# (case, the closed run's kills after its store down), each taken by two_kills_log's two pre_kill
+# lines in turn.
+TWO_KILLS: list[tuple[str, list[dict[str, object]]]] = [
+    ("the second kill starting long after the first", [kill_fault(), SECOND_KILL]),
+    (
+        "the second kill starting as the first ends",
+        [kill_fault(), kill_fault(KILL_END, SECOND_KILL_END)],
+    ),
+    # A scenario need not list its faults by time (F1 item B8): kills are taken by start_ns.
+    ("two kills listed in reverse", [SECOND_KILL, kill_fault()]),
+    # Two kills starting together are taken in context.json's order (its index breaks the tie):
+    # the first listed, ending as they start, takes the first pre_kill line, and the second starts
+    # no earlier than it ended.
+    (
+        "two kills starting together, the first listed ending as they start",
+        [kill_fault(KILL_START, KILL_START), kill_fault(KILL_START, SECOND_KILL_END)],
+    ),
+]
+
+
+@pytest.mark.parametrize(("case", "kills"), TWO_KILLS, ids=[c for c, _ in TWO_KILLS])
+def test_two_kills_matched_in_order(
+    tmp_path: Path, case: str, kills: list[dict[str, object]]
+) -> None:
+    """Each pre_kill line of an instance is matched to its own kill: the k-th to the k-th
+    'faultctl api kill N' fault in context.json by start_ns, context.json's order breaking a tie.
+    Both releases are excused: d1 by the first kill (K_hi 1.038 s after it; 0.518 s when that kill
+    ends at KILL_START), d2 by the second (7.502 s from its request to the kill's end, 300.08 ms of
+    slew: 7.80208 s after it); matched the other way round, the second process's K_hi would fall
+    before its own release."""
+    world = kill_world(tmp_path, two_kills_log(), *kills)
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    assert failed(lines) == [] and skips(lines) == [], (case, lines)
+    assert ", excluded killed 2, " in lines[-1], (case, lines)
+
+
+def test_kill_of_instance_2(tmp_path: Path) -> None:
+    """Each instance's pre_kill lines are matched to that instance's kills (F1 item B3, as both H6
+    kill runs kill instance 2): in a two-instance closed run, instance 2, killed by 'faultctl api
+    kill 2 --restart' (K_hi 1.038 s after it) after it released d2, which has no final event, is
+    excused; instance 1 has no kill and needs none."""
+    killed = [
+        lifecycle_start(),
+        lifecycle("ready"),
+        *released("d2", None, instance=2, user="u000006"),
+        lifecycle("pre_kill"),
+        lifecycle_start(),
+        lifecycle("ready"),
+        lifecycle("stop"),
+    ]
+    world = make_world(
+        tmp_path,
+        closed_apis={1: s6_lines("closed"), 2: killed},
+        closed_faults=[STORE_DOWN, kill_fault(instance=2)],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1 and failed(lines) == [] and skips(lines) == [], lines
+    assert ", excluded killed 1, " in lines[-1], lines
+
+
+# A pre_kill line's kill that is not in context.json, failed, or overlaps the kill before it fails
+# the run as input, naming the line and the field: (case, the closed run's log, or its instances'
+# logs, its kills, the input failure's detail).
+KILL_ERRORS: list[tuple[str, list[Line] | dict[int, list[Line]], list[dict[str, object]], str]] = [
+    (
+        "a pre_kill line no kill matches",
+        killed_log(released("d1", None)),
+        [],
+        "api-1.jsonl: line 6: field event: pre_kill: no context.json fault 'faultctl api kill 1' "
+        "matches it: it is pre_kill line 1 of api-1.jsonl, and context.json has 0",
+    ),
+    # A two-instance run, whose kill of instance 2 is valid input (F1 item B4: a kill of an
+    # instance the run lacks is malformed).
+    (
+        "a pre_kill line with only another instance's kill",
+        {
+            1: killed_log(released("d1", None)),
+            2: [lifecycle_start(), lifecycle("ready"), lifecycle("stop")],
+        },
+        [kill_fault(instance=2)],
+        "api-1.jsonl: line 6: field event: pre_kill: no context.json fault 'faultctl api kill 1' "
+        "matches it: it is pre_kill line 1 of api-1.jsonl, and context.json has 0",
+    ),
+    (
+        "a pre_kill line whose kill failed",
+        killed_log(released("d1", None)),
+        [kill_fault(error="hitapi 1 is not running")],
+        "api-1.jsonl: line 6: field event: pre_kill: its kill, context.json faults[1] (faultctl "
+        "api kill 1 --restart), failed: hitapi 1 is not running",
+    ),
+    (
+        "a pre_kill line whose kill did not run (end_ns 0)",
+        killed_log(released("d1", None)),
+        [kill_fault(0, 0)],
+        "api-1.jsonl: line 6: field event: pre_kill: its kill, context.json faults[1] (faultctl "
+        "api kill 1 --restart), did not run (end_ns 0)",
+    ),
+    (
+        "the second kill starting 1 ns before the first ends",
+        two_kills_log(),
+        [kill_fault(), kill_fault(KILL_END - 1, SECOND_KILL_END)],
+        "api-1.jsonl: line 12: field event: pre_kill: its kill, context.json faults[2] (faultctl "
+        f"api kill 1 --restart), starts at start_ns {KILL_END - 1}, before faults[1], the kill of "
+        f"pre_kill line 1 of api-1.jsonl, ended at end_ns {KILL_END}: two kills of instance 1 "
+        "overlap",
+    ),
+    # Taken by start_ns (F1 item B8), overlapping kills listed in reverse overlap all the same.
+    (
+        "two overlapping kills listed in reverse",
+        two_kills_log(),
+        [kill_fault(KILL_END - 1, SECOND_KILL_END), kill_fault()],
+        "api-1.jsonl: line 12: field event: pre_kill: its kill, context.json faults[1] (faultctl "
+        f"api kill 1 --restart), starts at start_ns {KILL_END - 1}, before faults[2], the kill of "
+        f"pre_kill line 1 of api-1.jsonl, ended at end_ns {KILL_END}: two kills of instance 1 "
+        "overlap",
+    ),
+    # Two kills starting together are taken in context.json's order: the first listed, ending
+    # last, takes the first pre_kill line, and the second starts before it ended.
+    (
+        "two kills starting together, the first listed ending last",
+        two_kills_log(),
+        [kill_fault(KILL_START, SECOND_KILL_END), kill_fault(KILL_START, KILL_START)],
+        "api-1.jsonl: line 12: field event: pre_kill: its kill, context.json faults[2] (faultctl "
+        f"api kill 1 --restart), starts at start_ns {KILL_START}, before faults[1], the kill of "
+        f"pre_kill line 1 of api-1.jsonl, ended at end_ns {SECOND_KILL_END}: two kills of "
+        "instance 1 overlap",
+    ),
+    (
+        "the restarted process's earliest arrival 1 ns before the kill started",
+        killed_log(released("d1", None), restart=[not_ready(KILL_START - 1, "q-first")]),
+        [kill_fault()],
+        f"api-1.jsonl: line 9: field arrival_ns: {KILL_START - 1}: before the kill of the process "
+        f"before it started (context.json faults[1] start_ns {KILL_START}, matched to "
+        "api-1.jsonl: line 6): a process started after that kill cannot have served it; the wall "
+        "clock stepped, or that kill is not this instance's",
+    ),
+    # Judgment RP2: a kill that ran (end_ns not 0) started (start_ns not 0) no later than it ended,
+    # each kill of the instance checked before they are taken by start_ns, a second one matched to
+    # no pre_kill line too (start_ns 0 would sort it first). Its end at its start is taken
+    # (KILL_BOUND).
+    (
+        "a kill that ran with start_ns 0",
+        killed_log(released("d1", None)),
+        [kill_fault(0, KILL_END)],
+        f"context.json: faults[1]: field start_ns: 0, though it ran (end_ns {KILL_END}): want its "
+        "start",
+    ),
+    (
+        "a kill ending 1 ns before it started",
+        killed_log(released("d1", None)),
+        [kill_fault(KILL_END + 1, KILL_END)],
+        f"context.json: faults[1]: field end_ns: {KILL_END}: before its start_ns {KILL_END + 1} "
+        "(the wall clock stepped back, or the record is corrupt)",
+    ),
+    (
+        "a second kill that ran with start_ns 0",
+        killed_log(released("d1", None)),
+        [kill_fault(), kill_fault(0, SECOND_KILL_END)],
+        f"context.json: faults[2]: field start_ns: 0, though it ran (end_ns {SECOND_KILL_END}): "
+        "want its start",
+    ),
+    (
+        "a second kill ending 1 ns before it started, matched to no pre_kill line",
+        killed_log(released("d1", None)),
+        [kill_fault(), kill_fault(SECOND_KILL_END + 1, SECOND_KILL_END)],
+        f"context.json: faults[2]: field end_ns: {SECOND_KILL_END}: before its start_ns "
+        f"{SECOND_KILL_END + 1} (the wall clock stepped back, or the record is corrupt)",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "log", "kills", "detail"), KILL_ERRORS, ids=[c for c, _, _, _ in KILL_ERRORS]
+)
+def test_kill_input_errors(
+    tmp_path: Path,
+    case: str,
+    log: list[Line] | dict[int, list[Line]],
+    kills: list[dict[str, object]],
+    detail: str,
+) -> None:
+    """A pre_kill line with no 'faultctl api kill N' fault in context.json to match (the k-th
+    pre_kill line of api-N.jsonl takes the k-th by start_ns), or whose kill failed or did not run,
+    two kills of one instance that overlap (a kill must start no earlier than the one before it
+    ended), and a restarted process's request arriving before the kill that ended its predecessor
+    started each fail the run as input, naming the line and the field."""
+    apis = log if isinstance(log, dict) else {1: log}
+    world = make_world(tmp_path, closed_apis=apis, closed_faults=[STORE_DOWN, *kills])
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    assert failed(lines) == [(CLOSED, IDS["closed"], "input")], (case, lines)
+    assert rest(lines)[0] == f"FAIL {CLOSED} {IDS['closed']} input: {detail}", (case, lines)
+
+
+# SPEC REF-9 (d) (F1 item R1): refunds are guaranteed only "while none of these occurs before the
+# refund is confirmed: a new epoch (ADM-1, either form), epoch-wide state loss (STA-9, including an
+# integrity hold), a clock_error that, together with store unavailability, lasts longer than
+# outage_tolerance, or a quarantine of the key (STA-10)". d1 (key u000003, its request at ARRIVED)
+# is excused when its final event is not a confirmation and a tamper that ended after ARRIVED and
+# began no later than d1's final event may have come (F1 item B5) either lost the epoch's state
+# itself, ending at most at LOSS_BOUND, or left damage whose event (the integrity hold of a
+# retyped shared key, or a quarantine of d1's key) the run logs show by LOSS_BOUND (judgment RP3):
+# a request on d1's user answered ERR-11 that arrived no earlier than the tamper started and whose
+# acquire was done, at the latest, by LOSS_BOUND. LOSS_BOUND is the earliest wall-clock time of
+# d1's REF-5 deadline: its request's arrival + refund_deadline + the closed run's measured outage,
+# less 4 % of that for the clocks' drift (F1 item B6: ⌈34,085,364,542 × 40,000 / 10^6⌉ =
+# 1,363,414,582 ns, rounded up from 1,363,414,581.68).
+BOUND_SLEW_NS = 1_363_414_582
+LOSS_BOUND = ARRIVED + DEADLINE_NS + OUTAGE_NS - BOUND_SLEW_NS
+WITHIN = ARRIVED + 2 * SECOND  # a fault's end inside the bound
+TBOUND = 2**53 - 2**43  # DESIGN §A4.2: an hwm at or above it is malformed
+# An ERR-11 refusal (integrity_refusal) has limiter_ns 1.9 ms, so total_ns 2 ms (synthetic.request
+# adds 100 µs), and its acquire was done at most REFUSAL_BY_NS after its arrival on the wall clock:
+# that total_ns plus 4 % of it (80,000 ns exactly; SLEW_PPM ± 1 moves it by 2 ns).
+REFUSED_LIMITER_NS = 1_900_000
+REFUSAL_BY_NS = 2 * MS + 80 * US
+# test_ref9d's refusal on d1's user: 3 s after its request, after each deferred loss there began
+# (unless a case says otherwise), and done long before LOSS_BOUND.
+REFUSED_AT = ARRIVED + 3 * SECOND
+
+
+def integrity_refusal(
+    arrival_ns: int,
+    *,
+    user: str = "u000003",
+    instance: int = 1,
+    status: int = 503,
+    error: str = "limiter_state_integrity_error",
+    result: str = "state_integrity_error",
+) -> Line:
+    """A request on user answered ERR-11 (HARNESS §3: 503 limiter_state_integrity_error; DESIGN
+    §B8: the limiter's result, state_integrity_error; no permit and no database work), arriving
+    at arrival_ns on instance: its acquire was done by arrival_ns + REFUSAL_BY_NS."""
+    return request(
+        instance,
+        f"q-e11-{arrival_ns}",
+        arrival_ns=arrival_ns,
+        status=status,
+        error=error,
+        result=result,
+        user=user,
+        limiter_ns=REFUSED_LIMITER_NS,
+        db_ns=0,
+    )
+
+
+def fault_record(
+    cmd: str, end_ns: int, *, start_ns: int | None = None, error: str = ""
+) -> dict[str, object]:
+    """context.json's record of a faultctl command other than api kill (plan H4 step 7,
+    runFaultctl): no instance and no targets, the command's own start (start_ns, or 8 ms before its
+    end) and end on the wall clock, both 0 when it did not run; error when it failed."""
+    if start_ns is None:
+        start_ns = end_ns - 8 * MS if end_ns else 0
+    rec: dict[str, object] = {
+        "at_s": 9,
+        "cmd": cmd,
+        "instance": None,
+        "start_ns": start_ns,
+        "end_ns": end_ns,
+        "outage_start_ns": None,
+        "outage_ns": None,
+        "targets": [],
+    }
+    if error:
+        rec["error"] = error
+    return rec
+
+
+def tamper_fault(
+    op: str, end_ns: int, *, start_ns: int | None = None, error: str = ""
+) -> dict[str, object]:
+    """context.json's record of faultctl tamper <op> (fault_record)."""
+    return fault_record(f"faultctl tamper {op}", end_ns, start_ns=start_ns, error=error)
+
+
+# d1's refund unresolved (retention) when its retention timer fired: receipt_lifetime after its
+# acquire, which came at most limiter_ns (2 ms) before its release, so after every tamper below.
+RETAINED_NS = LIFETIME_NS - 2 * MS
+RETENTION = final_event("d1", "unresolved", reason="retention", took_ns=RETAINED_NS)
+LATE_NS = DEADLINE_NS + OUTAGE_NS + 1  # a final event 1 ns past refund_deadline + the outage
+DEL_HWM = tamper_fault("del-hwm", WITHIN)
+DEL_K = "del-k --key u000003"
+# A final event 3 s after its release: the refund's next attempt after a tamper ending at WITHIN.
+AFTER_WITHIN_NS = 3 * SECOND
+# F1 item B5: a REF-9 (d) event excuses only a final event that may have come after the loss began.
+# d1's request took total_ns 2.1 ms (synthetic.request: limiter_ns 2 ms + db_ns 0 + 100 µs), which
+# hitapi measures past the release, and EARLY_FINAL came 2 s + 7 ns after the release on the
+# library's monotonic clock (final_mono_ns − the refund line's release_mono_ns), so on the wall
+# clock it came at most FINAL_BY: ARRIVED + 2,002,100,007 ns + 80,084,001 ns of slew (4 % of that,
+# 80,084,000.28, rounded up; SLEW_PPM ± 1 moves it by about 2,000 ns).
+EARLY_FINAL = final_event("d1", "receipt_invalid", took_ns=2 * SECOND + 7)
+FINAL_BY = ARRIVED + 2_002_100_007 + 80_084_001
+QUICK_INVALID = final_event("d1", "receipt_invalid", took_ns=MS)  # 1 ms after its release
+WELL_FORMED_ID = "0123456789abcdef" * 2  # 32 lowercase hex digits
+# (case, the closed run's faults after its store down, d1's final event, how d1 is excused: lost,
+# quarantined, or None when it fails).
+REF9D: list[tuple[str, list[dict[str, object]], Line, str | None]] = [
+    ("del-hwm ending at the bound", [tamper_fault("del-hwm", LOSS_BOUND)], RETENTION, "lost"),
+    (
+        "del-hwm ending 1 ns past the bound",
+        [tamper_fault("del-hwm", LOSS_BOUND + 1)],
+        RETENTION,
+        None,
+    ),
+    (
+        "del-hwm ending at the request's arrival",
+        [tamper_fault("del-hwm", ARRIVED)],
+        RETENTION,
+        None,
+    ),
+    (
+        "del-hwm ending 1 ns after the request's arrival",
+        [tamper_fault("del-hwm", ARRIVED + 1)],
+        RETENTION,
+        "lost",
+    ),
+    # Each tamper that loses the epoch's state itself, at the bound and 1 ns past it.
+    ("wipe ending at the bound", [tamper_fault("wipe", LOSS_BOUND)], RETENTION, "lost"),
+    ("wipe ending 1 ns past the bound", [tamper_fault("wipe", LOSS_BOUND + 1)], RETENTION, None),
+    (
+        "corrupt-record (its schema) ending at the bound",
+        [tamper_fault("corrupt-record", LOSS_BOUND)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record (its schema) ending 1 ns past the bound",
+        [tamper_fault("corrupt-record", LOSS_BOUND + 1)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of gen with the tampered value",
+        [tamper_fault("corrupt-record --field gen", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record setting the hold",
+        [tamper_fault("corrupt-record --field hold --value x", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    # F1 item B21: without --value, corrupt-record --field writes TamperedValue ("tampered":
+    # harness/fixtures TamperCommand.check), which sets the hold (load_epoch's hold ~= '').
+    (
+        "corrupt-record of hold with the tampered value",
+        [tamper_fault("corrupt-record --field hold", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of hwm at TBOUND",
+        [tamper_fault(f"corrupt-record --field hwm --value {TBOUND}", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of hwm 1 below TBOUND, still well-formed",
+        [tamper_fault(f"corrupt-record --field hwm --value {TBOUND - 1}", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record leaving a counter well-formed",
+        [tamper_fault("corrupt-record --field nb --value 7", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    # Each counter field against is_uint53, both ways (F1 items B1 and B2): the tampered value
+    # loses the epoch, 7 does not; and hwm's own rule (is_uint53, then below TBOUND).
+    (
+        "corrupt-record of nb with the tampered value",
+        [tamper_fault("corrupt-record --field nb", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of nm with the tampered value",
+        [tamper_fault("corrupt-record --field nm", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of nm 7, still well-formed",
+        [tamper_fault("corrupt-record --field nm --value 7", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of origin with the tampered value",
+        [tamper_fault("corrupt-record --field origin", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of origin 7, still well-formed",
+        [tamper_fault("corrupt-record --field origin --value 7", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of created with the tampered value",
+        [tamper_fault("corrupt-record --field created", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of created 7, still well-formed",
+        [tamper_fault("corrupt-record --field created --value 7", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of hwm with the tampered value",
+        [tamper_fault("corrupt-record --field hwm", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of hwm with a leading zero",
+        [tamper_fault("corrupt-record --field hwm --value 07", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    # DESIGN §A4.2's is_uint53, which the counters and the bucket fields take: 1–16 decimal digits,
+    # no leading zero but "0", below 2^53.
+    (
+        "corrupt-record of gen at 2^53",
+        [tamper_fault(f"corrupt-record --field gen --value {2**53}", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of gen at 2^53 - 1, still well-formed",
+        [tamper_fault(f"corrupt-record --field gen --value {2**53 - 1}", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of gen with a leading zero",
+        [tamper_fault("corrupt-record --field gen --value 07", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of gen 0, still well-formed",
+        [tamper_fault("corrupt-record --field gen --value 0", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of a field the record does not hold",
+        [tamper_fault("corrupt-record --field extra", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    # Each record field against its grammar (DESIGN §A4.2 record_wellformed): a value it refuses
+    # loses the epoch, one it takes does not (a well-formed fp that is not the instances' is a
+    # config_error, which REF-9 (d) does not list; a well-formed id that is not the epoch's moves
+    # the instances to that id's empty namespace, DESIGN §A5.7, though no ADM-1 started an epoch,
+    # the only kind REF-9 (d) names).
+    (
+        "corrupt-record of fp with the tampered value",
+        [tamper_fault("corrupt-record --field fp", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of fp with another well-formed fp",
+        [tamper_fault(f"corrupt-record --field fp --value {WELL_FORMED_ID}", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of id with another well-formed id",
+        [tamper_fault(f"corrupt-record --field id --value {'0' * 31}1", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of id with uppercase hex",
+        [tamper_fault(f"corrupt-record --field id --value {'A' * 32}", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of id with 31 hex digits",
+        [tamper_fault(f"corrupt-record --field id --value {WELL_FORMED_ID[:31]}", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of id with 33 hex digits",
+        [tamper_fault(f"corrupt-record --field id --value {WELL_FORMED_ID}0", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    # F1 item B15: 32 lowercase letters past f are no hex digits.
+    (
+        "corrupt-record of id with 32 lowercase non-hex letters",
+        [tamper_fault(f"corrupt-record --field id --value {'g' * 32}", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of schema 2",
+        [tamper_fault("corrupt-record --field schema --value 2", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of schema 3",
+        [tamper_fault("corrupt-record --field schema --value 3", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of schema 1, still well-formed",
+        [tamper_fault("corrupt-record --field schema --value 1", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of clock with the tampered value",
+        [tamper_fault("corrupt-record --field clock", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "corrupt-record of clock controlled, still well-formed",
+        [tamper_fault("corrupt-record --field clock --value controlled", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record of clock store, still well-formed",
+        [tamper_fault("corrupt-record --field clock --value store", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-record clearing the hold",
+        [tamper_fault("corrupt-record --field hold --value=", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "retype-shared of the epoch record ending at the bound",
+        [tamper_fault("retype-shared --target epoch", LOSS_BOUND)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "retype-shared of the epoch record ending 1 ns past the bound",
+        [tamper_fault("retype-shared --target epoch", LOSS_BOUND + 1)],
+        RETENTION,
+        None,
+    ),
+    # A shared key of the namespace retyped: the integrity hold comes at the next store step that
+    # reads it, which the run logs show by a request on d1's user answered ERR-11 (judgment RP3):
+    # REFUSED_AT's refusal shows a retype that began when it arrived, not one that began 1 ns
+    # later. (Each such retype ends 8 ms after it starts, 371 ms past the bound DESIGN §A7's
+    # margin used to set, which no longer counts.)
+    (
+        "retype-shared of ix starting when d1's refusal arrived",
+        [tamper_fault("retype-shared --target ix", REFUSED_AT + 8 * MS, start_ns=REFUSED_AT)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "retype-shared of ix starting 1 ns after d1's refusal arrived",
+        [
+            tamper_fault(
+                "retype-shared --target ix", REFUSED_AT + 1 + 8 * MS, start_ns=REFUSED_AT + 1
+            )
+        ],
+        RETENTION,
+        None,
+    ),
+    (
+        "retype-shared of q starting when d1's refusal arrived",
+        [tamper_fault("retype-shared --target q", REFUSED_AT + 8 * MS, start_ns=REFUSED_AT)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "retype-shared of q starting 1 ns after d1's refusal arrived",
+        [
+            tamper_fault(
+                "retype-shared --target q", REFUSED_AT + 1 + 8 * MS, start_ns=REFUSED_AT + 1
+            )
+        ],
+        RETENTION,
+        None,
+    ),
+    (
+        "retype-shared of ix ending at the request's arrival",
+        [tamper_fault("retype-shared --target ix", ARRIVED)],
+        RETENTION,
+        None,
+    ),
+    (
+        "retype-shared of ix ending 1 ns after the request's arrival",
+        [tamper_fault("retype-shared --target ix", ARRIVED + 1)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "add-bad-ix, whose hold a later cleanup pass sets",
+        [tamper_fault("add-bad-ix", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "add-bad-ix with its member and score",
+        [tamper_fault("add-bad-ix --member !x --value 3", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    ("del-hwm with end_ns 0 (it did not run)", [tamper_fault("del-hwm", 0)], RETENTION, None),
+    (
+        "del-hwm that did not run, with its error",
+        [tamper_fault("del-hwm", 0, error="not run: hitgen exited before its time")],
+        RETENTION,
+        None,
+    ),
+    (
+        "del-hwm that failed",
+        [tamper_fault("del-hwm", WITHIN, error="fixtures: tamper DeleteHwm: HDEL removed :0")],
+        RETENTION,
+        None,
+    ),
+    # Judgment RP2: a tamper's end at its own start is taken (test_fault_times_input_errors
+    # refuses it 1 ns earlier).
+    (
+        "del-hwm ending as it starts",
+        [tamper_fault("del-hwm", WITHIN, start_ns=WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "del-k of its key ending as it starts",
+        [tamper_fault(DEL_K, WITHIN, start_ns=WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "receipt_invalid",
+        [DEL_HWM],
+        final_event("d1", "receipt_invalid", took_ns=AFTER_WITHIN_NS),
+        "lost",
+    ),
+    (
+        "receipt_expired",
+        [DEL_HWM],
+        final_event("d1", "receipt_expired", took_ns=RETAINED_NS),
+        "lost",
+    ),
+    (
+        "unresolved (expired)",
+        [DEL_HWM],
+        final_event("d1", "unresolved", reason="expired", took_ns=RETAINED_NS),
+        "lost",
+    ),
+    (
+        "unresolved (closed) past its drain's deadline",
+        [DEL_HWM],
+        final_event("d1", "unresolved", reason="closed", took_ns=LATE_NS),
+        "lost",
+    ),
+    ("applied 1 ns late", [DEL_HWM], final_event("d1", took_ns=LATE_NS), None),
+    (
+        "already_applied 1 ns late",
+        [DEL_HWM],
+        final_event("d1", "already_applied", took_ns=LATE_NS),
+        None,
+    ),
+    # Damage to d1's key: its quarantine shows by REFUSED_AT's refusal, for a tamper that began
+    # when that request arrived, not 1 ns later (judgment RP3).
+    (
+        "del-k of its key starting when d1's refusal arrived",
+        [tamper_fault(DEL_K, REFUSED_AT + 8 * MS, start_ns=REFUSED_AT)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "del-k of its key starting 1 ns after d1's refusal arrived",
+        [tamper_fault(DEL_K, REFUSED_AT + 1 + 8 * MS, start_ns=REFUSED_AT + 1)],
+        RETENTION,
+        None,
+    ),
+    (
+        "del-k of its key ending at the request's arrival",
+        [tamper_fault(DEL_K, ARRIVED)],
+        RETENTION,
+        None,
+    ),
+    (
+        "del-k of its key ending 1 ns after the request's arrival",
+        [tamper_fault(DEL_K, ARRIVED + 1)],
+        RETENTION,
+        "quarantined",
+    ),
+    ("del-k of another key", [tamper_fault("del-k --key u000009", WITHIN)], RETENTION, None),
+    (
+        "del-bucket-fields of its key",
+        [tamper_fault("del-bucket-fields --key u000003 --field u", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "del-bucket-fields of all six fields of its key (no --field)",
+        [tamper_fault("del-bucket-fields --key u000003", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "del-marker of its key, its member at int64's largest",
+        [tamper_fault(f"del-marker --key u000003 --member {2**63 - 1}:0", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    ("del-mi of its key", [tamper_fault("del-mi --key u000003", WITHIN)], RETENTION, "quarantined"),
+    (
+        "del-mi-member of its key",
+        [tamper_fault("del-mi-member --key u000003 --member 1:1", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    ("del-ix of its key", [tamper_fault("del-ix --key u000003", WITHIN)], RETENTION, "quarantined"),
+    (
+        "del-marker of its key",
+        [tamper_fault("del-marker --key u000003 --member 1:1", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of its key with a malformed value",
+        [tamper_fault("corrupt-field --key u000003 --field u --value tampered", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of a field no bucket holds",
+        [tamper_fault("corrupt-field --key u000003 --field extra --value 1", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of its key with a well-formed value",
+        [tamper_fault("corrupt-field --key u000003 --field u --value 5", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    # Each bucket field takes a well-formed value (DESIGN §A3.2's six; F1 item B1).
+    (
+        "corrupt-field of g with a well-formed value",
+        [tamper_fault("corrupt-field --key u000003 --field g --value 5", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-field of s with a well-formed value",
+        [tamper_fault("corrupt-field --key u000003 --field s --value 5", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-field of x with a well-formed value",
+        [tamper_fault("corrupt-field --key u000003 --field x --value 5", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-field of mc with a well-formed value",
+        [tamper_fault("corrupt-field --key u000003 --field mc --value 5", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    # F1 item B15: mc is a bucket field, not a marker field (m:<g>:<s>), so is_uint53 checks it.
+    (
+        "corrupt-field of mc with a malformed value",
+        [tamper_fault("corrupt-field --key u000003 --field mc --value tampered", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of its key with a leading zero",
+        [tamper_fault("corrupt-field --key u000003 --field u --value 01", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of its key at 2^53",
+        [tamper_fault(f"corrupt-field --key u000003 --field t --value {2**53}", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "corrupt-field of its key at 2^53 - 1, still well-formed",
+        [tamper_fault(f"corrupt-field --key u000003 --field t --value {2**53 - 1}", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-field of a marker field",
+        [tamper_fault("corrupt-field --key u000003 --field m:1:1 --value x", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    # F1 item B19: a marker field is one whose name starts with m: (check_key's string.sub(f, 1, 2)
+    # == 'm:' in internal/scripts/prelude.lua), whatever follows; xm:1, which holds m: only past its
+    # start, is no field a bucket holds, so check_key quarantines its key (malformed_bucket).
+    (
+        "corrupt-field of a marker field of generation 2",
+        [tamper_fault("corrupt-field --key u000003 --field m:2:1 --value x", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "corrupt-field of a field holding m: past its start",
+        [tamper_fault("corrupt-field --key u000003 --field xm:1 --value 1", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    # F1 item B21: m: alone starts with m: too, so it is a marker field, which excuses nothing.
+    (
+        "corrupt-field of the bare marker field m:",
+        [tamper_fault("corrupt-field --key u000003 --field m: --value x", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    ("del-k --key=K", [tamper_fault("del-k --key=u000003", WITHIN)], RETENTION, "quarantined"),
+    ("del-k -key K", [tamper_fault("del-k -key u000003", WITHIN)], RETENTION, "quarantined"),
+    # Go's flag package keeps a repeated flag's last value, as faultctl does.
+    (
+        "del-k --key given twice, its key last",
+        [tamper_fault("del-k --key u000009 --key u000003", WITHIN)],
+        RETENTION,
+        "quarantined",
+    ),
+    (
+        "del-k --key given twice, another key last",
+        [tamper_fault("del-k --key u000003 --key=u000009", WITHIN)],
+        RETENTION,
+        None,
+    ),
+    (
+        "a tamper of its key and an epoch-wide loss: lost",
+        [tamper_fault(DEL_K, WITHIN), DEL_HWM],
+        RETENTION,
+        "lost",
+    ),
+    (
+        "a tamper of its key and a shared key retyped: lost",
+        [tamper_fault(DEL_K, WITHIN), tamper_fault("retype-shared --target ix", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    # Go's flag syntax, as faultctl parses the words (F1 item B4): a lone "--" ends the flags, and
+    # U+001F, which Python's str.split takes for white space, is none to strings.Fields.
+    ("del-hwm with a lone --", [tamper_fault("del-hwm --", WITHIN)], RETENTION, "lost"),
+    (
+        "corrupt-record of gen with U+001F inside its value",
+        [tamper_fault("corrupt-record --field gen --value 1\x1f2", WITHIN)],
+        RETENTION,
+        "lost",
+    ),
+    # F1 item B5: a final event that came before the loss began was not its effect. EARLY_FINAL
+    # came at most at FINAL_BY on the wall clock: a tamper starting then excuses it, one starting
+    # 1 ns later does not (each ending 8 ms after it starts, inside its bound).
+    (
+        "del-hwm starting when the final event came at the latest",
+        [tamper_fault("del-hwm", FINAL_BY + 8 * MS, start_ns=FINAL_BY)],
+        EARLY_FINAL,
+        "lost",
+    ),
+    (
+        "del-hwm starting 1 ns after the final event came at the latest",
+        [tamper_fault("del-hwm", FINAL_BY + 1 + 8 * MS, start_ns=FINAL_BY + 1)],
+        EARLY_FINAL,
+        None,
+    ),
+    (
+        "del-k of its key starting when the final event came at the latest",
+        [tamper_fault(DEL_K, FINAL_BY + 8 * MS, start_ns=FINAL_BY)],
+        EARLY_FINAL,
+        "quarantined",
+    ),
+    (
+        "del-k of its key starting 1 ns after the final event came at the latest",
+        [tamper_fault(DEL_K, FINAL_BY + 1 + 8 * MS, start_ns=FINAL_BY + 1)],
+        EARLY_FINAL,
+        None,
+    ),
+    (
+        "retype-shared of ix starting when the final event came at the latest",
+        [tamper_fault("retype-shared --target ix", FINAL_BY + 8 * MS, start_ns=FINAL_BY)],
+        EARLY_FINAL,
+        "lost",
+    ),
+    (
+        "retype-shared of ix starting 1 ns after the final event came at the latest",
+        [tamper_fault("retype-shared --target ix", FINAL_BY + 1 + 8 * MS, start_ns=FINAL_BY + 1)],
+        EARLY_FINAL,
+        None,
+    ),
+    # An early library failure stays a failure: receipt_invalid 1 ms after the release, then a
+    # tamper within the bounds (the auditors' cases).
+    (
+        "receipt_invalid 1 ms after its release, then del-k of its key 2.6 s after its arrival",
+        [tamper_fault(DEL_K, ARRIVED + 2_600 * MS)],
+        QUICK_INVALID,
+        None,
+    ),
+    (
+        "receipt_invalid 1 ms after its release, then del-hwm 20 s after its arrival",
+        [tamper_fault("del-hwm", ARRIVED + 20 * SECOND)],
+        QUICK_INVALID,
+        None,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "faults", "final", "excused"), REF9D, ids=[c for c, _, _, _ in REF9D]
+)
+def test_ref9d(
+    tmp_path: Path, case: str, faults: list[dict[str, object]], final: Line, excused: str | None
+) -> None:
+    """A release whose final event is not a confirmation (unresolved, receipt_invalid,
+    receipt_expired) is excused by REF-9 (d), and counted lost or quarantined, when a context.json
+    fault that ran without error ended after its request's arrival, began no later than its final
+    event may have come (F1 item B5), and: loses the epoch's state at once (del-hwm, wipe,
+    retype-shared of the epoch record, a corrupt-record that leaves the record malformed or held,
+    DESIGN §A4.2) no later than the earliest wall-clock time of its REF-5 deadline (its arrival +
+    refund_deadline + the measured outage, less the slew allowance: F1 item B6); or leaves damage
+    whose next read sets the integrity hold (retype-shared of ix or q, §A3.3) or quarantines its
+    key (a deletion, or a corrupt-field of a field that is neither a bucket field nor a marker
+    field, or of a bucket field with a value is_uint53 refuses, §A3.3), and began no later than
+    the run log's request on d1's user answered ERR-11 arrived (REFUSED_AT, done long before the
+    bound; judgment RP3). 1 ns later, a tamper that leaves the state well-formed, one whose hold
+    only a cleanup pass sets (add-bad-ix), a marker field's, another key's, one that did not run
+    or failed, one that began after the final event, or a confirmed refund, however late, excuses
+    nothing. With both an epoch-wide event or a retyped shared key and a tamper of its key, it
+    counts as lost."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", final), integrity_refusal(REFUSED_AT)]),
+        closed_faults=[STORE_DOWN, *faults],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    lost, quarantined = int(excused == "lost"), int(excused == "quarantined")
+    assert lines[-1].endswith(f", after_p 0, lost {lost}, quarantined {quarantined}"), (
+        case,
+        lines,
+    )
+    if excused is not None:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+    assert "deduction d1: " in rest(lines)[0], (case, lines)
+
+
+# d1's request arriving 2 ms before its acquire's decision_ns (DECIDED, the budget time), as its
+# limiter_ns (2 ms) allows.
+EARLY = ARRIVED - 2 * MS
+
+
+@pytest.mark.parametrize("late", [0, 1], ids=["at the bound", "1 ns past it"])
+@pytest.mark.parametrize(
+    ("case", "op", "deferred", "excused"),
+    [
+        ("del-hwm", "del-hwm", False, "lost 1, quarantined 0"),
+        ("del-k of its key", DEL_K, True, "lost 0, quarantined 1"),
+        ("retype-shared of ix", "retype-shared --target ix", True, "lost 1, quarantined 0"),
+    ],
+    ids=["del-hwm", "del-k of its key", "retype-shared of ix"],
+)
+def test_ref9d_bounds_from_the_arrival(
+    tmp_path: Path, case: str, op: str, deferred: bool, excused: str, late: int
+) -> None:
+    """REF-9 (d)'s bound counts from the request's arrival_ns (the wall clock the fault times
+    share, before the release), not from the acquire's decision_ns, 2 ms later here: an epoch-wide
+    loss ending at the bound the arrival gives, or, for a deferred loss (here ending at WITHIN),
+    the ERR-11 refusal on d1's user that shows its event done by that bound, excuses d1; 1 ns later
+    neither does, though within the bound decision_ns would give."""
+    bound = EARLY + DEADLINE_NS + OUTAGE_NS - BOUND_SLEW_NS
+    unconfirmed = released("d1", RETENTION, arrival_ns=EARLY)
+    if deferred:
+        log = [*unconfirmed, integrity_refusal(bound - REFUSAL_BY_NS + late)]
+        fault = tamper_fault(op, WITHIN)
+    else:
+        log, fault = unconfirmed, tamper_fault(op, bound + late)
+    world = make_world(tmp_path, closed=s6_lines("closed", log), closed_faults=[STORE_DOWN, fault])
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    if not late:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        assert lines[-1].endswith(f", after_p 0, {excused}"), (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+    assert lines[-1].endswith(", after_p 0, lost 0, quarantined 0"), (case, lines)
+
+
+def d1_log(after: Sequence[Line] = ()) -> list[Line]:
+    """The closed run's log (s6_lines) with d1 released, its refund unresolved (retention), then
+    after's lines."""
+    return s6_lines("closed", [*released("d1", RETENTION), *after])
+
+
+def next_process(*lines: Line) -> list[Line]:
+    """Another hitapi process's lines, its start and ready lines, lines and its stop line."""
+    return [lifecycle_start(), lifecycle("ready"), *lines, lifecycle("stop")]
+
+
+DEL_K_WITHIN = tamper_fault(DEL_K, WITHIN)  # starting at WITHIN - 8 ms
+IX_WITHIN = tamper_fault("retype-shared --target ix", WITHIN)
+Q_WITHIN = tamper_fault("retype-shared --target q", WITHIN)
+TAMPER_START = WITHIN - 8 * MS  # when each of them started
+# A refusal arriving at REFUSED_AT_BOUND was done exactly at LOSS_BOUND.
+REFUSED_AT_BOUND = LOSS_BOUND - REFUSAL_BY_NS
+OTHER_USER = "u000009"
+# A deferred loss (a retyped shared key, or damage to d1's key) excuses d1 only once the run logs
+# show its event (judgment RP3): a request on d1's user answered ERR-11, arriving no earlier than
+# the tamper started and done by LOSS_BOUND, in any instance's log, anywhere in it. (case, the
+# closed run's faults after its store down, its instances' run logs, how d1 is excused: lost,
+# quarantined, or None when it fails.)
+REF9D_EVIDENCE: list[tuple[str, list[dict[str, object]], dict[int, list[Line]], str | None]] = [
+    # The refusal done at the bound, and 1 ns past it, for each deferred loss.
+    (
+        "del-k of its key, its refusal done at the bound",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND)])},
+        "quarantined",
+    ),
+    (
+        "del-k of its key, its refusal done 1 ns past the bound",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND + 1)])},
+        None,
+    ),
+    (
+        "retype-shared of ix, its refusal done at the bound",
+        [IX_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND)])},
+        "lost",
+    ),
+    (
+        "retype-shared of ix, its refusal done 1 ns past the bound",
+        [IX_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND + 1)])},
+        None,
+    ),
+    (
+        "retype-shared of q, its refusal done at the bound",
+        [Q_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND)])},
+        "lost",
+    ),
+    (
+        "retype-shared of q, its refusal done 1 ns past the bound",
+        [Q_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND + 1)])},
+        None,
+    ),
+    # The refusal arriving when the tamper started, and 1 ns before (its arrival_ns and the
+    # fault's start_ns are both the wall clock).
+    (
+        "del-k of its key, its refusal arriving when it started",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START)])},
+        "quarantined",
+    ),
+    (
+        "del-k of its key, its refusal arriving 1 ns before it started",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START - 1)])},
+        None,
+    ),
+    (
+        "retype-shared of ix, its refusal arriving when it started",
+        [IX_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START)])},
+        "lost",
+    ),
+    (
+        "retype-shared of ix, its refusal arriving 1 ns before it started",
+        [IX_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START - 1)])},
+        None,
+    ),
+    (
+        "retype-shared of q, its refusal arriving when it started",
+        [Q_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START)])},
+        "lost",
+    ),
+    (
+        "retype-shared of q, its refusal arriving 1 ns before it started",
+        [Q_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START - 1)])},
+        None,
+    ),
+    # No refusal at all: nothing shows the event, whatever DESIGN §A7 says of the refund's next
+    # attempt (the property the REF-5 check tests).
+    ("del-k of its key, no refusal", [DEL_K_WITHIN], {1: d1_log()}, None),
+    ("retype-shared of ix, no refusal", [IX_WITHIN], {1: d1_log()}, None),
+    ("retype-shared of q, no refusal", [Q_WITHIN], {1: d1_log()}, None),
+    # A refusal on another user only. For a retyped shared key too: an acquire of a key already
+    # quarantined is refused at its step 3 without reading ix (DESIGN §A4.3), so another user's
+    # refusal may be that user's own quarantine.
+    (
+        "del-k of its key, a refusal on another user",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, user=OTHER_USER)])},
+        None,
+    ),
+    (
+        "retype-shared of ix, a refusal on another user",
+        [IX_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, user=OTHER_USER)])},
+        None,
+    ),
+    (
+        "retype-shared of q, a refusal on another user",
+        [Q_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, user=OTHER_USER)])},
+        None,
+    ),
+    # A request line on d1's user that is not ERR-11 (HARNESS §3: 503, the error
+    # limiter_state_integrity_error, the limiter's result state_integrity_error), in each field.
+    (
+        "del-k of its key, 503 limiter_outcome_unknown (ERR-9)",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, error="limiter_outcome_unknown")])},
+        None,
+    ),
+    (
+        "del-k of its key, limiter_state_integrity_error with HTTP status 500",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, status=500)])},
+        None,
+    ),
+    (
+        "del-k of its key, limiter_state_integrity_error with result outcome_unknown",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT, result="outcome_unknown")])},
+        None,
+    ),
+    # Any instance's log, any process segment: d1 waits until every run log is read.
+    (
+        "del-k of its key, its refusal on instance 2",
+        [DEL_K_WITHIN],
+        {1: d1_log(), 2: next_process(integrity_refusal(REFUSED_AT, instance=2))},
+        "quarantined",
+    ),
+    (
+        "del-k of its key, its refusal from the next process on its instance",
+        [DEL_K_WITHIN],
+        {1: [*d1_log(), *next_process(integrity_refusal(REFUSED_AT))]},
+        "quarantined",
+    ),
+    (
+        "del-k of its key on instance 2, its refusal on instance 1",
+        [DEL_K_WITHIN],
+        {
+            1: s6_lines("closed", [integrity_refusal(REFUSED_AT)]),
+            2: next_process(*released("d1", RETENTION, instance=2)),
+        },
+        "quarantined",
+    ),
+    # The refusal done earliest of those that arrived after the tamper began counts, whatever
+    # order they were written in: not one done past the bound, nor one before the tamper began.
+    (
+        "del-k of its key, a refusal done past the bound written before one in time",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT_BOUND + 1), integrity_refusal(REFUSED_AT)])},
+        "quarantined",
+    ),
+    (
+        "del-k of its key, a refusal before it began written before one in time",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(TAMPER_START - 1), integrity_refusal(REFUSED_AT)])},
+        "quarantined",
+    ),
+    # Nor the one written last (judgment RB1): a quarantined key keeps refusing for the rest of
+    # the run (STA-10), and completion reads one instance's log after another, so refusals done
+    # past the bound follow the one in time, in its log or in a later one.
+    (
+        "del-k of its key, a refusal in time written before one done past the bound",
+        [DEL_K_WITHIN],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT), integrity_refusal(REFUSED_AT_BOUND + 1)])},
+        "quarantined",
+    ),
+    (
+        "del-k of its key, a refusal in time, then one done past the bound on instance 2",
+        [DEL_K_WITHIN],
+        {
+            1: d1_log(after=[integrity_refusal(REFUSED_AT)]),
+            2: next_process(integrity_refusal(REFUSED_AT_BOUND + 1, instance=2)),
+        },
+        "quarantined",
+    ),
+    # Each deferred loss against its own start: here d1's key was damaged before the refusal, ix
+    # retyped 1 ns after it was done, so the refusal shows the quarantine, not the hold. (A retype
+    # that began before the refusal was done voids it, judgment RB5: REF9D_BEFORE_STORE_WIDE.)
+    (
+        "del-k of its key before its refusal, retype-shared of ix after it",
+        [
+            DEL_K_WITHIN,
+            tamper_fault(
+                "retype-shared --target ix",
+                REFUSED_AT + REFUSAL_BY_NS + 1 + 8 * MS,
+                start_ns=REFUSED_AT + REFUSAL_BY_NS + 1,
+            ),
+        ],
+        {1: d1_log(after=[integrity_refusal(REFUSED_AT)])},
+        "quarantined",
+    ),
+    # The tamper's own end does not bound the event: here it ends past the bound, and the
+    # refusal, arriving as it began, shows the quarantine before it.
+    (
+        "del-k of its key ending past the bound, its refusal done before it",
+        [tamper_fault(DEL_K, LOSS_BOUND + SECOND, start_ns=LOSS_BOUND - SECOND)],
+        {1: d1_log(after=[integrity_refusal(LOSS_BOUND - SECOND)])},
+        "quarantined",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "faults", "apis", "excused"),
+    REF9D_EVIDENCE,
+    ids=[c for c, _, _, _ in REF9D_EVIDENCE],
+)
+def test_ref9d_evidence(
+    tmp_path: Path,
+    case: str,
+    faults: list[dict[str, object]],
+    apis: dict[int, list[Line]],
+    excused: str | None,
+) -> None:
+    """A deferred REF-9 (d) loss excuses d1, unresolved on retention, only when a request line on
+    d1's user answered ERR-11 (503 limiter_state_integrity_error, result state_integrity_error)
+    arrived no earlier than the tamper started and was done, arrival_ns + total_ns + 4 % of it, by
+    the earliest wall-clock time of d1's REF-5 deadline, from any instance and process: it shows
+    d1's key quarantined, or the epoch's state lost or held, by then (judgment RP3). Otherwise d1
+    fails with its own detail, not confirmed."""
+    world = make_world(tmp_path, closed_apis=apis, closed_faults=[STORE_DOWN, *faults])
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    lost, quarantined = int(excused == "lost"), int(excused == "quarantined")
+    assert lines[-1].endswith(f", after_p 0, lost {lost}, quarantined {quarantined}"), (
+        case,
+        lines,
+    )
+    if excused is not None:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+    assert rest(lines)[0].endswith(
+        "deduction d1: released 2000000 ns after just before its acquire (limiter_ns + db_ns, "
+        "within P 5000000000): final event unresolved (retention): not confirmed"
+    ), (case, lines)
+
+
+def test_ref9d_waiting_keeps_its_place(tmp_path: Path) -> None:
+    """Releases waiting on a deferred loss's evidence until every run log is read keep their
+    places among the run's failures when nothing shows the event: d1 and d3 (del-k of their key,
+    no refusal) fail before and after d2, whose receipt_invalid nothing excuses, as their release
+    lines come."""
+    d2 = released("d2", final_event("d2", "receipt_invalid", took_ns=MS), user="u000006")
+    d3 = released("d3", final_event("d3", "unresolved", reason="retention", took_ns=RETAINED_NS))
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", RETENTION), *d2, *d3]),
+        closed_faults=[STORE_DOWN, DEL_K_WITHIN],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")] * 3, lines
+    shown = [line.partition("deduction ")[2].partition(":")[0] for line in rest(lines)]
+    assert shown == ["d1", "d2", "d3"], lines
+    assert lines[-1].endswith(", after_p 0, lost 0, quarantined 0"), lines
+
+
+# Judgment RB3: an ERR-11 refusal shows a deferred loss's event only when it was done strictly
+# before every tamper that ran and lost the epoch's state at once (del-hwm, wipe, retype-shared of
+# the epoch, a corrupt-record that leaves the record lost or held) began, whatever release that
+# loss may excuse: such a loss gives ERR-11 too, so a refusal done once it began may be that
+# loss's. Here d1's final event came early (EARLY_FINAL, by FINAL_BY on the wall clock), its key
+# was damaged before that (DEL_K_WITHIN, starting at TAMPER_START) unless a case says otherwise,
+# and no loss excuses d1 itself: each began after FINAL_BY (F1 item B5), ended at d1's arrival, or
+# did not run. d1's refusal arrived at REFUSED_AT, so it was done by REFUSED_BY.
+REFUSED_BY = REFUSED_AT + REFUSAL_BY_NS
+# (case, the closed run's faults after its store down, the lines after d1's in its log, how d1 is
+# excused: lost, quarantined, or None when it fails).
+REF9D_BEFORE_A_LOSS: list[tuple[str, list[dict[str, object]], list[Line], str | None]] = [
+    # A loss that began when the refusal was done voids it; one that began 1 ns later does not.
+    (
+        "del-hwm starting when d1's refusal was done",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", REFUSED_BY + 8 * MS, start_ns=REFUSED_BY)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "del-hwm starting 1 ns after d1's refusal was done",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", REFUSED_BY + 1 + 8 * MS, start_ns=REFUSED_BY + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    (
+        "retype-shared of ix, del-hwm starting when d1's refusal was done",
+        [IX_WITHIN, tamper_fault("del-hwm", REFUSED_BY + 8 * MS, start_ns=REFUSED_BY)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "retype-shared of ix, del-hwm starting 1 ns after d1's refusal was done",
+        [IX_WITHIN, tamper_fault("del-hwm", REFUSED_BY + 1 + 8 * MS, start_ns=REFUSED_BY + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        "lost",
+    ),
+    # Verifier B's residual (round 5): d1's key damaged before its final event, del-hwm after it,
+    # which the causal rule refuses as an excuse, and the only refusal after del-hwm began.
+    (
+        "del-hwm after the final event, before the only refusal arrived",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", FINAL_BY + 1 + 8 * MS, start_ns=FINAL_BY + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # Every such loss in the run counts, in any order, even one that began before the key was
+    # damaged (the strict side): here that one ended at d1's arrival, so it excuses nothing itself.
+    (
+        "del-hwm ending at d1's arrival, before its key was damaged",
+        [tamper_fault("del-hwm", ARRIVED), DEL_K_WITHIN],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "a wipe before its key was damaged, listed after a del-hwm after d1's refusal",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", REFUSED_BY + SECOND), tamper_fault("wipe", ARRIVED)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "a wipe before its key was damaged, listed before a del-hwm after d1's refusal",
+        [tamper_fault("wipe", ARRIVED), DEL_K_WITHIN, tamper_fault("del-hwm", REFUSED_BY + SECOND)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # Each other tamper that loses the epoch's state at once, starting when the refusal was done.
+    (
+        "retype-shared of the epoch record starting when d1's refusal was done",
+        [
+            DEL_K_WITHIN,
+            tamper_fault("retype-shared --target epoch", REFUSED_BY + 8 * MS, start_ns=REFUSED_BY),
+        ],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "corrupt-record (its schema) starting when d1's refusal was done",
+        [DEL_K_WITHIN, tamper_fault("corrupt-record", REFUSED_BY + 8 * MS, start_ns=REFUSED_BY)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # A refusal done before the loss began still counts, whatever comes after it, in any order:
+    # if the one done earliest is void, so is every later one.
+    (
+        "del-hwm after a refusal done in time, a refusal after del-hwm written first",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", REFUSED_AT + SECOND)],
+        [integrity_refusal(REFUSED_AT + 2 * SECOND), integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    # Only a loss that ran (end_ns not 0, as fault_times reads it) voids a refusal.
+    (
+        "del-hwm that did not run",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", 0)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    (
+        "del-hwm with a start before d1's refusal but end_ns 0 (it did not run)",
+        [DEL_K_WITHIN, tamper_fault("del-hwm", 0, start_ns=ARRIVED)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "faults", "after", "excused"),
+    REF9D_BEFORE_A_LOSS,
+    ids=[c for c, _, _, _ in REF9D_BEFORE_A_LOSS],
+)
+def test_ref9d_evidence_before_epoch_loss(
+    tmp_path: Path,
+    case: str,
+    faults: list[dict[str, object]],
+    after: list[Line],
+    excused: str | None,
+) -> None:
+    """An ERR-11 refusal on d1's user shows a deferred loss's event (d1's key quarantined, or a
+    retyped shared key's hold) only when it was done, arrival_ns + total_ns + 4 % of it, strictly
+    before every tamper that ran and lost the epoch's state at once began, in the run (judgment
+    RB3): a loss of the epoch's state gives ERR-11 too. d1's receipt_invalid, which no loss here
+    excuses itself, is then quarantined or lost; otherwise it fails with its own detail, not
+    confirmed."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", EARLY_FINAL), *after]),
+        closed_faults=[STORE_DOWN, *faults],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    lost, quarantined = int(excused == "lost"), int(excused == "quarantined")
+    assert lines[-1].endswith(f", after_p 0, lost {lost}, quarantined {quarantined}"), (
+        case,
+        lines,
+    )
+    if excused is not None:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+    assert rest(lines)[0].endswith(
+        "deduction d1: released 2000000 ns after just before its acquire (limiter_ns + db_ns, "
+        "within P 5000000000): final event receipt_invalid: not confirmed"
+    ), (case, lines)
+
+
+def started_at(op: str, start_ns: int, *, error: str = "") -> dict[str, object]:
+    """context.json's record of faultctl tamper op that started at start_ns and ended 8 ms later
+    (error when it failed)."""
+    return tamper_fault(op, start_ns + 8 * MS, start_ns=start_ns, error=error)
+
+
+# Judgment RB5: completion classifies each tamper operation by what it reaches, as faultctl's
+# parser takes it (GO_TAMPER_FLAGS, harness/fixtures tamperFlags): a key-scoped one requires --key
+# and writes only that key's state; every other one is store-wide. A store-wide tamper may set the
+# integrity hold, after which every acquire is refused ERR-11 before its key is read, so an ERR-11
+# refusal shows a deferred loss's event only when it was done strictly before every store-wide
+# tamper that ran began, other than that loss itself, whatever its value; a key-scoped tamper never
+# voids one. The store-wide operations, each with how a case names it: every target of
+# retype-shared, add-bad-ix with and without its flags, corrupt-record of well-formed values (hwm
+# 5 and gen 1 below an instance's floor set the hold store_rollback), of a field the record does
+# not hold and of its schema, wipe and del-hwm (REF9D_BEFORE_A_LOSS pins del-hwm too).
+STORE_WIDE_TAMPERS: list[tuple[str, str]] = [
+    ("retype-shared --target ix", "retype-shared of ix"),
+    ("retype-shared --target q", "retype-shared of q"),
+    ("retype-shared --target epoch", "retype-shared of the epoch record"),
+    ("add-bad-ix", "add-bad-ix"),
+    ("add-bad-ix --member !x --value 3", "add-bad-ix with its member and score"),
+    ("corrupt-record --field hwm --value 5", "corrupt-record of hwm 5, well-formed"),
+    ("corrupt-record --field gen --value 1", "corrupt-record of gen 1, well-formed"),
+    ("corrupt-record --field extra", "corrupt-record of a field the record does not hold"),
+    (
+        f"corrupt-record --field fp --value {WELL_FORMED_ID}",
+        "corrupt-record of fp with another well-formed fp",
+    ),
+    ("corrupt-record", "corrupt-record (its schema)"),
+    ("wipe", "wipe"),
+    ("del-hwm", "del-hwm"),
+]
+# Each key-scoped operation on another user's key, and corrupt-field and del-ix (which removes
+# only the key's own member of the shared ix) of d1's own key besides its loss.
+KEY_SCOPED_TAMPERS: list[tuple[str, str]] = [
+    ("del-bucket-fields --key u000009", "del-bucket-fields of another user's key"),
+    ("del-k --key u000009", "del-k of another user's key"),
+    ("del-mi --key u000009", "del-mi of another user's key"),
+    ("del-mi-member --key u000009 --member 1:1", "del-mi-member of another user's key"),
+    ("del-ix --key u000009", "del-ix of another user's key"),
+    ("del-marker --key u000009 --member 1:1", "del-marker of another user's key"),
+    ("corrupt-field --key u000009 --field u --value 01", "corrupt-field of another user's key"),
+    ("corrupt-field --key u000003 --field u --value tampered", "corrupt-field of its own key"),
+    ("del-ix --key u000003", "del-ix of its own key"),
+]
+# The store-wide tampers verifier 6 started at FINAL_BY + 1, after d1's final event (which the
+# causal rule then refuses as d1's own excuse) and before d1's only refusal arrived.
+PROBED_TAMPERS: list[tuple[str, str]] = [
+    ("retype-shared --target ix", "retype-shared of ix"),
+    ("retype-shared --target q", "retype-shared of q"),
+    ("corrupt-record --field hwm --value 5", "corrupt-record of hwm 5"),
+    ("corrupt-record --field gen --value 1", "corrupt-record of gen 1"),
+    ("add-bad-ix", "add-bad-ix"),
+]
+IX_RETYPE, Q_RETYPE = "retype-shared --target ix", "retype-shared --target q"
+FAILED_ADD_BAD_IX = "fixtures: tamper AddMalformedIndexMember: TYPE replied none, want zset"
+# As REF9D_BEFORE_A_LOSS: d1's receipt_invalid came early (EARLY_FINAL, by FINAL_BY), its key was
+# damaged before that (DEL_K_WITHIN) unless a case says otherwise, and its refusal arrived at
+# REFUSED_AT, done by REFUSED_BY. (case, the closed run's faults after its store down, the lines
+# after d1's in its log, how d1 is excused: lost, quarantined, or None when it fails.)
+REF9D_BEFORE_STORE_WIDE: list[tuple[str, list[dict[str, object]], list[Line], str | None]] = [
+    # Each store-wide tamper starting when d1's refusal was done voids it; 1 ns later it does not
+    # (and, starting after FINAL_BY, it does not excuse d1 itself).
+    *(
+        (
+            f"{name} starting when d1's refusal was done",
+            [DEL_K_WITHIN, started_at(op, REFUSED_BY)],
+            [integrity_refusal(REFUSED_AT)],
+            None,
+        )
+        for op, name in STORE_WIDE_TAMPERS
+    ),
+    *(
+        (
+            f"{name} starting 1 ns after d1's refusal was done",
+            [DEL_K_WITHIN, started_at(op, REFUSED_BY + 1)],
+            [integrity_refusal(REFUSED_AT)],
+            "quarantined",
+        )
+        for op, name in STORE_WIDE_TAMPERS
+    ),
+    # A key-scoped tamper starting when d1's refusal was done never voids it.
+    *(
+        (
+            f"{name} starting when d1's refusal was done",
+            [DEL_K_WITHIN, started_at(op, REFUSED_BY)],
+            [integrity_refusal(REFUSED_AT)],
+            "quarantined",
+        )
+        for op, name in KEY_SCOPED_TAMPERS
+    ),
+    # Verifier 6's probes: each store-wide tamper after the final event, before the only refusal
+    # arrived.
+    *(
+        (
+            f"{name} after the final event, before the only refusal arrived",
+            [DEL_K_WITHIN, started_at(op, FINAL_BY + 1)],
+            [integrity_refusal(REFUSED_AT)],
+            None,
+        )
+        for op, name in PROBED_TAMPERS
+    ),
+    # A retyped ix or q is store-wide too, but its own refusal still shows its own event: only
+    # another store-wide tamper, a second retype of the same key included, voids it.
+    ("retype-shared of ix, its own refusal", [IX_WITHIN], [integrity_refusal(REFUSED_AT)], "lost"),
+    ("retype-shared of q, its own refusal", [Q_WITHIN], [integrity_refusal(REFUSED_AT)], "lost"),
+    (
+        "retype-shared of ix, retype-shared of q starting when d1's refusal was done",
+        [IX_WITHIN, started_at(Q_RETYPE, REFUSED_BY)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "retype-shared of ix, retype-shared of q starting 1 ns after d1's refusal was done",
+        [IX_WITHIN, started_at(Q_RETYPE, REFUSED_BY + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        "lost",
+    ),
+    (
+        "retype-shared of ix, a second one starting when d1's refusal was done",
+        [IX_WITHIN, started_at(IX_RETYPE, REFUSED_BY)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "retype-shared of ix, a second one starting 1 ns after d1's refusal was done",
+        [IX_WITHIN, started_at(IX_RETYPE, REFUSED_BY + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        "lost",
+    ),
+    # Only the loss's own tamper is exempt, by its place in context.json, not any tamper that
+    # started with it (judgment RB6): faults due at the same offset go out together (the
+    # orchestrator's runFaults), and start_ns is a wall-clock reading (whole µs in the committed
+    # runs), so another store-wide tamper may start in the same ns as the loss, here TAMPER_START,
+    # before d1's refusal arrived; it voids the refusal as any other does. A retype of q starting
+    # with a retype of ix voids the refusal for the ix loss, and the ix retype voids it for q's, so
+    # neither loss excuses d1.
+    (
+        "del-k of its key, add-bad-ix starting at the same ns",
+        [DEL_K_WITHIN, started_at("add-bad-ix", TAMPER_START)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "retype-shared of ix, add-bad-ix starting at the same ns",
+        [IX_WITHIN, started_at("add-bad-ix", TAMPER_START)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "retype-shared of ix, retype-shared of q starting at the same ns",
+        [IX_WITHIN, started_at(Q_RETYPE, TAMPER_START)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # A retype of ix that began after the refusal arrived, before it was done (REF9D_EVIDENCE's
+    # shape until judgment RB5): the refusal may show its hold, not d1's quarantine.
+    (
+        "retype-shared of ix starting 1 ns after d1's refusal arrived",
+        [DEL_K_WITHIN, started_at(IX_RETYPE, REFUSED_AT + 1)],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # Every store-wide tamper in the run counts, even one that began before d1's key was damaged
+    # and ended at d1's arrival, excusing nothing itself (the strict side).
+    (
+        "add-bad-ix ending at d1's arrival, before its key was damaged",
+        [tamper_fault("add-bad-ix", ARRIVED), DEL_K_WITHIN],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    (
+        "corrupt-record of hwm 5 ending at d1's arrival, before its key was damaged",
+        [tamper_fault("corrupt-record --field hwm --value 5", ARRIVED), DEL_K_WITHIN],
+        [integrity_refusal(REFUSED_AT)],
+        None,
+    ),
+    # A refusal done before the store-wide tamper began still counts, in any order.
+    (
+        "add-bad-ix after a refusal done in time, a refusal after add-bad-ix written first",
+        [DEL_K_WITHIN, tamper_fault("add-bad-ix", REFUSED_AT + SECOND)],
+        [integrity_refusal(REFUSED_AT + 2 * SECOND), integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    # Only a store-wide tamper that ran (no error, end_ns not 0: as losses_of and judgment RB3
+    # read it) voids a refusal.
+    (
+        "add-bad-ix that failed, starting when d1's refusal was done",
+        [DEL_K_WITHIN, started_at("add-bad-ix", REFUSED_BY, error=FAILED_ADD_BAD_IX)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    (
+        "add-bad-ix that did not run",
+        [DEL_K_WITHIN, tamper_fault("add-bad-ix", 0)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+    (
+        "add-bad-ix with a start before d1's refusal but end_ns 0 (it did not run)",
+        [DEL_K_WITHIN, tamper_fault("add-bad-ix", 0, start_ns=ARRIVED)],
+        [integrity_refusal(REFUSED_AT)],
+        "quarantined",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "faults", "after", "excused"),
+    REF9D_BEFORE_STORE_WIDE,
+    ids=[c for c, _, _, _ in REF9D_BEFORE_STORE_WIDE],
+)
+def test_ref9d_evidence_before_store_wide_tamper(
+    tmp_path: Path,
+    case: str,
+    faults: list[dict[str, object]],
+    after: list[Line],
+    excused: str | None,
+) -> None:
+    """An ERR-11 refusal on d1's user shows a deferred loss's event (d1's key quarantined, or a
+    retyped shared key's hold) only when it was done, arrival_ns + total_ns + 4 % of it, strictly
+    before every store-wide tamper that ran began, other than that loss itself, in the run
+    (judgment RB5): a store-wide tamper may set the integrity hold, which refuses every acquire
+    ERR-11 too, whatever its kind or value. A key-scoped tamper, on another user's key or on d1's
+    own, never voids it. d1's receipt_invalid, which no loss here excuses itself, is then
+    quarantined or lost; otherwise it fails with its own detail, not confirmed."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", EARLY_FINAL), *after]),
+        closed_faults=[STORE_DOWN, *faults],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    lost, quarantined = int(excused == "lost"), int(excused == "quarantined")
+    assert lines[-1].endswith(f", after_p 0, lost {lost}, quarantined {quarantined}"), (
+        case,
+        lines,
+    )
+    if excused is not None:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+    assert rest(lines)[0].endswith(
+        "deduction d1: released 2000000 ns after just before its acquire (limiter_ns + db_ns, "
+        "within P 5000000000): final event receipt_invalid: not confirmed"
+    ), (case, lines)
+
+
+# Judgment RP2: a tamper REF-9 (d) reads that ran (end_ns not 0) started (start_ns not 0) no later
+# than it ended, as the orchestrator reads both from the wall clock around it: (case, the closed
+# run's second fault, the input failure's detail). Its end at its start is taken (REF9D).
+FAULT_TIME_ERRORS: list[tuple[str, dict[str, object], str]] = [
+    (
+        "del-hwm that ran with start_ns 0",
+        tamper_fault("del-hwm", WITHIN, start_ns=0),
+        f"context.json: faults[1]: field start_ns: 0, though it ran (end_ns {WITHIN}): want its "
+        "start",
+    ),
+    (
+        "del-hwm ending 1 ns before it started",
+        tamper_fault("del-hwm", WITHIN, start_ns=WITHIN + 1),
+        f"context.json: faults[1]: field end_ns: {WITHIN}: before its start_ns {WITHIN + 1} (the "
+        "wall clock stepped back, or the record is corrupt)",
+    ),
+    (
+        "del-k of its key that ran with start_ns 0",
+        tamper_fault(DEL_K, WITHIN, start_ns=0),
+        f"context.json: faults[1]: field start_ns: 0, though it ran (end_ns {WITHIN}): want its "
+        "start",
+    ),
+    (
+        "retype-shared of ix ending 1 ns before it started",
+        tamper_fault("retype-shared --target ix", WITHIN, start_ns=WITHIN + 1),
+        f"context.json: faults[1]: field end_ns: {WITHIN}: before its start_ns {WITHIN + 1} (the "
+        "wall clock stepped back, or the record is corrupt)",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "fault", "detail"), FAULT_TIME_ERRORS, ids=[c for c, _, _ in FAULT_TIME_ERRORS]
+)
+def test_fault_times_input_errors(
+    tmp_path: Path, case: str, fault: dict[str, object], detail: str
+) -> None:
+    """A tamper that ran with start_ns 0 (the causal rule would never block it), or that ended
+    before it started, fails the run as input, naming the fault and the field, before any
+    exclusion applies (here d1 is unresolved on retention, with its ERR-11 refusal in the log)."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", RETENTION), integrity_refusal(REFUSED_AT)]),
+        closed_faults=[STORE_DOWN, fault],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    assert failed(lines) == [(CLOSED, IDS["closed"], "input")], (case, lines)
+    assert rest(lines)[0] == f"FAIL {CLOSED} {IDS['closed']} input: {detail}", (case, lines)
+
+
+def test_ref9d_on_instance_2(tmp_path: Path) -> None:
+    """REF-9 (d) excuses a release on any instance (F1 item B3): in a two-instance closed run, d2
+    on instance 2, unresolved (retention), counts as lost after del-hwm ended before its
+    deadline."""
+    unconfirmed = released(
+        "d2",
+        final_event("d2", "unresolved", reason="retention", took_ns=RETAINED_NS),
+        instance=2,
+        user="u000006",
+    )
+    apis = {
+        1: s6_lines("closed"),
+        2: [lifecycle_start(), lifecycle("ready"), *unconfirmed, lifecycle("stop")],
+    }
+    world = make_world(tmp_path, closed_apis=apis, closed_faults=[STORE_DOWN, DEL_HWM])
+    code, lines = check(world.manifest())
+    assert code == 1 and failed(lines) == [] and skips(lines) == [], lines
+    assert lines[-1].endswith(", after_p 0, lost 1, quarantined 0"), lines
+
+
+def test_ref9d_never_excuses_a_missing_final_event(tmp_path: Path) -> None:
+    """A release with no final event on an instance that was not killed fails though an epoch-wide
+    state loss came before its deadline: REF-9 (d) scopes the refund, not the final event every
+    released permit with a receipt gets (SPEC API-1d). (Its final event is taken out after the
+    report was built.)"""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", released("d1", final_event("d1"))),
+        closed_faults=[STORE_DOWN, DEL_HWM],
+    )
+    rewrite_log(world.run("closed"), drop_final("d1"))
+    code, lines = check(world.manifest())
+    assert code == 1
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], lines
+    assert "no final event, and its instance was not killed" in rest(lines)[0], lines
+    assert lines[-1].endswith(", after_p 0, lost 0, quarantined 0"), lines
+
+
+def test_ref9d_needs_the_request_line(tmp_path: Path) -> None:
+    """A release without its request line has no arrival_ns, so nothing shows a loss came before
+    its deadline: unconfirmed, it fails though del-hwm ran."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", released("d1", RETENTION, with_request=False)),
+        closed_faults=[STORE_DOWN, DEL_HWM],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], lines
+    assert (
+        "deduction d1: final event unresolved (retention): not confirmed; it has no request "
+        in (rest(lines)[0])
+    ), lines
+
+
+def test_ref9d_after_the_drain_exclusion(tmp_path: Path) -> None:
+    """A refund cut by a drain timeout before its deadline counts as drained (REF-9 (c), decision
+    D3) though an epoch-wide state loss came before its deadline too: the drain exclusion is
+    judged first."""
+    drained = released("d1", final_event("d1", "unresolved", reason="closed"))
+    world = make_world(
+        tmp_path, closed=s6_lines("closed", drained), closed_faults=[STORE_DOWN, DEL_HWM]
+    )
+    code, lines = check(world.manifest())
+    assert code == 1 and failed(lines) == [] and skips(lines) == [], lines
+    assert lines[-1].endswith(", drained 1, after_p 0, lost 0, quarantined 0"), lines
+
+
+@pytest.mark.parametrize(
+    ("case", "fault", "excused"),
+    [
+        ("del-hwm", DEL_HWM, "lost 1, quarantined 0"),
+        ("del-k of its key", tamper_fault(DEL_K, WITHIN), "lost 0, quarantined 1"),
+    ],
+    ids=["del-hwm", "del-k of its key"],
+)
+@pytest.mark.parametrize("past_p", [1, 0], ids=["1 ns after P", "at P"])
+def test_ref9d_after_p(
+    tmp_path: Path, case: str, fault: dict[str, object], excused: str, past_p: int
+) -> None:
+    """P is judged before REF-9 (d): an unconfirmed release made 1 ns after P counts as released
+    after P though the loss or the tamper of its key came before its deadline, the quarantine
+    shown by an ERR-11 refusal on its user (REF-5 guarantees it nothing, and its receipt may
+    expire before its refund reads the key); the same release made at P counts as lost or
+    quarantined."""
+    unconfirmed = released("d1", RETENTION, elapsed=(2 * MS, P_NS - 2 * MS + past_p))
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*unconfirmed, integrity_refusal(REFUSED_AT)]),
+        closed_faults=[STORE_DOWN, fault],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1 and failed(lines) == [] and skips(lines) == [], (case, lines)
+    want = "after_p 1, lost 0, quarantined 0" if past_p else f"after_p 0, {excused}"
+    assert lines[-1].endswith(f", {want}"), (case, lines)
+
+
+def instance_setting(old: str, new: str) -> Callable[[str], str]:
+    """A config.toml change replacing old with new (both in the [instance] table)."""
+
+    def change(text: str) -> str:
+        assert old in text
+        return text.replace(old, new)
+
+    return change
+
+
+# The [instance] settings DESIGN §A7's wait beyond the outage takes, RefundBackoffMax +
+# ReconnectBackoffMax (1 s) + (⌈max_pending_refunds / refund_workers⌉ + 3) × D (26 s with the
+# closed run's settings), each changed so that wait would move: (case, the change). A deferred
+# loss's event no longer needs that margin before d1's bound, as the run logs show it (judgment
+# RP3), so d1's bound stays LOSS_BOUND under each.
+WORKERS = "refund_workers = 128\n"
+INSTANCE_SETTINGS: list[tuple[str, Callable[[str], str]]] = [
+    (
+        "refund_workers 127 (the wait 28 s)",
+        instance_setting(WORKERS, "refund_workers = 127\n"),
+    ),
+    (
+        "max_pending_refunds 1153 (the wait 28 s)",
+        instance_setting("max_pending_refunds = 1152\n", "max_pending_refunds = 1153\n"),
+    ),
+    (
+        "dependency_deadline_ns 1 s (the wait 14 s)",
+        instance_setting(WORKERS, WORKERS + "dependency_deadline_ns = 1_000_000_000\n"),
+    ),
+    (
+        "refund_backoff_max_ns 3 s (the wait 28 s)",
+        instance_setting(WORKERS, WORKERS + "refund_backoff_max_ns = 3_000_000_000\n"),
+    ),
+    (
+        "no refund_workers (DefaultInstance's 128: the wait 26 s)",
+        instance_setting(WORKERS, ""),
+    ),
+    (
+        "no refund_workers, max_pending_refunds 1153 (the wait 28 s)",
+        instance_setting("max_pending_refunds = 1152\n" + WORKERS, "max_pending_refunds = 1153\n"),
+    ),
+]
+
+
+@pytest.mark.parametrize("late", [0, 1])
+@pytest.mark.parametrize(
+    ("case", "change"), INSTANCE_SETTINGS, ids=[c for c, _ in INSTANCE_SETTINGS]
+)
+def test_evidence_bound_ignores_instance_settings(
+    tmp_path: Path, case: str, change: Callable[[str], str], late: int
+) -> None:
+    """A deferred loss's event must show by the refund's REF-5 deadline bound itself, whatever
+    DESIGN §A7's wait the run's config.toml [instance] settings would give (judgment RP3 removed
+    that margin): a tamper of d1's key ending at WITHIN, its ERR-11 refusal done at LOSS_BOUND,
+    excuses d1 under each setting; the refusal done 1 ns later does not."""
+    refusal = integrity_refusal(REFUSED_AT_BOUND + late)
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", RETENTION), refusal]),
+        closed_faults=[STORE_DOWN, DEL_K_WITHIN],
+        closed_config=change,
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    if not late:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        assert lines[-1].endswith(", after_p 0, lost 0, quarantined 1"), (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "refund_completion")], (case, lines)
+
+
+@pytest.mark.parametrize(
+    ("case", "old", "new"),
+    [
+        ("refund_workers 0", WORKERS, "refund_workers = 0\n"),
+        ("a negative refund_workers", WORKERS, "refund_workers = -1\n"),
+        ("no max_pending_refunds", "max_pending_refunds = 1152\n", ""),
+        ("max_pending_refunds 0", "max_pending_refunds = 1152\n", "max_pending_refunds = 0\n"),
+        (
+            "a dependency_deadline_ns that is no integer",
+            WORKERS,
+            WORKERS + 'dependency_deadline_ns = "2s"\n',
+        ),
+        ("dependency_deadline_ns 0", WORKERS, WORKERS + "dependency_deadline_ns = 0\n"),
+        ("a negative refund_backoff_max_ns", WORKERS, WORKERS + "refund_backoff_max_ns = -1\n"),
+        ("refund_backoff_max_ns 0", WORKERS, WORKERS + "refund_backoff_max_ns = 0\n"),
+    ],
+)
+def test_instance_settings_not_read(tmp_path: Path, case: str, old: str, new: str) -> None:
+    """completion reads none of the [instance] settings DESIGN §A7's wait took (judgment RP3
+    removed that margin, and with it the input failures these settings gave when missing or out
+    of range): so changed in the closed run's config.toml after its report was built, each fails
+    nothing."""
+    world = make_world(tmp_path)
+    config = world.run("closed").joinpath("config.toml")
+    config.write_text(instance_setting(old, new)(config.read_text(encoding="utf-8")))
+    holds(world.manifest())
+
+
+# context.json's fault commands, checked as completion reads them (F1 item B4; AGENTS.md §1 Input):
+# a cmd is faultctl's command line ("faultctl " then its words, split as strings.Fields splits
+# them) or one JSON object (harness/config validCmd), and completion checks the faultctl commands
+# against ParseFaultCommand's grammar (harness/fixtures faultcmd.go, DESIGN §B6) as far as it reads
+# them. (case, the cmd of the closed run's second fault, the input failure's reason after the cmd.)
+NOT_A_CMD = "want a command starting with 'faultctl ' or one JSON object (a /_test/faults body)"
+API_KILL_SHAPE = "want api kill <N> [--restart]"
+ONE_INSTANCE = "want 1 to 1 (the run's instances)"
+FAULT_CMD_ERRORS: list[tuple[str, str, str]] = [
+    ("a cmd neither faultctl's nor a JSON object", "xfaultctl api kill 1 --restart", NOT_A_CMD),
+    ("faultctl and a tab", "faultctl\tapi kill 1 --restart", NOT_A_CMD),
+    ("faultctl alone", "faultctl", NOT_A_CMD),
+    (
+        "a JSON body holding NaN (Go's decoder refuses it)",
+        '{"target":"store","mode":"refuse","duration_ms":NaN}',
+        NOT_A_CMD,
+    ),
+    ("a JSON array", "[]", NOT_A_CMD),
+    # F1 item B14: JSON null (Go's validCmd refuses obj == nil), and a body nested deeper than
+    # Python's decoder recurses (Go's refuses it too: unclosed, and past its depth of 10,000).
+    ("a JSON null", "null", NOT_A_CMD),
+    ("a JSON array nested 100,000 deep", "[" * 100_000, NOT_A_CMD),
+    # F1 item B19: JSON that is one value but no object, which Go's decoder refuses into validCmd's
+    # map: a number, a string, a bool and a float.
+    ("a JSON number", "5", NOT_A_CMD),
+    ("a JSON string", '"x"', NOT_A_CMD),
+    ("a JSON bool", "true", NOT_A_CMD),
+    ("a JSON float", "1.5", NOT_A_CMD),
+    ("faultctl and white space only", "faultctl  ", "no command: want store, api, tamper or clock"),
+    (
+        "an unknown command",
+        "faultctl restart api 1",
+        "unknown command 'restart': want store, api, tamper or clock",
+    ),
+    # F1 item B19: code points that are no white space to Go's unicode.IsSpace, so strings.Fields
+    # keeps each inside its word and api<X>kill is no command: U+001C to U+001E, which Python's
+    # str.split takes for white space (as it takes U+001F, REF9D's row), U+200B and U+180E (white
+    # space in older Unicode versions), U+FEFF and U+0000.
+    *(
+        (
+            f"U+{c:04X} between api and kill",
+            f"faultctl api{chr(c)}kill 1",
+            f"unknown command {'api' + chr(c) + 'kill'!r}: want store, api, tamper or clock",
+        )
+        for c in (0x001C, 0x001D, 0x001E, 0x200B, 0x180E, 0xFEFF, 0x0000)
+    ),
+    # api kill <N> [--restart] (parseAPI; N at most the run's instances, the orchestrator's
+    # preflight).
+    ("api kill without N", "faultctl api kill", API_KILL_SHAPE),
+    ("api kill with a fourth word", "faultctl api kill 1 --restart now", API_KILL_SHAPE),
+    ("api stop", "faultctl api stop 1", API_KILL_SHAPE),
+    ("api kill N restart", "faultctl api kill 1 restart", API_KILL_SHAPE),
+    # F1 item B13: parseAPI takes only the word --restart after N.
+    ("api kill N -restart", "faultctl api kill 1 -restart", API_KILL_SHAPE),
+    ("api kill N --restarts", "faultctl api kill 1 --restarts", API_KILL_SHAPE),
+    # F1 item B19: parseAPI compares the third word with --restart itself (no flag package), so it
+    # refuses the flag forms --restart=true and --restart=x as any other word.
+    ("api kill N --restart=true", "faultctl api kill 1 --restart=true", API_KILL_SHAPE),
+    ("api kill N --restart=x", "faultctl api kill 1 --restart=x", API_KILL_SHAPE),
+    # F1 item B21: likewise --restart= with an empty value.
+    ("api kill N --restart=", "faultctl api kill 1 --restart=", API_KILL_SHAPE),
+    ("api kill of no number", "faultctl api kill one", f"instance 'one': {ONE_INSTANCE}"),
+    ("api kill 0", "faultctl api kill 0 --restart", f"instance '0': {ONE_INSTANCE}"),
+    (
+        "api kill of an instance the run lacks",
+        "faultctl api kill 2 --restart",
+        f"instance '2': {ONE_INSTANCE}",
+    ),
+    # F1 item B21: strconv.Atoi reads a trailing zero as a digit: 10 is past the run's instances.
+    ("api kill 10", "faultctl api kill 10", f"instance '10': {ONE_INSTANCE}"),
+    # F1 item B13: strconv.Atoi reads -1 as below 1, and refuses two signs.
+    ("api kill -1", "faultctl api kill -1", f"instance '-1': {ONE_INSTANCE}"),
+    ("api kill ++1", "faultctl api kill ++1", f"instance '++1': {ONE_INSTANCE}"),
+    # F1 item B19: strconv.Atoi takes ASCII digits only, while Python's int() takes any Unicode
+    # decimal digit, so 0 then U+0661 (ARABIC-INDIC DIGIT ONE) is no number, though int() reads 1.
+    (
+        "api kill of 0 then an Arabic-Indic digit one",
+        f"faultctl api kill 0{chr(0x0661)}",
+        f"instance {'0' + chr(0x0661)!r}: {ONE_INSTANCE}",
+    ),
+    # tamper <op> [flags] (parseTamper: Go's flag package, then TamperCommand.check).
+    ("tamper with no operation", "faultctl tamper", "tamper needs an operation"),
+    (
+        "an unknown tamper operation",
+        "faultctl tamper del-all",
+        "unknown tamper operation 'del-all'",
+    ),
+    ("a positional word", "faultctl tamper del-k u000003", "unexpected argument 'u000003'"),
+    ("a word after --", "faultctl tamper del-k --key u000003 -- x", "unexpected argument 'x'"),
+    ("a lone -", "faultctl tamper del-k --key u000003 -", "unexpected argument '-'"),
+    ("three dashes", "faultctl tamper del-k ---key u000003", "bad flag syntax: ---key"),
+    # F1 item B17: a two-character word starting with - is a flag to Go's flag package.
+    (
+        "a two-character flag word",
+        "faultctl tamper del-k -k u000003",
+        "flag provided but not defined: -k",
+    ),
+    (
+        "a flag name starting with =",
+        "faultctl tamper del-k -=u000003",
+        "bad flag syntax: -=u000003",
+    ),
+    (
+        "an unknown flag",
+        "faultctl tamper del-k --keys u000003",
+        "flag provided but not defined: -keys",
+    ),
+    ("a flag with no value", "faultctl tamper del-k --key", "flag needs an argument: -key"),
+    ("del-k without --key", "faultctl tamper del-k", "tamper del-k needs --key"),
+    (
+        "corrupt-field without --field",
+        "faultctl tamper corrupt-field --key u000003 --value 5",
+        "tamper corrupt-field needs --field",
+    ),
+    (
+        "corrupt-field without --value",
+        "faultctl tamper corrupt-field --key u000003 --field u",
+        "tamper corrupt-field needs --value",
+    ),
+    (
+        "retype-shared without --target",
+        "faultctl tamper retype-shared",
+        "tamper retype-shared needs --target",
+    ),
+    (
+        "add-bad-ix with --target",
+        "faultctl tamper add-bad-ix --target ix",
+        "tamper add-bad-ix takes no --target",
+    ),
+    # Was REF9D's "add-bad-ix naming its key (faultctl takes no --key there)", which excused
+    # nothing: faultctl refuses the command, so it is malformed input.
+    (
+        "add-bad-ix with --key",
+        "faultctl tamper add-bad-ix --key u000003",
+        "tamper add-bad-ix takes no --key",
+    ),
+    (
+        "del-hwm with --key",
+        "faultctl tamper del-hwm --key u000003",
+        "tamper del-hwm takes no --key",
+    ),
+    (
+        "a tamper with --epoch",
+        f"faultctl tamper del-hwm --epoch {WELL_FORMED_ID}",
+        "--epoch: the orchestrator refuses it, as a run tampers in its own fresh epoch",
+    ),
+    (
+        "retype-shared of another target",
+        "faultctl tamper retype-shared --target k",
+        "--target 'k': want ix, q or epoch",
+    ),
+    (
+        "corrupt-record --value without --field",
+        "faultctl tamper corrupt-record --value 5",
+        "--value needs --field",
+    ),
+    (
+        "corrupt-record with an empty --field",
+        "faultctl tamper corrupt-record --field=",
+        "--field must not be empty",
+    ),
+    (
+        "corrupt-field with an empty --field",
+        "faultctl tamper corrupt-field --key u000003 --field= --value 5",
+        "--field must not be empty",
+    ),
+    (
+        "del-bucket-fields of a field no bucket holds",
+        "faultctl tamper del-bucket-fields --key u000003 --field m",
+        "--field 'm': want one of u, t, g, s, x, mc",
+    ),
+    (
+        "del-marker with a malformed --member",
+        "faultctl tamper del-marker --key u000003 --member 1",
+        "--member '1': want g:s, two decimal numbers",
+    ),
+    (
+        "del-mi-member with a signed --member",
+        "faultctl tamper del-mi-member --key u000003 --member 1:+2",
+        "--member '1:+2': want g:s, two decimal numbers",
+    ),
+    (
+        "del-marker with a --member beyond int64",
+        f"faultctl tamper del-marker --key u000003 --member {2**63}:1",
+        f"--member '{2**63}:1': want g:s, two decimal numbers",
+    ),
+    # More digits than Python's int() converts (4,300): refused as input, not a traceback.
+    (
+        "api kill of a 5,000-digit N",
+        f"faultctl api kill {'9' * 5000}",
+        f"instance '{'9' * 5000}': {ONE_INSTANCE}",
+    ),
+]
+
+
+def cmd_refused(tmp_path: Path, case: str, cmd: str, reason: str) -> None:
+    """The closed run with cmd as its second fault fails as input, naming that fault, the field
+    cmd and reason, and nothing else fails."""
+    world = make_world(tmp_path, closed_faults=[STORE_DOWN, fault_record(cmd, WITHIN)])
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    assert failed(lines) == [(CLOSED, IDS["closed"], "input")], (case, lines)
+    detail = f"context.json: faults[1]: field cmd: {cmd!r}: {reason}"
+    assert rest(lines)[0] == f"FAIL {CLOSED} {IDS['closed']} input: {detail}", (case, lines)
+
+
+@pytest.mark.parametrize(
+    ("case", "cmd", "reason"), FAULT_CMD_ERRORS, ids=[c for c, _, _ in FAULT_CMD_ERRORS]
+)
+def test_malformed_fault_command(tmp_path: Path, case: str, cmd: str, reason: str) -> None:
+    """A context.json fault whose cmd is neither faultctl's command line nor one JSON object, or a
+    faultctl command ParseFaultCommand or the orchestrator's preflight refuses where completion
+    reads it (its command word; api kill's words and N; a tamper's operation, flag syntax, flag
+    names, the flags it needs or takes, --epoch, and the values completion reads) fails the run as
+    input, naming the fault and the field cmd: completion never reads a malformed command as
+    something else, or passes over it."""
+    cmd_refused(tmp_path, case, cmd, reason)
+
+
+# F1 item B11: every per-operation flag rule of faultctl's tamper parser. GO_TAMPER_FLAGS copies
+# harness/fixtures tamperFlags literally: per operation, the flags it requires, then those it may
+# take (--epoch, open to every operation there, aside: the preflight refuses it). Among the flags
+# the parser defines (fs.StringVar), each one an operation requires is left out in turn ("tamper
+# <op> needs --<f>"), and each one it does not take is added to the flags it requires ("tamper <op>
+# takes no --<f>"). Every other flag carries FLAG_VALUES' value, one faultctl takes, so only the
+# rule fails.
+GO_TAMPER_FLAGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "del-bucket-fields": (("key",), ("field",)),
+    "del-k": (("key",), ()),
+    "del-mi": (("key",), ()),
+    "del-ix": (("key",), ()),
+    "del-mi-member": (("key", "member"), ()),
+    "del-marker": (("key", "member"), ()),
+    "corrupt-field": (("key", "field", "value"), ()),
+    "add-bad-ix": ((), ("member", "value")),
+    "retype-shared": (("target",), ()),
+    "corrupt-record": ((), ("field", "value")),
+    "del-hwm": ((), ()),
+    "wipe": ((), ()),
+}
+FLAG_VALUES = {"key": "u000003", "member": "1:1", "field": "u", "value": "5", "target": "ix"}
+
+
+def tamper_cmd(op: str, flags: Sequence[str]) -> str:
+    """faultctl tamper op with each of flags, carrying its FLAG_VALUES value."""
+    return " ".join(["faultctl tamper", op, *(f"--{name} {FLAG_VALUES[name]}" for name in flags)])
+
+
+TAMPER_FLAG_RULES: list[tuple[str, str, str]] = [
+    *(
+        (
+            f"{op} without --{name}",
+            tamper_cmd(op, [other for other in required if other != name]),
+            f"tamper {op} needs --{name}",
+        )
+        for op, (required, _) in GO_TAMPER_FLAGS.items()
+        for name in required
+    ),
+    *(
+        (f"{op} with --{name}", tamper_cmd(op, [*required, name]), f"tamper {op} takes no --{name}")
+        for op, (required, optional) in GO_TAMPER_FLAGS.items()
+        for name in FLAG_VALUES
+        if name not in required and name not in optional
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "cmd", "reason"), TAMPER_FLAG_RULES, ids=[c for c, _, _ in TAMPER_FLAG_RULES]
+)
+def test_tamper_flags_per_operation(tmp_path: Path, case: str, cmd: str, reason: str) -> None:
+    """A tamper command without a flag its operation requires, or with a flag the parser defines
+    that its operation does not take (harness/fixtures tamperFlags, each rule; F1 item B11), fails
+    the run as input, naming the fault, the field cmd and the rule: completion never reads it as
+    the tamper it resembles (del-k --field u as del-k of its key, say)."""
+    cmd_refused(tmp_path, case, cmd, reason)
+
+
+# The code points Go's unicode.IsSpace takes, at which strings.Fields splits a faultctl cmd's words
+# (F1 item B12): Unicode's White_Space, U+0009 to U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000 to
+# U+200A, U+2028, U+2029, U+202F, U+205F and U+3000, from Go's unicode/tables.go _White_Space
+# copied literally (each Range16 as its lo, hi and stride).
+GO_WHITE_SPACE = [
+    *range(0x0009, 0x000D + 1, 1),
+    *range(0x0020, 0x0085 + 1, 101),
+    *range(0x00A0, 0x1680 + 1, 5600),
+    *range(0x2000, 0x200A + 1, 1),
+    *range(0x2028, 0x2029 + 1, 1),
+    *range(0x202F, 0x205F + 1, 48),
+    *range(0x3000, 0x3000 + 1, 1),
+]
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "faultctl api kill 1",
+        "faultctl api kill +1 --restart",
+        "faultctl api kill 01 --restart",
+        "faultctl api kill 0000000000000000000001 --restart",
+        "faultctl  api\tkill  1   --restart",
+        "faultctl api\u3000kill 1 --restart",
+        *(
+            pytest.param(
+                f"faultctl api{chr(c)}kill{chr(c)}1{chr(c)}--restart", id=f"U+{c:04X} between words"
+            )
+            for c in GO_WHITE_SPACE
+        ),
+    ],
+)
+def test_kill_command_forms(tmp_path: Path, cmd: str) -> None:
+    """api kill <N> [--restart] as ParseFaultCommand takes it, N as strconv.Atoi reads it (a sign,
+    or leading zeros past 19 digits) and the words split at any Unicode white space after
+    "faultctl " (strings.Fields: each code point of Go's unicode.IsSpace, F1 item B12): the
+    pre_kill line takes the kill, and d1, with no final event, is excused."""
+    world = kill_world(tmp_path, killed_log(released("d1", None)), {**kill_fault(), "cmd": cmd})
+    code, lines = check(world.manifest())
+    assert code == 1 and failed(lines) == [] and skips(lines) == [], (cmd, lines)
+    assert ", excluded killed 1, " in lines[-1], (cmd, lines)
+
+
+def test_fault_command_completion_does_not_read(tmp_path: Path) -> None:
+    """A faultctl clock command, whose arguments completion does not read (nor a store command's:
+    the closed run's store down), passes unchecked."""
+    clock = fault_record("faultctl clock advance 1000000", WITHIN)
+    world = make_world(tmp_path, closed_faults=[STORE_DOWN, clock])
+    holds(world.manifest())
 
 
 # The s3-busy-user rerun.
@@ -1707,6 +4230,8 @@ def test_run_input_errors(tmp_path: Path) -> None:
     assert not any("Traceback" in line for line in lines)
 
 
+# d-ok's request line (s6_lines: its request arriving 1 s after the others, at T0 + 7 s), again.
+D_OK_REQUEST = released("d-ok", None, arrival_ns=T0_WALL_NS + 7 * SECOND)[-1]
 # Run-log lines appended to the closed run's api-1.jsonl after its report was built, and the
 # input failure's detail.
 LOG_ERRORS: list[tuple[str, list[Line], str]] = [
@@ -1734,6 +4259,29 @@ LOG_ERRORS: list[tuple[str, list[Line], str]] = [
         "a final event before its release",
         released("d-new", final_event("d-new", took_ns=-1)),
         "field final_mono_ns: before release_mono_ns",
+    ),
+    # Judgment RP1: a request line joined to a release is read once, and its user_id and
+    # decision_ns are its decision line's (hitapi writes both from one acquire): a decision_ns
+    # 1 above its decision line's and 1 below it both fail (judgment RB2).
+    (
+        "a second request line",
+        [D_OK_REQUEST],
+        "field deduction_id: d-ok: a second request line",
+    ),
+    (
+        "a request line whose user_id is not its decision line's",
+        [*released("d-new", None)[:2], {**released("d-new", None)[2], "user_id": "u000009"}],
+        "field user_id: 'u000009': its decision line has user_id 'u000003'",
+    ),
+    (
+        "a request line whose decision_ns is not its decision line's",
+        [*released("d-new", None)[:2], {**released("d-new", None)[2], "decision_ns": DECIDED + 1}],
+        f"field decision_ns: {DECIDED + 1}: its decision line has decision_ns {DECIDED}",
+    ),
+    (
+        "a request line whose decision_ns is 1 below its decision line's",
+        [*released("d-new", None)[:2], {**released("d-new", None)[2], "decision_ns": DECIDED - 1}],
+        f"field decision_ns: {DECIDED - 1}: its decision line has decision_ns {DECIDED}",
     ),
 ]
 
@@ -1809,10 +4357,28 @@ BAD_RECORDS: list[tuple[str, Line, str, str]] = [
     ("a request with an unknown field", {**A_REQUEST, "extra": 1}, "extra", "unknown field"),
     ("a request without db_ns", without(A_REQUEST, "db_ns"), "db_ns", "missing"),
     (
+        "a request whose arrival_ns is no integer",
+        {**A_REQUEST, "arrival_ns": 1.5},
+        "arrival_ns",
+        "want an integer",
+    ),
+    (
+        "a request with a negative arrival_ns",
+        {**A_REQUEST, "arrival_ns": -1},
+        "arrival_ns",
+        "-1: want at least 0",
+    ),
+    (
         "a request whose limiter_ns is no integer",
         {**A_REQUEST, "limiter_ns": 1.0},
         "limiter_ns",
         "want an integer",
+    ),
+    (
+        "a request with a negative total_ns",
+        {**A_REQUEST, "total_ns": -1},
+        "total_ns",
+        "-1: want at least 0",
     ),
     ("a request whose error is no string", {**A_REQUEST, "error": 7}, "error", "want a string"),
     ("a request whose result is null", {**A_REQUEST, "result": None}, "result", "want a string"),
@@ -1821,6 +4387,26 @@ BAD_RECORDS: list[tuple[str, Line, str, str]] = [
         {**A_REQUEST, "http_status": 99},
         "http_status",
         "99: want at least 100",
+    ),
+    # Judgment RP1 and RP3: completion reads a request's user_id (its ERR-11 evidence, and the
+    # join's check) and decision_ns (the join's check) too.
+    (
+        "a request whose user_id is no string",
+        {**A_REQUEST, "user_id": 5},
+        "user_id",
+        "want a string",
+    ),
+    (
+        "a request whose decision_ns is no integer",
+        {**A_REQUEST, "decision_ns": 1.5},
+        "decision_ns",
+        "want an integer",
+    ),
+    (
+        "a request with a negative decision_ns",
+        {**A_REQUEST, "decision_ns": -1},
+        "decision_ns",
+        "-1: want at least 0",
     ),
     ("a release with an unknown field", {**A_RELEASE, "extra": 1}, "extra", "unknown field"),
     (
@@ -1965,6 +4551,105 @@ def test_malformed_record(tmp_path: Path, case: str, line: Line, field: str, rea
     assert rest(lines)[0].endswith(where), (case, lines)
 
 
+# Judgment RP4: hitapi measures limiter_ns and db_ns one after the other inside total_ns, which runs
+# from the arrival until the response was written (harness/httpapi hit.go), so a request line's
+# total_ns is at least limiter_ns + db_ns, on every request line: A_REQUEST (200, no permit,
+# limiter_ns 500 µs, db_ns 1.5 ms) and an ERR-11 refusal (limiter_ns 1.9 ms, db_ns 0), each with
+# total_ns at that sum and 1 ns below it, appended to the closed run's api-1.jsonl after its report
+# was built: (case, the line, its input failure's reason, or None when it is taken).
+TOTAL_NS_ROWS: list[tuple[str, Line, str | None]] = [
+    (
+        "a request whose total_ns is its limiter_ns + db_ns",
+        {**A_REQUEST, "total_ns": 2_000_000},
+        None,
+    ),
+    (
+        "a request whose total_ns is 1 ns below its limiter_ns + db_ns",
+        {**A_REQUEST, "total_ns": 1_999_999},
+        "1999999: below its limiter_ns 500000 + db_ns 1500000 = 2000000, which hitapi measures "
+        "inside it",
+    ),
+    (
+        "an ERR-11 refusal whose total_ns is its limiter_ns + db_ns",
+        {**integrity_refusal(REFUSED_AT, user=OTHER_USER), "total_ns": REFUSED_LIMITER_NS},
+        None,
+    ),
+    (
+        "an ERR-11 refusal whose total_ns is 1 ns below its limiter_ns + db_ns",
+        {**integrity_refusal(REFUSED_AT, user=OTHER_USER), "total_ns": REFUSED_LIMITER_NS - 1},
+        "1899999: below its limiter_ns 1900000 + db_ns 0 = 1900000, which hitapi measures inside "
+        "it",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case", "line", "reason"), TOTAL_NS_ROWS, ids=[c for c, _, _ in TOTAL_NS_ROWS]
+)
+def test_request_total_ns_covers_its_parts(
+    tmp_path: Path, case: str, line: Line, reason: str | None
+) -> None:
+    """A request line whose total_ns is below its limiter_ns + db_ns, which hitapi measures inside
+    it, fails the run as input, naming the file, the line and the field total_ns, whatever the
+    line answered (judgment RP4); one whose total_ns is that sum is taken."""
+    world = make_world(tmp_path)
+    log = world.run("closed").joinpath("api-1.jsonl")
+    count = len(log.read_text(encoding="utf-8").splitlines())
+    rewrite_log(world.run("closed"), lambda lines: [*lines, line])
+    code, lines = check(world.manifest())
+    assert code == 1, case
+    if reason is None:
+        assert failed(lines) == [] and skips(lines) == [], (case, lines)
+        return
+    assert failed(lines) == [(CLOSED, IDS["closed"], "input")], (case, lines)
+    where = f"input: api-1.jsonl: line {count + 1}: field total_ns: {reason}"
+    assert rest(lines)[0].endswith(where), (case, lines)
+
+
+# Verifier astra's shape (judgment RP4): d1's key damaged (DEL_K_WITHIN), and its only ERR-11
+# refusal arriving 1 ms before LOSS_BOUND with limiter_ns 1.9 ms. With total_ns 0 its acquire would
+# seem done by LOSS_BOUND - 1 ms and excuse d1; hitapi cannot write that total_ns, so the line is an
+# input error. With total_ns 1.9 ms, the least it can be, the acquire was done by 976 µs past
+# LOSS_BOUND (1.9 ms + 76,000 ns of slew - 1 ms), and d1 fails.
+ASTRA_ARRIVAL = LOSS_BOUND - MS
+
+
+@pytest.mark.parametrize(
+    ("total_ns", "check_name", "detail"),
+    [
+        (
+            0,
+            "input",
+            "field total_ns: 0: below its limiter_ns 1900000 + db_ns 0 = 1900000, which hitapi "
+            "measures inside it",
+        ),
+        (
+            REFUSED_LIMITER_NS,
+            "refund_completion",
+            "deduction d1: released 2000000 ns after just before its acquire (limiter_ns + db_ns, "
+            "within P 5000000000): final event unresolved (retention): not confirmed",
+        ),
+    ],
+    ids=["total_ns 0", "total_ns its limiter_ns"],
+)
+def test_refusal_total_ns_below_its_limiter_ns(
+    tmp_path: Path, total_ns: int, check_name: str, detail: str
+) -> None:
+    """An ERR-11 refusal 1 ms before d1's deadline bound with limiter_ns 1.9 ms and total_ns 0 is
+    an input error, not evidence that excuses d1 (judgment RP4); with total_ns 1.9 ms its acquire
+    was done past the bound, so d1, unresolved on retention, fails."""
+    refusal = {**integrity_refusal(ASTRA_ARRIVAL), "total_ns": total_ns}
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", [*released("d1", RETENTION), refusal]),
+        closed_faults=[STORE_DOWN, DEL_K_WITHIN],
+    )
+    code, lines = check(world.manifest())
+    assert code == 1, total_ns
+    assert failed(lines) == [(CLOSED, IDS["closed"], check_name)], (total_ns, lines)
+    assert rest(lines)[0].endswith(detail), (total_ns, lines)
+
+
 INT64_MAX = 2**63 - 1
 PRE_KILL: Line = {"event": "pre_kill", "read_ok": True}  # makes a stop line a pre_kill line
 # The integers completion reads from a run log, each an int64 as the Go writers write it, the
@@ -1980,14 +4665,15 @@ CAPPED: list[tuple[str, int, str, dict[int, Line]]] = [
     ("a start line's dependency_deadline_ns", 0, "dependency_deadline_ns", {}),
     ("a start line's drain_timeout_ns", 0, "drain_timeout_ns", {}),
     ("a start line's nofile_limit", 0, "nofile_limit", {}),
-    ("a decision's decision_ns", 2, "decision_ns", {}),
+    # A request's decision_ns is its decision line's (judgment RP1): each edit keeps them equal.
+    ("a decision's decision_ns", 2, "decision_ns", {5: {"decision_ns": INT64_MAX}}),
     ("a release's release_mono_ns", 3, "release_mono_ns", {}),
     ("a final event's attempts", 4, "attempts", {}),
     (
         "a final event's credit_decision_ns",
         4,
         "credit_decision_ns",
-        {2: {"decision_ns": INT64_MAX}},
+        {2: {"decision_ns": INT64_MAX}, 5: {"decision_ns": INT64_MAX}},
     ),
     (
         "a final event's release_mono_ns",
@@ -2002,8 +4688,12 @@ CAPPED: list[tuple[str, int, str, dict[int, Line]]] = [
         {4: {"release_mono_ns": INT64_MAX - 7 * MS}},
     ),
     ("a request's http_status", 5, "http_status", {}),
-    ("a request's limiter_ns", 5, "limiter_ns", {}),
-    ("a request's db_ns", 5, "db_ns", {}),
+    ("a request's decision_ns", 5, "decision_ns", {2: {"decision_ns": INT64_MAX}}),
+    ("a request's arrival_ns", 5, "arrival_ns", {}),
+    # A request's total_ns covers its limiter_ns + db_ns (judgment RP4): each edit keeps it so.
+    ("a request's limiter_ns", 5, "limiter_ns", {5: {"total_ns": INT64_MAX}}),
+    ("a request's db_ns", 5, "db_ns", {5: {"limiter_ns": 0, "total_ns": INT64_MAX}}),
+    ("a request's total_ns", 5, "total_ns", {}),
     ("a stop line's listener_drops", 6, "listener_drops", {}),
     ("a stop line's log_drops", 6, "log_drops", {}),
     ("a pre_kill line's listener_drops", 6, "listener_drops", {6: PRE_KILL}),
@@ -2035,8 +4725,10 @@ def test_run_log_integer_at_int64_max(
 ) -> None:
     """Each integer completion reads from a run log may be 2^63 − 1, int64's largest: another
     process appended to the closed run's log with it there fails no check, and its release is
-    read and confirmed in time (3 releases: the two S6 runs' d-ok and its d-x)."""
-    world = make_world(tmp_path)
+    read and confirmed in time (3 releases: the two S6 runs' d-ok and its d-x). context.json
+    records a kill (kill_fault: after d-x's request), which a tail ending with a pre_kill line
+    takes."""
+    world = make_world(tmp_path, closed_faults=[STORE_DOWN, kill_fault()])
     tail = capped_tail(index, field, INT64_MAX, edits)
     rewrite_log(world.run("closed"), lambda lines: [*lines, *tail])
     code, lines = check(world.manifest())
@@ -2103,8 +4795,13 @@ def test_pre_kill_is_a_kill_only_when_one(
     """A covered release whose final event is missing is excused as killed only by a pre_kill
     line that is one, with no stop line after it: a bare pre_kill line fails the run as input
     before any exclusion applies, and a process that wrote its stop line after a pre_kill line
-    drained and closed, so it was not killed and the release fails."""
-    world = make_world(tmp_path, closed=s6_lines("closed", released("d1", final_event("d1"))))
+    (matched to context.json's kill) drained and closed, so it was not killed and the release
+    fails."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", released("d1", final_event("d1"))),
+        closed_faults=[STORE_DOWN, kill_fault()],
+    )
     rewrite_log(world.run("closed"), unconfirmed_d1(tail))
     code, lines = check(world.manifest())
     assert code == 1, case
@@ -2112,10 +4809,17 @@ def test_pre_kill_is_a_kill_only_when_one(
     assert detail in rest(lines)[0], (case, lines)
 
 
-def test_pre_kill_ends_the_segment(tmp_path: Path) -> None:
+@pytest.mark.parametrize("restart", [True, False])
+def test_pre_kill_ends_the_segment(tmp_path: Path, restart: bool) -> None:
     """The same unconfirmed release in a segment that ends with a pre_kill line (its stop line
-    replaced by one) is excused: its process was killed right after it."""
-    world = make_world(tmp_path, closed=s6_lines("closed", released("d1", final_event("d1"))))
+    replaced by one) is excused: its process was killed right after it (kill_fault, with or
+    without --restart: K_hi 1.038 s after its release, the file's last segment, so the kill's end
+    bounds it)."""
+    world = make_world(
+        tmp_path,
+        closed=s6_lines("closed", released("d1", final_event("d1"))),
+        closed_faults=[STORE_DOWN, kill_fault(restart=restart)],
+    )
     rewrite_log(world.run("closed"), unconfirmed_d1([lifecycle("pre_kill")]))
     code, lines = check(world.manifest())
     assert code == 1 and failed(lines) == [] and skips(lines) == [], lines

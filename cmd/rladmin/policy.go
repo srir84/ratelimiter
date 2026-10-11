@@ -62,9 +62,21 @@ type policyInfo struct {
 const maxPolicyBytes = 1 << 20
 
 // loadPolicy reads and decodes the policy file at path (decodePolicy). Only a regular file is
-// read, so loading cannot wait without bound (AGENTS.md §2): a FIFO, a device or any other
-// file is refused unopened, and the open (O_NONBLOCK: a FIFO swapped in meanwhile does not
-// wait for a writer) is checked again before reading. At most maxPolicyBytes are read.
+// read, so no file can make loading wait for a writer or a device (AGENTS.md §2): a FIFO, a
+// device or any other file is refused unopened, and the open (O_NONBLOCK: a FIFO swapped in
+// meanwhile does not wait for a writer) is checked again before reading. At most
+// maxPolicyBytes are read.
+//
+// loadPolicy takes no ctx because nothing in it could observe one: a stat or read that a hung
+// network mount holds in the kernel does not return, Go restarts a syscall that a signal
+// interrupts (EINTR), and a regular file takes no deadline (os.ErrNoDeadline). A signal during
+// a slow load is still honoured before any connection: run then hands the cancelled ctx to
+// dial, which opens none (exit 3). A SIGINT or SIGTERM after the first has been handled takes
+// its default action (signalContext), which ends rladmin by that signal (with no exit code)
+// even while the load waits, unless the kernel holds that call uninterruptibly (a macOS hard
+// mount without intr, where even SIGKILL waits). A SIGINT that was ignored when rladmin
+// started (a script's background job) still cancels the first time, but is ignored again once
+// the first signal has been handled, so from then on only SIGTERM ends rladmin.
 func loadPolicy(path string) (policyInfo, error) {
 	fi, err := os.Stat(path)
 	if err != nil {

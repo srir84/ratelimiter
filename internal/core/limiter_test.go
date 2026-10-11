@@ -19,15 +19,21 @@ import (
 )
 
 // The lifecycle tests build limiters through newLimiter with a hookSet, so they run in the
-// untagged build too. Their order in this file matters to bin/mutate --sweep, which runs
-// without -shuffle and with -failfast: TestNewSignerWrapper builds no limiter, so a
-// newSigner mutant fails it before a limiter without a signer wrapper reaches newSigner;
-// TestCloseRefundsAndListener, the first limiter with a refund listener and a refund pending
-// at Close, fails a mutant of Close's drain or listener stop, or of Health's ListenerDrops,
-// before TestCloseStopsWatchThenAdapter's limiter without a listener, or its settings_invalid
-// instance, can crash on it; and TestCloseStopsWatchThenAdapter fails a shutdown mutant that
-// TestCloseRefundsAndListener misses before any later Close. effects_test.go's tests, which
-// build no limiter, run before all of them (file name order).
+// untagged build too. Their order in this file was chosen for bin/mutate --sweep, which runs
+// without -shuffle and with -failfast (S5, S6): TestNewSignerWrapper, which builds no limiter,
+// runs before this file's limiters, which have no signer wrapper, reach newSigner, and
+// TestCloseRefundsAndListener, the first limiter here with a refund listener and a refund
+// pending at Close, runs before TestCloseStopsWatchThenAdapter's limiter without a listener and
+// its settings_invalid instance. effects_test.go's tests, which build no limiter, run before
+// all of them (file name order). Since S7, cleanup_test.go's limiters, which have no listener
+// and no signer wrapper, and its settings_invalid instance run before all of them too, and
+// reach newSigner, Health and Close; and TestCloseRefundsAndListener dereferences its
+// listener. A mutant that would crash there fails a background_test.go test before: those run
+// first in the untagged build, which bin/mutate runs first.
+// TestBackgroundCloseStopsRefundsAndListener fails those of Close's and shutdown's nil guards
+// and of Health's ListenerDrops, TestBackgroundNewSignerWrapper that of newSigner's wrapper
+// check, and TestBackgroundNewBuildsRefundListener those of newLimiter's Option loop and
+// listener construction.
 
 // lifecycleWait bounds every wait of the lifecycle tests.
 const lifecycleWait = 5 * time.Second
@@ -204,10 +210,11 @@ func TestNewSignerWrapper(t *testing.T) {
 // Close on a running instance with a refund listener and one refund pending that cannot end
 // (the instance never joins an epoch, so each attempt sends nothing and is retried) returns no
 // earlier than its 100 ms drain timeout and within 5 s, the refund ended unresolved (closed),
-// and the listener's dispatcher stopped: once it has returned, the refund's event is delivered
-// or, the drain deadline having passed, dropped and counted. A release() after Close ends
-// unresolved (closed), and its event is dropped and counted, never delivered; Health's
-// ListenerDrops is the listener's count, and every slot is free.
+// and the listener's dispatcher stopped; the refund's event, queued at the drain's end, was
+// delivered before Close returned and nothing was dropped (API-1d drops an event only on
+// overflow). A release() after Close ends unresolved (closed), and its event is dropped and
+// counted, never delivered; Health's ListenerDrops is the listener's count, and every slot is
+// free.
 func TestCloseRefundsAndListener(t *testing.T) {
 	p, in := lifecycleSettings()
 	in.DrainTimeoutNs = 100_000_000
@@ -237,17 +244,17 @@ func TestCloseRefundsAndListener(t *testing.T) {
 	if st := pending.life.load(); st != stateFinal {
 		t.Fatalf("the pending refund's permit is %v after Close, want FINAL: the drain's end ends it unresolved (closed)", st)
 	}
+	evs, drops := sink.untimed(t), l.lis.drops.Load()
+	if len(evs) != 1 || drops != 0 {
+		t.Fatalf("when Close returned: %d event(s) delivered and %d dropped, want 1 and 0: the drain's end emits one, and the queue has room for it", len(evs), drops)
+	}
+	if want := (RefundEvent{DeductionID: pending.DeductionID(), Result: Unresolved, Reason: UnresolvedClosed}); evs[0] != want {
+		t.Fatalf("event %+v, want %+v (0 attempts: nothing was sent)", evs[0], want)
+	}
 	select {
 	case <-l.lis.exited:
 	case <-time.After(lifecycleWait):
 		t.Fatalf("the listener's dispatcher had not returned %v after Close", lifecycleWait)
-	}
-	evs, drops := sink.untimed(t), l.lis.drops.Load()
-	if uint64(len(evs))+drops != 1 {
-		t.Fatalf("%d event(s) delivered and %d dropped, want 1 in all: the drain's end emits one", len(evs), drops)
-	}
-	if want := (RefundEvent{DeductionID: pending.DeductionID(), Result: Unresolved, Reason: UnresolvedClosed}); len(evs) == 1 && evs[0] != want {
-		t.Fatalf("event %+v, want %+v (0 attempts: nothing was sent)", evs[0], want)
 	}
 	if h := l.Health(); h.ListenerDrops != drops {
 		t.Fatalf("Health().ListenerDrops %d, want the listener's %d", h.ListenerDrops, drops)

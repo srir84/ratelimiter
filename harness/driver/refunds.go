@@ -89,14 +89,14 @@ func (a RefundAttempt) record() attemptRecord {
 	return attemptRecord{Code: a.Code(), TUs: a.TUs(), Credited: a.Credited()}
 }
 
-// lateRecord is the entry of a refund call whose outcome the limiter did not act on: it had
-// already finalized the permit when the call returned (the retention timer fired while it was
-// in flight; orchestrator decision, S6 task 2), or it counted the call and then lost the permit
-// to the retention timer before ending it with the call's final reply (orchestrator decision,
-// S6 review round 1). A call that sent a command, as every call with a store reply did, is
-// {"outcome_unknown", 0, 0}, so check_bud11 counts the credit it may have made; one that sent
-// nothing keeps its own code (unavailable, cancelled): it changed nothing. Either way the
-// record still ends with a code that is not final, as its result, unresolved, needs.
+// lateRecord is the entry of a refund call whose outcome the limiter did not act on: the
+// retention timer won the permit while the call was in flight (it cancels the call and its
+// event waits for the call to return, counting it; orchestrator decision, S6 task 2), or after
+// the worker counted the call and before it ended the permit with the call's final reply
+// (orchestrator decision, S6 review round 1). A call that sent a command, as every call with a
+// store reply did, is {"outcome_unknown", 0, 0}, so check_bud11 counts the credit it may have
+// made; one that sent nothing keeps its own code (unavailable, cancelled): it changed nothing.
+// Either way the record ends with a code that is not final, as an unresolved result needs.
 func (a RefundAttempt) lateRecord() attemptRecord {
 	if a.Response.SentCommands > 0 {
 		return attemptRecord{Code: "outcome_unknown"}
@@ -197,9 +197,10 @@ func deductionOf(req store.Request) string {
 	return receipt.DeductionID(receipt.Receipt{EpochID: id, Enc: req.Args[2], G: g, S: s})
 }
 
-// refund runs one refund call through the store wrapper and records the attempt. A call that
-// returns after its permit's first final event reached the driver goes into that event's
-// refund record too (lateLocked).
+// refund runs one refund call through the store wrapper and records the attempt, before the
+// limiter's worker gets its response. A call that returns after its permit's first final event
+// reached the driver would go into that event's refund record too (lateLocked); the limiter
+// emits no final event while a refund call of the permit is in flight, so this is a guard.
 func (r recorder) refund(ctx context.Context, req store.Request) store.Response {
 	c := &refundCall{}
 	res := r.Adapter.Call(context.WithValue(ctx, refundKey{}, c), req)
@@ -303,13 +304,15 @@ func (d *Driver) noteEvent(in *instance, ev limiter.RefundEvent) {
 }
 
 // attemptRecords is the attempts list of ev's refund record: the permit's captured calls in
-// order. For an unresolved event, a call whose sent commands take the running total past
-// ev.Attempts is one the limiter had not counted when it finalized the permit: it was still in
-// flight when the retention timer fired, and returned before the event reached the driver, so
-// it gets its lateRecord (orchestrator decision, S6 task 2). So does a call with a final reply
-// the event counted: the worker counts a call's commands before it ends the permit, and the
-// retention timer won the permit in between (orchestrator decision, S6 review round 1). Any
-// other event counts every call it follows (API-1d), and its calls keep their codes.
+// order. For an unresolved event, a call with a final reply gets its lateRecord: the limiter
+// counted the call's commands (API-1d) but did not act on its outcome, since the retention
+// timer won the permit, either between the worker's count and its end of the permit
+// (orchestrator decision, S6 review round 1) or while the call was in flight, which the timer
+// cancels and whose return the event waits for (orchestrator decision, S6 task 2). So, as a
+// guard, does a call whose sent commands take the running total past ev.Attempts, one the
+// limiter had not counted when it built the event; the limiter now counts every call that
+// returns before the event. Any other event counts every call it follows (API-1d), and its
+// calls keep their codes.
 func attemptRecords(as []RefundAttempt, ev limiter.RefundEvent) []attemptRecord {
 	out := make([]attemptRecord, 0, len(as))
 	sent := 0
@@ -326,8 +329,10 @@ func attemptRecords(as []RefundAttempt, ev limiter.RefundEvent) []attemptRecord 
 
 // lateLocked adds a, a refund call that returned after its permit's first final event reached
 // the driver, to that event's refund record, which the op log keeps until teardown: the
-// limiter had finalized the permit before it learned the call's outcome, so the entry is the
-// call's lateRecord (orchestrator decision, S6 task 2). d.mu is held.
+// limiter would have finalized the permit before it learned the call's outcome, so the entry
+// is the call's lateRecord (orchestrator decision, S6 task 2). It is a guard: the limiter's
+// retention timer cancels a call in flight and its event waits for the call to return, and
+// Close's drain ends refunds only after the workers stopped. d.mu is held.
 func (d *Driver) lateLocked(rec *permitRec, a RefundAttempt) {
 	rec.refund.Attempts = append(rec.refund.Attempts, a.lateRecord())
 	b, err := json.Marshal(rec.refund)

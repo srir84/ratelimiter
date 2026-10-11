@@ -11,20 +11,26 @@
 #   40 s  instance 2 killed and restarted (FLT-6): its pre_kill record (read_ok) comes first, and
 #         the refunds it still holds have a release but no final event, the unknown-time
 #         credits of T-HFLT-4 ([acquire decision_ns, + receipt lifetime)).
-# The seed (plan choice) gives instance 2, between 39 s and 40 s, five requests selected for the
-# refusal after acquire (u000017 at 39.49 s, u000002 at 39.62 s and 39.63 s, u000012 at 39.86 s,
-# u000007 at 39.88 s), whose refunds the kill leaves without a final event. The run proves those
-# unknown-time credits are counted, not that the verdict needs them: no key is at its bound where
-# they lie. The users above their 10/s rate (zipf_s 1.1 gives u000000 to u000003 13-62/s) reach
-# the bound only in the run's first seconds, from a full bucket: a window across the store pause
-# keeps at least 25 tokens of slack (the bound counts 45 tokens of refill there, a bucket holds
-# 20), and after it their buckets stay drained, so a window starting there keeps about a capacity
-# of slack; the other users stay below their rate. A search of 120 seeds (their schedules, with
-# the buckets and faults simulated) found none where such a credit binds under these faults. The
-# binding semantics, a credit anywhere in [acquire decision_ns, + receipt lifetime) allowing an
-# admission the bound would refuse without it, are covered by refmodel's unit tests
-# (refmodel/tests/test_check_bud11_runs.py: test_unknown_interval,
-# test_open_release_requires_later_kill).
+# The seed (plan choice) gives instance 2, between 39 s and 40 s, six requests selected for the
+# refusal after acquire: u000017 at 39.486 s, u000002 at 39.553 s and 39.623 s, u000012 at
+# 39.856 s, u000007 at 39.876 s, and u000001 at 39.995 s, as the kill begins. Those admitted
+# before the kill leave refunds without a final event. The run proves such unknown-time credits
+# are counted under real faults, not that the verdict needs them: TestT_HFLT_4/binding
+# (harness/e2e/hflt_test.go) shows a credit the verdict needs. Here none can bind, because the
+# store pause comes before the kill:
+#   - u000017, u000012 and u000007 never come near their bound: in no window do their arrivals
+#     pass the 10/s refill by more than 8 tokens, and a bucket holds 20;
+#   - zipf_s 1.1 gives u000000 to u000004 about 63, 29, 19, 14 and 11/s (the others 8.7/s and
+#     less), but this seed's schedule gives u000004 9.6/s, and in no window do the arrivals of
+#     u000004 to u000019 pass the refill by 20 tokens (u000004's come closest, 19.84), so only
+#     u000000 to u000003 can reach their bound;
+#   - they reach it only in windows that start at the run's start, from a full bucket, and end
+#     before the pause. A window that reaches the credits either spans the pause, which leaves it
+#     at least 25 tokens of slack (the bound counts 45 tokens of refill there, a bucket holds 20),
+#     or starts after the pause began: the acquires sent in the pause's first
+#     dependency_deadline run when the store resumes and take its refill with no decision
+#     record, and the buckets stay drained after that, so such a window keeps most of a
+#     capacity of slack.
 name = "hflt4-faults"
 seed = 9
 run_kind = "test"

@@ -21,9 +21,12 @@ import (
 // TestRefundTimersAndStop (the queue through refunds, next, the timers and stop: no worker, no
 // event and no settle of a pending refund), TestListenerWaitIdleWakes (the first listener that
 // delivers an event), TestRefundSettle (the first settle of a pending refund and the first
-// event emitted) and TestRefundWorkerAttempt (the first worker). limiter_test.go's
-// TestCloseRefundsAndListener, the first test to build a limiter with a listener, relies on
-// all of them.
+// event emitted) and TestRefundWorkerAttempt (the file's first worker). limiter_test.go's
+// TestCloseRefundsAndListener, the first test to close a limiter with a listener and a refund
+// pending, relies on all of them. Since S7, cleanup_test.go sorts before this file, and its
+// limiters start refund workers and Close: background_test.go's tests, which run first in the
+// untagged build (the build bin/mutate runs first), fail the mutants of the worker loop and of
+// Close's nil guards that those limiters crash on.
 
 // effectsWait bounds every wait of this file's tests.
 const effectsWait = 5 * time.Second
@@ -184,9 +187,10 @@ func TestRefundTimersAndStop(t *testing.T) {
 	}
 
 	// A worker takes the job, and its attempt is retried: the backoff timer is armed.
-	if got := nextWithin(t, r); got != p {
+	if got, _ := nextWithin(t, r); got != p {
 		t.Fatal("next() did not return the one queued job")
 	}
+	r.endAttempt(p)
 	r.retry(p)
 	r.mu.Lock()
 	backoff := p.backoff
@@ -215,8 +219,8 @@ func TestRefundTimersAndStop(t *testing.T) {
 	defer timeout.Stop()
 	ended := make(chan bool, 1) // buffered: a wait the test gave up on still ends
 	go func() {
-		q, ok := r.next()
-		ended <- q == nil && !ok
+		q, ctx, ok := r.next()
+		ended <- q == nil && ctx == nil && !ok
 	}()
 	select {
 	case e := <-ended:
@@ -315,9 +319,10 @@ func TestRefundSettle(t *testing.T) {
 	b := newPermit(sl, r, receipt.Receipt{}, "d1_b", time.Now())
 	a.Release()
 	b.Release()
-	if got := nextWithin(t, r); got != a {
+	if got, _ := nextWithin(t, r); got != a {
 		t.Fatal("next() did not return A, the earlier release")
 	}
+	r.endAttempt(a)
 	r.retry(a) // A's attempt was retried: it waits out a 1 h backoff, and B stays queued
 	r.mu.Lock()
 	aRetention, aBackoff := a.retention, a.backoff
@@ -371,9 +376,10 @@ func TestRefundSettle(t *testing.T) {
 		t.Fatalf("listener events %+v, want %+v: A's one event", got, want)
 	}
 
-	if got := nextWithin(t, r); got != b {
+	if got, _ := nextWithin(t, r); got != b {
 		t.Fatal("next() did not return B")
 	}
+	r.endAttempt(b) // B's attempt got its final result: the worker ends the attempt, then the job
 	b.finish(attemptResult{final: true, result: Applied, creditNs: creditNs})
 	select {
 	case ok := <-idle:

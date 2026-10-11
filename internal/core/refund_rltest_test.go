@@ -54,26 +54,6 @@ func waitEvents(t *testing.T, log *eventLog, n int) []RefundEvent {
 	return log.events()
 }
 
-// settled returns the events log received from l's refund listener and the listener's drops
-// once want events are delivered or dropped in all, or once the dispatcher has returned, and at
-// deadline at the latest. Close may return while the dispatcher is still inside the callback
-// (waitExit waits for none past the drain deadline), and that event is then neither delivered
-// nor dropped yet; once the dispatcher has returned, every event is one or the other.
-func settled(l *Limiter, log *eventLog, want uint64, deadline time.Time) ([]RefundEvent, uint64) {
-	for {
-		select {
-		case <-l.lis.exited:
-			return log.events(), l.Health().ListenerDrops
-		default:
-		}
-		evs, drops := log.events(), l.Health().ListenerDrops
-		if uint64(len(evs))+drops >= want || !time.Now().Before(deadline) {
-			return evs, drops
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
 // sequence is an acquire responder that allows with generation 1 and sequences 1, 2, 3, ….
 func sequence() func(store.Request) store.Response {
 	var s atomic.Int64
@@ -558,10 +538,11 @@ func TestRetentionTimer(t *testing.T) {
 	}
 }
 
-// TestCloseDrain (plan S6 step 7; SPEC API-1e, STA-15, T-REF-6 at L1): (a) refunds the store
-// refuses: Close(WithDrainTimeout(150 ms)) returns after about 150 ms with the refund ended
-// unresolved (closed) (its event delivered or, the drain deadline having passed, dropped and
-// counted), its slots freed, Acquire not_ready with nothing sent and Health closing;
+// TestCloseDrain (plan S6 step 7; SPEC API-1d, API-1e, STA-15, T-REF-6 at L1): (a) refunds the
+// store refuses: Close(WithDrainTimeout(150 ms)) returns after about 150 ms with the refund
+// ended unresolved (closed), its event delivered before Close returns and nothing dropped
+// (API-1d drops an event only on overflow), its slots freed, Acquire not_ready with nothing
+// sent and Health closing;
 // (b) a refund still in flight when Close begins is applied, and its event delivered, before
 // Close returns, and a release() during the drain ends unresolved (closed) at once, its event
 // delivered too; a second Close returns at once; (c) with nothing pending, a slow listener
@@ -580,15 +561,14 @@ func TestCloseDrain(t *testing.T) {
 		if d := time.Since(start); d < drain || d > drain+700*time.Millisecond {
 			t.Errorf("Close took %v, want the %v drain (+ at most 700 ms)", d, drain)
 		}
-		// The drain used its whole timeout, so the listener had no time left: the event is
-		// delivered only if the dispatcher took it at once, else dropped and counted (plan S6
-		// step 7: the listener queue is emptied only until the drain deadline). A dispatcher
-		// that took it may still be in the callback when Close returns: settled waits for it.
-		evs, drops := settled(l, log, 1, start.Add(waitMax))
-		if uint64(len(evs))+drops != 1 {
-			t.Fatalf("%d events delivered and %d dropped, want 1 in all", len(evs), drops)
+		// The drain used its whole timeout; its end queued the event, which Close lets the
+		// dispatcher deliver before it stops it (SPEC API-1d, API-1e: the remaining refunds emit
+		// unresolved (closed), and only an overflow drops an event).
+		evs, drops := log.events(), l.Health().ListenerDrops
+		if len(evs) != 1 || drops != 0 {
+			t.Fatalf("when Close returned: %d events delivered and %d dropped, want 1 and 0", len(evs), drops)
 		}
-		if len(evs) == 1 && (evs[0].Result != Unresolved || evs[0].Reason != UnresolvedClosed || evs[0].Attempts != 0) {
+		if evs[0].Result != Unresolved || evs[0].Reason != UnresolvedClosed || evs[0].Attempts != 0 {
 			t.Errorf("event %+v, want unresolved (closed) with 0 attempts", evs[0])
 		}
 		if got := counter(t, l, "rl_refund_results_total", "unresolved"); got != 1 {
@@ -702,6 +682,227 @@ func TestCloseDrain(t *testing.T) {
 	})
 }
 
+// TestCloseDeliversDrainEndEvents (SPEC API-1d, API-1e, STA-15, T-REF-6 (b); FLT-11 at L1):
+// after an epoch-wide state loss (the epoch record lost its hwm), every refund attempt is sent
+// and answered code 22 (hwm_missing), so it is retried, and the epoch watch is lost. With 32
+// refunds pending, Close(WithDrainTimeout(100 ms)) drains its whole timeout and ends them
+// unresolved (closed). Their 32 events, queued at the drain's end in a listener queue with room
+// for them, are all delivered before Close returns, though the listener takes 20 ms over the
+// first while the rest wait in the queue; each counts its sent attempts (≥ 1), and none is
+// dropped: API-1d drops an event only on overflow. Close returns within the drain plus the
+// listener's short grace.
+func TestCloseDeliversDrainEndEvents(t *testing.T) {
+	const (
+		n     = 32
+		drain = 100 * time.Millisecond
+	)
+	s := newTestStore(t)
+	p := testPolicy(Closed)
+	in := refundInstance(p)
+	in.MaxHeldReceipts, in.MaxPendingRefunds = n, n
+	fake := newFake(joined(p), sequence())
+	fake.setRefund(replies(okResp(22, 0, "hwm_missing")))
+	log := &eventLog{}
+	var slow sync.Once
+	l := s.ready(t, p, in, fake, Hooks{}, reasonReady, WithRefundListener(func(ev RefundEvent) {
+		slow.Do(func() { time.Sleep(20 * time.Millisecond) }) // a hand-off that is slow once
+		log.listen(ev)
+	}))
+	permits := make([]*Permit, 0, n)
+	for range n {
+		permits = append(permits, acquireOK(t, l))
+	}
+	fake.setEpoch(epochErr("hwm_missing")) // the early read that code 22 asks for finds the loss
+	for _, pm := range permits {
+		pm.Release()
+	}
+	waitFor(t, "the epoch watch lost (hwm_missing)", func() bool { return l.epoch.Load().state == wsLost })
+	waitFor(t, "a refund command sent for each of the 32 permits", func() bool {
+		seqs := map[string]bool{}
+		for _, r := range fake.requests("refund") {
+			seqs[r.Args[5]] = true // the receipt's sequence (§A4.1)
+		}
+		return len(seqs) == n
+	})
+
+	start := time.Now()
+	l.Close(WithDrainTimeout(drain))
+	took := time.Since(start)
+	evs, drops := log.events(), l.Health().ListenerDrops
+	if len(evs) != n || drops != 0 {
+		t.Fatalf("when Close returned: %d events delivered and %d dropped, want %d and 0: the drain's end queued them in a queue with room for them", len(evs), drops, n)
+	}
+	got := map[string]bool{}
+	for _, ev := range evs {
+		if ev.Result != Unresolved || ev.Reason != UnresolvedClosed || ev.Attempts < 1 {
+			t.Errorf("event %+v, want unresolved (closed) with its sent attempts counted (≥ 1)", ev)
+		}
+		got[ev.DeductionID] = true
+	}
+	for _, pm := range permits {
+		if !got[pm.DeductionID()] {
+			t.Errorf("no event for permit %s", pm.DeductionID())
+		}
+	}
+	if took < drain || took > drain+700*time.Millisecond {
+		t.Errorf("Close took %v, want its %v drain (+ at most 700 ms)", took, drain)
+	}
+	if v := counter(t, l, "rl_refund_results_total", "unresolved"); v != n {
+		t.Errorf("rl_refund_results_total{unresolved} = %v, want %d", v, n)
+	}
+	if got := slotsOf(l); got != (slotCounts{0, 0}) {
+		t.Errorf("slots in use %+v after Close, want 0 and 0", got)
+	}
+}
+
+// TestCloseListenerGrace (SPEC API-1d, API-1e, HOST-6; the 100 ms grace is the F1 decision
+// that departs from plan S6 step 7, which let the listener run only until the drain deadline,
+// to meet SPEC API-1d, API-1e, STA-15 and T-REF-6 (b)): both ends of the listener's grace past
+// a drain that used its whole timeout. The listener is blocked in its callback for an applied
+// refund, and a second refund, which the store refuses, is pending.
+// Close(WithDrainTimeout(100 ms)) ends it unresolved (closed) at the drain's end and waits for
+// the queue to empty for the whole 100 ms grace (no less), then stops the dispatcher without
+// waiting for the blocked callback (at most 100 ms more; the measured overhead is about 2 ms,
+// so a grace about 100 ms longer fails here; TestListenerGraceBudget fails any grace over
+// 100 ms): its event, still queued, is dropped and counted, and the listener was called once.
+func TestCloseListenerGrace(t *testing.T) {
+	const (
+		drain = 100 * time.Millisecond
+		grace = 100 * time.Millisecond
+	)
+	s := newTestStore(t)
+	unblock := make(chan struct{})
+	var calls atomic.Int32
+	p := testPolicy(Closed)
+	fake := newFake(joined(p), sequence())
+	fake.setRefund(func(req store.Request) store.Response {
+		if req.Args[5] == "1" { // the first permit's receipt: sequence 1
+			return appliedAt(tNow + 1_000)
+		}
+		return store.Response{Outcome: store.Unavailable}
+	})
+	l := s.ready(t, p, refundInstance(p), fake, Hooks{}, reasonReady, WithRefundListener(func(RefundEvent) {
+		calls.Add(1)
+		<-unblock
+	}))
+	t.Cleanup(func() { close(unblock) }) // runs before the limiter's own cleanup Close
+	applied, refused := acquireOK(t, l), acquireOK(t, l)
+	applied.Release()
+	waitFor(t, "the listener blocked in its first callback", func() bool { return calls.Load() == 1 })
+	refused.Release()
+	waitFor(t, "a refused refund attempt", func() bool { return fake.count("refund") > 1 })
+
+	closed := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(closed)
+		l.Close(WithDrainTimeout(drain))
+	}()
+	select {
+	case <-closed:
+	case <-time.After(waitMax):
+		t.Fatalf("Close did not return within %v with a blocked listener", waitMax) // the cleanup unblocks it
+	}
+	if took := time.Since(start); took < drain+grace || took > drain+grace+100*time.Millisecond {
+		t.Errorf("Close took %v with a blocked listener, want its %v drain + the %v grace (+ at most 100 ms)", took, drain, grace)
+	}
+	if st := refused.life.load(); st != stateFinal {
+		t.Errorf("the refused refund's permit is %v after Close, want FINAL (unresolved closed)", st)
+	}
+	if h := l.Health(); h.ListenerDrops != 1 {
+		t.Errorf("listener drops %d, want 1: the drain's end event, still queued behind the blocked callback", h.ListenerDrops)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the listener was called %d times, want 1", n)
+	}
+}
+
+// TestCloseListenerGraceFromDrainEnd (SPEC API-1d, API-1e; the F1 decision on Close's listener
+// grace): the listener's grace counts from the drain's end, which can come after the drain
+// deadline, since the drain ends only once the attempts in flight have. The listener is
+// blocked in its callback for an applied refund, and the attempt of a second refund is in a
+// store call that ignores its cancel and returns 250 ms after Close began, 200 ms past the
+// 50 ms drain deadline. Close then ends that refund unresolved (closed) and gives the blocked
+// listener the whole 100 ms grace past that return (no less: a window that ends at the
+// drain deadline, or at the deadline + the grace, 150 ms, has passed by then, and Close would
+// return at once); then its dispatcher is stopped without waiting for the blocked callback,
+// so the event, still queued, is dropped and counted, and the listener was called once.
+// TestListenerDeadline pins both sides of the window exactly; this test pins that Close
+// measures the grace from the drain's end.
+func TestCloseListenerGraceFromDrainEnd(t *testing.T) {
+	const (
+		drain = 50 * time.Millisecond
+		grace = 100 * time.Millisecond
+		late  = 250 * time.Millisecond // when the store call returns, from Close's start
+	)
+	s := newTestStore(t)
+	unblock, hold := make(chan struct{}), make(chan struct{})
+	var holdOnce sync.Once
+	release := func() { holdOnce.Do(func() { close(hold) }) }
+	returned := make(chan time.Time, 1)
+	var calls atomic.Int32
+	p := testPolicy(Closed)
+	fake := newFake(joined(p), sequence())
+	fake.setRefund(func(req store.Request) store.Response {
+		if req.Args[5] == "1" { // the first permit's receipt: sequence 1
+			return appliedAt(tNow + 1_000)
+		}
+		<-hold // the attempt's cancel does not end this call
+		select {
+		case returned <- time.Now():
+		default:
+		}
+		return store.Response{Outcome: store.Unavailable}
+	})
+	l := s.ready(t, p, refundInstance(p), fake, Hooks{}, reasonReady, WithRefundListener(func(RefundEvent) {
+		calls.Add(1)
+		<-unblock
+	}))
+	t.Cleanup(func() { close(unblock) }) // these two run before the limiter's own cleanup Close
+	t.Cleanup(release)
+	applied, slow := acquireOK(t, l), acquireOK(t, l)
+	applied.Release()
+	waitFor(t, "the listener blocked in its first callback", func() bool { return calls.Load() == 1 })
+	slow.Release()
+	waitFor(t, "the second refund's store call in flight", func() bool { return fake.count("refund") == 2 })
+
+	closed := make(chan struct{})
+	start := time.Now()
+	go func() {
+		defer close(closed)
+		l.Close(WithDrainTimeout(drain))
+	}()
+	time.Sleep(late)
+	release()
+	select {
+	case <-closed:
+	case <-time.After(waitMax):
+		t.Fatalf("Close did not return within %v with a blocked listener", waitMax) // the cleanup unblocks it
+	}
+	took := time.Since(start)
+	var ret time.Time
+	select {
+	case ret = <-returned:
+	default:
+		t.Fatal("Close returned before the second refund's store call did")
+	}
+	if d := ret.Sub(start); d < drain+grace {
+		t.Fatalf("the store call returned %v after Close began, want past the %v drain deadline + the %v grace", d, drain, grace)
+	}
+	if d := took - ret.Sub(start); d < grace || d > grace+700*time.Millisecond {
+		t.Errorf("Close returned %v after the drain's end (the store call's return), want the %v grace past it (+ at most 700 ms)", d, grace)
+	}
+	if st := slow.life.load(); st != stateFinal {
+		t.Errorf("the second refund's permit is %v after Close, want FINAL (unresolved closed)", st)
+	}
+	if h := l.Health(); h.ListenerDrops != 1 {
+		t.Errorf("listener drops %d, want 1: the drain's end event, still queued behind the blocked callback", h.ListenerDrops)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("the listener was called %d times, want 1", n)
+	}
+}
+
 // TestKillStopsRefunds (plan S6 step 8; DESIGN §A5.12; SPEC REF-8): Kill with a refund pending
 // (the store refuses it) and the listener running returns within 100 ms; no event is delivered
 // afterwards, the pending refund is lost (still RELEASED, no more attempts), a release() after
@@ -751,11 +952,21 @@ func TestKillStopsRefunds(t *testing.T) {
 }
 
 // wireRefundLimiter builds a ready Closed limiter on ts's fake RESP server, through the real
-// adapter: the store reports epochA, allows every acquire (generation 1, sequence 1) and
-// answers each refund through refund; log is the refund listener.
+// adapter, with testPolicy and refundInstance (wireRefundLimiterWith).
 func wireRefundLimiter(t *testing.T, ts *testStore, refund fakeresp.Handler, log *eventLog) *Limiter {
 	t.Helper()
 	p := testPolicy(Closed)
+	in := refundInstance(p)
+	in.EpochRereadIntervalNs = wireInterval
+	return wireRefundLimiterWith(t, ts, p, in, refund, log)
+}
+
+// wireRefundLimiterWith builds a ready limiter with p and in on ts's fake RESP server, through
+// the real adapter: the store reports epochA under p's fingerprint, allows every acquire
+// (generation 1, sequence 1, expiring p's receipt lifetime after tNow) and answers each refund
+// through refund; log is the refund listener.
+func wireRefundLimiterWith(t *testing.T, ts *testStore, p Policy, in Instance, refund fakeresp.Handler, log *eventLog) *Limiter {
+	t.Helper()
 	fp := fingerprint.Of(p)
 	arr := func(vs ...resp.Value) resp.Value { return resp.Value{Kind: resp.Array, Elems: vs} }
 	ts.srv.Load(scripts.ReadEpoch.Text)
@@ -765,13 +976,76 @@ func wireRefundLimiter(t *testing.T, ts *testStore, refund fakeresp.Handler, log
 	})
 	ts.srv.Load(scripts.Acquire.Text)
 	ts.srv.Handle(scripts.Acquire.SHA, func(_, _ []string) resp.Value {
-		return arr(intVal(1), intVal(tNow), strVal(""), intVal(19_000_000_000), intVal(1), intVal(1), intVal(tNow+lifeUs))
+		return arr(intVal(1), intVal(tNow), strVal(""), intVal(19_000_000_000), intVal(1), intVal(1),
+			intVal(tNow+p.ReceiptLifetimeNs/1000))
 	})
 	ts.srv.Load(scripts.Refund.Text)
 	ts.srv.Handle(scripts.Refund.SHA, refund)
-	in := refundInstance(p)
-	in.EpochRereadIntervalNs = wireInterval
 	return ts.ready(t, p, in, nil, Hooks{}, reasonReady, WithRefundListener(log.listen))
+}
+
+// TestRetentionCountsSentAttempt (SPEC API-1d, REF-4a, REF-5; DESIGN §A5.4 "sent", §A5.5,
+// §A5.6), through the real adapter and the fake RESP server: a release() 150 ms before the
+// receipt lifetime ends (late, and still attempted, REF-5) sends its first refund command,
+// which the store holds unanswered. When the retention timer fires, the permit ends unresolved
+// (retention) with Attempts 1, the EVALSHA written counted, and its event comes within 300 ms
+// of the timer while the store still holds the reply: the timer cancels the attempt instead of
+// waiting out its 750 ms D. The store got exactly one refund command, and none follows.
+func TestRetentionCountsSentAttempt(t *testing.T) {
+	const (
+		lifetime = 4_500 * time.Millisecond
+		early    = 150 * time.Millisecond // the release comes this long before the lifetime ends
+	)
+	ts := newTestStore(t)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) }) // before the server's Stop, which waits for the handler
+	reached := make(chan struct{})
+	var once sync.Once
+	var refunds atomic.Int32
+	p := testPolicy(Closed)
+	p.ReceiptLifetimeNs, p.RefundDeadlineNs, p.OutageToleranceNs = int64(lifetime), 4_200_000_000, 100_000_000
+	in := refundInstance(p)
+	// RCP-8: 0.1 + 4.2 + 0.1 + 0.1 = 4.5 s ≤ 4.5 s, and the margin is above 4.5 s × 1,000 ppm;
+	// §A5.6: 4 ms + 1 s + (1 + 3) × 0.75 s = 4.004 s ≤ 4.2 s.
+	in.MaxReleaseDelayNs, in.MarginNs, in.DependencyDeadlineNs = 100_000_000, 100_000_000, 750_000_000
+	in.EpochRereadIntervalNs = wireInterval
+	log := &eventLog{}
+	l := wireRefundLimiterWith(t, ts, p, in, func(_, _ []string) resp.Value {
+		refunds.Add(1)
+		once.Do(func() { close(reached) })
+		<-block
+		return resp.Value{Kind: resp.Array, Elems: []resp.Value{intVal(3), intVal(tNow + 1_000), strVal(""), intVal(1_000_000_000)}}
+	}, log)
+	waitFor(t, "2 ready refund connections", func() bool { return counter(t, l, "rl_store_connections", "refund") == 2 })
+
+	before := time.Now() // the acquire is sent after this
+	permit := acquireOK(t, l)
+	acquired := time.Now() // and before this: the timer fires between before and acquired + lifetime
+	time.Sleep(time.Until(before.Add(lifetime - early)))
+	permit.Release()
+	select {
+	case <-reached:
+	case <-time.After(waitMax):
+		t.Fatalf("the refund did not reach the store within %v", waitMax)
+	}
+	ev := waitEvents(t, log, 1)[0]
+	arrived := time.Now()
+	if ev.DeductionID != permit.DeductionID() || ev.Result != Unresolved || ev.Reason != UnresolvedRetention || ev.Attempts != 1 {
+		t.Errorf("event %+v, want unresolved (retention) for %s with 1 attempt: the EVALSHA was written (API-1d)", ev, permit.DeductionID())
+	}
+	if arrived.Before(before.Add(lifetime)) {
+		t.Errorf("the event came %v before the lifetime ended", before.Add(lifetime).Sub(arrived))
+	}
+	if late := arrived.Sub(acquired.Add(lifetime)); late > 300*time.Millisecond {
+		t.Errorf("the event came %v after the retention timer, want at most 300 ms: the timer cancels the attempt in flight instead of waiting out its 750 ms D", late)
+	}
+	time.Sleep(50 * time.Millisecond) // more than 10 backoffs of at most 4 ms
+	if n := refunds.Load(); n != 1 {
+		t.Errorf("%d refund commands reached the store, want 1: the retention ended the refund (REF-4a)", n)
+	}
+	if got := slotsOf(l); got != (slotCounts{0, 0}) {
+		t.Errorf("slots in use %+v after the retention, want 0 and 0", got)
+	}
 }
 
 // TestRefundInFlightAtStop (plan S6 steps 7 and 8; DESIGN §A5.12; SPEC API-1d, API-1e): a
@@ -779,8 +1053,7 @@ func wireRefundLimiter(t *testing.T, ts *testStore, refund fakeresp.Handler, log
 // the workers stop. Kill returns within 500 ms instead of waiting out the attempt's D (2 s),
 // and emits nothing. Close(WithDrainTimeout(100 ms)) returns within 500 ms of its deadline
 // and ends the refund unresolved (closed) with Attempts 1, the cancelled command counted; its
-// event is delivered, or dropped and counted (the listener gets no time past the drain
-// deadline, plan S6 step 7).
+// event is delivered before Close returns, and nothing is dropped (API-1d).
 func TestRefundInFlightAtStop(t *testing.T) {
 	for _, kill := range []bool{true, false} {
 		name := "Close at the drain deadline"
@@ -837,13 +1110,11 @@ func TestRefundInFlightAtStop(t *testing.T) {
 			if d < drain || d > drain+500*time.Millisecond {
 				t.Errorf("Close took %v, want its %v drain (+ at most 500 ms): the cancel ends the attempt in flight", d, drain)
 			}
-			// A dispatcher that took the event may still be in the callback when Close returns:
-			// settled waits for it.
-			evs, drops := settled(l, log, 1, start.Add(waitMax))
-			if uint64(len(evs))+drops != 1 {
-				t.Fatalf("%d events delivered and %d dropped, want 1 in all", len(evs), drops)
+			evs, drops := log.events(), l.Health().ListenerDrops
+			if len(evs) != 1 || drops != 0 {
+				t.Fatalf("when Close returned: %d events delivered and %d dropped, want 1 and 0", len(evs), drops)
 			}
-			if len(evs) == 1 && (evs[0].Result != Unresolved || evs[0].Reason != UnresolvedClosed || evs[0].Attempts != 1) {
+			if evs[0].Result != Unresolved || evs[0].Reason != UnresolvedClosed || evs[0].Attempts != 1 {
 				t.Errorf("event %+v, want unresolved (closed) with 1 attempt: the command in flight was sent (API-1d)", evs[0])
 			}
 			if got := counter(t, l, "rl_refund_results_total", "unresolved"); got != 1 {
@@ -851,6 +1122,111 @@ func TestRefundInFlightAtStop(t *testing.T) {
 			}
 			if got := slotsOf(l); got != (slotCounts{0, 0}) {
 				t.Errorf("slots in use %+v after Close, want 0 and 0", got)
+			}
+		})
+	}
+}
+
+// TestHeldRetentionEventAtStop (SPEC API-1d, API-1h, T-REF-7; DESIGN §A5.5, §A5.12): a
+// released permit whose refund attempt is in flight when its retention timer fires (the test
+// fires it) ends FINAL at the timer, out of the pending set, but keeps both slots and leaves its
+// event to the attempt's worker; the store applies the refund and holds the reply past the
+// cancel. Close, whose drain then finds nothing pending, or Kill stops the workers and waits for
+// that attempt: until the store answers, the slots stay in use and no event is emitted. Then the
+// worker frees the permit's slots, once (the test holds a second reservation, so a second free
+// would show), and emits the one event, unresolved (retention) with the sent command counted
+// (Attempts 1). Close delivers it before it returns; Kill, whose listener stopped first, drops
+// it and counts the drop. Either way delivered + dropped = emitted.
+func TestHeldRetentionEventAtStop(t *testing.T) {
+	for _, kill := range []bool{false, true} {
+		name := "Close"
+		if kill {
+			name = "Kill"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := newTestStore(t)
+			reached, gate := make(chan struct{}), make(chan struct{})
+			var reachOnce, gateOnce sync.Once
+			openGate := func() { gateOnce.Do(func() { close(gate) }) }
+			log := &eventLog{}
+			l, fake := s.refundLimiter(t, Closed, nil, func(store.Request) store.Response {
+				// The store applies the refund and holds its reply until the test opens gate;
+				// the fake does not watch the call's context, so the attempt stays in flight
+				// past the cancel.
+				reachOnce.Do(func() { close(reached) })
+				<-gate
+				return appliedAt(tNow + 1_000)
+			}, log)
+			t.Cleanup(openGate)        // runs before the limiter's own cleanup Close
+			if !l.slots.tryAcquire() { // a second reservation, so a double free shows as 0 in use, not 1
+				t.Fatal("no free slot pair for the second reservation")
+			}
+			permit := acquireOK(t, l)
+			permit.Release()
+			select {
+			case <-reached:
+			case <-time.After(waitMax):
+				t.Fatalf("the refund did not reach the store within %v", waitMax)
+			}
+			permit.expire() // the retention timer fires while the attempt is in flight
+			if st := permit.life.load(); st != stateFinal {
+				t.Fatalf("permit %v after the timer, want FINAL", st)
+			}
+			if got := slotsOf(l); got != (slotCounts{2, 2}) {
+				t.Fatalf("slots in use %+v after the timer, want 2 and 2 (the permit's pair and the other reservation): the permit's pair waits with the event for the attempt in flight (API-1h)", got)
+			}
+			if n := refundEvents(t, l.reg); n != 0 {
+				t.Fatalf("rl_refund_results_total sums to %d after the timer, want 0: the event waits for the attempt", n)
+			}
+
+			stopped := make(chan struct{})
+			go func() {
+				defer close(stopped)
+				if kill {
+					Kill(l)
+				} else {
+					l.Close(WithDrainTimeout(time.Second))
+				}
+			}()
+			waitFor(t, name+" stopping the refund workers", func() bool {
+				l.refunds.mu.Lock()
+				defer l.refunds.mu.Unlock()
+				return l.refunds.stopped
+			})
+			time.Sleep(20 * time.Millisecond) // an effect that did not wait for the attempt would show by now
+			if got, n := slotsOf(l), refundEvents(t, l.reg); got != (slotCounts{2, 2}) || n != 0 {
+				t.Fatalf("while %s waits for the attempt: slots in use %+v, rl_refund_results_total %d; want 2 and 2, 0", name, got, n)
+			}
+			openGate()
+			select {
+			case <-stopped:
+			case <-time.After(waitMax):
+				t.Fatalf("%s did not return within %v of the attempt's return", name, waitMax)
+			}
+
+			evs, drops := log.events(), l.Health().ListenerDrops
+			emitted := counter(t, l, "rl_refund_results_total", "unresolved")
+			if emitted != 1 || refundEvents(t, l.reg) != 1 {
+				t.Fatalf("rl_refund_results_total{unresolved} = %v (all results %d), want 1 and 1: one final event", emitted, refundEvents(t, l.reg))
+			}
+			wantDelivered, wantDrops := 1, uint64(0)
+			if kill {
+				wantDelivered, wantDrops = 0, 1 // Kill stopped the listener before the workers
+			}
+			if len(evs) != wantDelivered || drops != wantDrops || float64(len(evs))+float64(drops) != emitted {
+				t.Fatalf("when %s returned: %d delivered and %d dropped of %v emitted, want %d and %d (T-REF-7: delivered + dropped = emitted)",
+					name, len(evs), drops, emitted, wantDelivered, wantDrops)
+			}
+			if !kill {
+				if ev := evs[0]; ev.DeductionID != permit.DeductionID() || ev.Result != Unresolved || ev.Reason != UnresolvedRetention || ev.Attempts != 1 {
+					t.Errorf("event %+v, want unresolved (retention) for %s with 1 attempt: the held call sent its command (API-1d)", ev, permit.DeductionID())
+				}
+			}
+			if got := slotsOf(l); got != (slotCounts{1, 1}) {
+				t.Errorf("slots in use %+v after %s, want 1 and 1 (the other reservation): the worker frees the permit's pair once", got, name)
+			}
+			if n := fake.count("refund"); n != 1 {
+				t.Errorf("%d refund commands reached the store, want 1", n)
 			}
 		})
 	}

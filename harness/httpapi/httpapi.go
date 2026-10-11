@@ -195,8 +195,8 @@ func (s *Server) WaitIdle(ctx context.Context) error { return s.slots.waitIdle(c
 // it closes the limiter with the default drain, which returns once every pending refund is
 // final (its event handed to the run log) or the drain timeout has passed; then waits until
 // the run-log channel is empty, for at most drain from Close's return (Close may take up to
-// drain_timeout), or until ctx ends; and writes the stop record. The caller closes the run
-// log afterwards.
+// drain_timeout + at most listenerGrace (100 ms) while the listener empties its queue), or
+// until ctx ends; and writes the stop record. The caller closes the run log afterwards.
 func (s *Server) Stop(ctx context.Context, drain time.Duration) error {
 	s.lim.Close()
 	dctx, cancel := context.WithTimeout(ctx, drain)

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -452,26 +453,205 @@ type budVerdict struct {
 	Violation          json.RawMessage `json:"violation"`
 }
 
+// budViolation is a verdict's violation: the user and the closed window whose admissions pass
+// the bound, and by how many units.
+type budViolation struct {
+	UserID      string `json:"user_id"`
+	StartNs     int64  `json:"start_ns"`
+	EndNs       int64  `json:"end_ns"`
+	ExcessUnits int64  `json:"excess_units"`
+}
+
 // TestT_HFLT_4 (HARNESS §8 T-HFLT-4: BUD-11a, TRF-10, HAR-13, HOST-8; IMPLEMENTATION_PLAN H5
-// Tests and step 9): bin/test/orchestrator runs scenarios/hflt4-faults.toml, refunds during
-// faulted traffic (TRF-S6): 200 req/s for 60 s over 20 users and three instances, 5 % of the
-// requests refused after their acquire; instance 1 drops the replies of 5 refund calls at 10 s;
-// the store is paused for 4.5 s at 20 s; instance 2 holds its refund calls' returns for 10 s from
-// 39 s and is killed and restarted at 40 s. The run finishes (exit 0: its report passes
-// report/validate.py). Then `python3 -m refmodel.check_bud11 runs/<id>` exits 0 with verdict pass
-// and no invalid reason: every key's admissions stay within BUD-11a, each known credit at its
+// Tests and step 9): refunds during faulted traffic, judged by `python3 -m refmodel.check_bud11
+// <run dir>`. Every key's admissions must stay within BUD-11a, each known credit counted at its
 // logged credit decision_ns and each unknown-time credit (receipt_expired, unresolved after a
 // sent attempt, or a release with no final event in a killed process) anywhere in [acquire
-// decision_ns, + receipt lifetime), never at the host's release time. The verdict counts at least
+// decision_ns, + receipt lifetime), never at the host's release time. Each of its two parts runs
+// alone: -run 'TestT_HFLT_4/binding' or -run 'TestT_HFLT_4/orchestrated'.
+//
+// binding (plan choice, F1): a run whose verdict needs an unknown-time credit, on a StartStack
+// stack of two instances on the frozen controlled clock. Instance 1 refuses every /hit after
+// its acquire (refuse_after_acquire_bp = 10000) and holds its refund calls' returns at an
+// after_reply barrier (DESIGN §B6). User hb's /hit there is charged one token and released,
+// and its refund applies (the bucket is back to 20 tokens) while its final event waits. Then
+// instance 1 is killed (FLT-6, fixtures.KillAPI): api-1.jsonl holds the release, no refund
+// record and a pre_kill line with read_ok true. Instance 2 admits hb 20 more times at the same
+// instant, limits the 21st and stops. check_bud11 on the stack's directory exits 0 with verdict
+// pass, one unknown-time credit, no known credit, one pre_kill line and no listener drop: 21
+// admissions at one instant fit the bound only with that credit. On a copy without instance
+// 1's release line, which drops the credit, it exits 1 with a violation for hb in the window
+// [Frozen, Frozen], one token (rate_period_ns units) over.
+//
+// orchestrated: bin/test/orchestrator runs scenarios/hflt4-faults.toml (TRF-S6): 200 req/s for
+// 60 s over 20 users and three instances, 5 % of the requests refused after their acquire;
+// instance 1 drops the replies of 5 refund calls at 10 s; the store is paused for 4.5 s at
+// 20 s; instance 2 holds its refund calls' returns for 10 s from 39 s and is killed and
+// restarted at 40 s. The run finishes (exit 0: its report passes report/validate.py). Then
+// check_bud11 on runs/<id> exits 0 with verdict pass and no invalid reason, counting at least
 // one known and one unknown-time credit, 0 listener drops summed over every stop and pre_kill
-// line (HAR-13), and at least one pre_kill line, none with read_ok false; api-2.jsonl holds the
-// killed process's pre_kill line with read_ok true. The run proves the unknown-time credits are
-// counted, not that the verdict needs them: under these faults no key is at its bound where they
-// lie (scenarios/hflt4-faults.toml says why), so the binding semantics, an unknown-time credit
-// allowing an admission the bound would refuse without it, are covered by refmodel's unit tests
-// (refmodel/tests/test_check_bud11_runs.py: test_unknown_interval,
-// test_open_release_requires_later_kill).
+// line (HAR-13), and at least one pre_kill line, none with read_ok false; api-2.jsonl holds
+// the killed process's pre_kill line with read_ok true. This run proves its unknown-time
+// credits are counted under real faults, not that the verdict needs them: they all start after
+// the store pause, which comes before the kill, so no key is at its bound where they lie
+// (scenarios/hflt4-faults.toml says why). The binding part shows a credit the verdict needs.
 func TestT_HFLT_4(t *testing.T) {
+	t.Run("binding", testHFLT4Binding)
+	t.Run("orchestrated", testHFLT4Orchestrated)
+}
+
+// testHFLT4Binding is TestT_HFLT_4's binding part.
+func testHFLT4Binding(t *testing.T) {
+	const user = "hb"
+	root, err := storeproc.ModuleRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := StartStack(t, StackOpts{Instances: 2, Clock: Frozen,
+		PerInstanceConfig: map[int]string{1: "[api]\nrefuse_after_acquire_bp = 10000\n"}})
+	if p := s.Config.Policy; p.Capacity != 20 || p.RatePeriodNs != token {
+		t.Fatalf("harness.toml's policy has capacity %d and rate_period_ns %d; this test counts on 20 and %d", p.Capacity, p.RatePeriodNs, token)
+	}
+	api1, api2 := s.APIs[0], s.APIs[1]
+
+	// Instance 1: one /hit charged and released; its refund applies, its final event waits.
+	api1.Control(t, "/_test/barrier", `{"name":"held","at":"after_reply","match":"refund"}`)
+	wantError(t, "hitapi 1's /hit", api1.Hit(t, user, "r0"), http.StatusServiceUnavailable, "service_aborted_after_acquire")
+	id := deductionOf(t, api1, user)
+	waitBalance(t, s, user, 20*token, "the refund of hitapi 1's /hit, held after the store's reply")
+	target := fixtures.APITarget{
+		BaseURL: api1.URL, PID: api1.PID, LogPath: api1.LogPath, Client: s.HTTP,
+		PrekillTimeout: time.Duration(s.Config.Instance.MaxReleaseDelayNs) + 2*time.Second,
+	}
+	if _, err := fixtures.KillAPI(t.Context(), target, false); err != nil {
+		t.Fatalf("api kill 1: %v", err)
+	}
+	if !api1.exitedWithin(killWait) {
+		t.Fatalf("hitapi 1's process %d still runs after the kill", api1.PID)
+	}
+	api1.checkRecord(t)
+	releases, preKills := 0, 0
+	for _, rec := range api1.Records(t, "release") {
+		if rec["deduction_id"] == id {
+			releases++
+		}
+	}
+	for _, rec := range api1.Records(t, "lifecycle") {
+		if rec["event"] != "pre_kill" {
+			continue
+		}
+		preKills++
+		if rec["read_ok"] != true || Int(t, rec, "listener_drops") != 0 || Int(t, rec, "log_drops") != 0 {
+			t.Errorf("api-1.jsonl's pre_kill line %v, want read_ok true, listener_drops 0, log_drops 0", rec)
+		}
+	}
+	if refunds := api1.Records(t, "refund"); releases != 1 || len(refunds) != 0 || preKills != 1 {
+		t.Fatalf("api-1.jsonl has %d release lines for %s, refund lines %v and %d pre_kill lines; want 1, none and 1",
+			releases, id, refunds, preKills)
+	}
+
+	// Instance 2: 20 more admissions at the frozen instant empty the bucket.
+	for i := 1; i <= 20; i++ {
+		req := "r" + strconv.Itoa(i)
+		wantCreated(t, "hitapi 2's /hit "+req, api2.Hit(t, user, req), user, req)
+	}
+	wantError(t, "hitapi 2's /hit r21", api2.Hit(t, user, "r21"), http.StatusTooManyRequests, "rate_limited")
+	if code, inGrace := api2.Terminate(t); !inGrace || code != 0 {
+		t.Fatalf("hitapi 2 exited %d after SIGTERM (within its grace: %v), want 0", code, inGrace)
+	}
+
+	// The run's evidence passes with the unknown-time credit, and only with it.
+	code, out, err := runCheckBud11(t, root, s.Dir)
+	v := decodeVerdict(t, out)
+	if err != nil || code != 0 || v.Verdict != "pass" || len(v.InvalidReasons) != 0 || (len(v.Violation) > 0 && string(v.Violation) != "null") {
+		t.Errorf("check_bud11 on the run: exit %d (%v), verdict %q, invalid_reasons %q, violation %s; want 0, pass, none, null; its output:\n%s",
+			code, err, v.Verdict, v.InvalidReasons, v.Violation, out)
+	}
+	for _, f := range []struct {
+		name string
+		got  *int64
+		want int64
+	}{
+		{"known_credits", v.KnownCredits, 0},
+		{"unknown_credits", v.UnknownCredits, 1},
+		{"listener_drops", v.ListenerDrops, 0},
+		{"pre_kill_lines", v.PreKillLines, 1},
+		{"pre_kill_read_ok_false", v.PreKillReadOKFalse, 0},
+	} {
+		if f.got == nil || *f.got != f.want {
+			t.Errorf("check_bud11 on the run: %s = %s, want %d; its output:\n%s", f.name, nullable(f.got), f.want, out)
+		}
+	}
+	bare := withoutRelease(t, s.Dir, id)
+	code, out, err = runCheckBud11(t, root, bare)
+	v = decodeVerdict(t, out)
+	var got budViolation
+	if len(v.Violation) > 0 && string(v.Violation) != "null" {
+		if err := json.Unmarshal(v.Violation, &got); err != nil {
+			t.Fatalf("check_bud11's violation %s: %v", v.Violation, err)
+		}
+	}
+	want := budViolation{UserID: user, StartNs: Frozen, EndNs: Frozen, ExcessUnits: token}
+	if err != nil || code != 1 || v.Verdict != "violation" || got != want || v.UnknownCredits == nil || *v.UnknownCredits != 0 {
+		t.Errorf("check_bud11 without hitapi 1's release line: exit %d (%v), verdict %q, violation %+v, unknown_credits %s; want 1, violation, %+v, 0; its output:\n%s",
+			code, err, v.Verdict, got, nullable(v.UnknownCredits), want, out)
+	}
+}
+
+// waitBalance polls rladmin inspect until key's balance u is want units, or 10 s pass.
+func waitBalance(t *testing.T, s *Stack, key string, want int64, what string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		u := s.Balance(t, key)
+		if u == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: rladmin inspect --key %s: u = %d after 10 s, want %d", what, key, u, want)
+		}
+		time.Sleep(pollEvery)
+	}
+}
+
+// withoutRelease copies the run directory's evidence (config.toml and every api-N.jsonl) to a
+// new directory, leaving out the one release line of deduction id, and returns that directory.
+func withoutRelease(t *testing.T, dir, id string) string {
+	t.Helper()
+	out := t.TempDir()
+	files, err := filepath.Glob(filepath.Join(dir, "api-*.jsonl"))
+	if err != nil || len(files) == 0 {
+		t.Fatalf("the run's api-N.jsonl files: %v (%d found)", err, len(files))
+	}
+	dropped := 0
+	for _, path := range append(files, filepath.Join(dir, "config.toml")) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasSuffix(path, ".jsonl") {
+			var keep []byte
+			for _, line := range bytes.SplitAfter(data, []byte{'\n'}) {
+				if rec, err := decodeObject(bytes.TrimSpace(line)); err == nil && rec["kind"] == "release" && rec["deduction_id"] == id {
+					dropped++
+					continue
+				}
+				keep = append(keep, line...)
+			}
+			data = keep
+		}
+		if err := os.WriteFile(filepath.Join(out, filepath.Base(path)), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if dropped != 1 {
+		t.Fatalf("the run's evidence has %d release lines for %s, want 1 to leave out", dropped, id)
+	}
+	return out
+}
+
+// testHFLT4Orchestrated is TestT_HFLT_4's orchestrated part.
+func testHFLT4Orchestrated(t *testing.T) {
 	root, err := storeproc.ModuleRoot()
 	if err != nil {
 		t.Fatal(err)
@@ -481,28 +661,11 @@ func TestT_HFLT_4(t *testing.T) {
 		t.Fatalf("the orchestrator exited %d (run %q), want 0 after a finished run; its output:\n%s", r.code, r.runID, r.out)
 	}
 
-	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
-	c, err := startProcessIn(t, root, t.TempDir(), root, "python3", []string{"-m", "refmodel.check_bud11", r.dir}, env, "check_bud11")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !c.exitedWithin(checkBudWait) {
-		c.kill(t)
-		t.Fatalf("python3 -m refmodel.check_bud11 %s did not exit within %v", r.dir, checkBudWait)
-	}
-	c.checkRecord(t)
-	out, err := os.ReadFile(c.Out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	code, err := exitCode(c.waitErr)
+	code, out, err := runCheckBud11(t, root, r.dir)
 	if err != nil || code != 0 {
 		t.Errorf("python3 -m refmodel.check_bud11 %s exited %d (%v), want 0 (pass); its output:\n%s", r.dir, code, err, out)
 	}
-	var v budVerdict
-	if err := json.Unmarshal(bytes.TrimSpace(out), &v); err != nil {
-		t.Fatalf("check_bud11's output is not one verdict JSON object: %v\n%s", err, out)
-	}
+	v := decodeVerdict(t, out)
 	if v.Verdict != "pass" || len(v.InvalidReasons) != 0 || (len(v.Violation) > 0 && string(v.Violation) != "null") {
 		t.Errorf("check_bud11 verdict %q, invalid_reasons %q, violation %s; want pass, none, null", v.Verdict, v.InvalidReasons, v.Violation)
 	}
@@ -538,4 +701,36 @@ func TestT_HFLT_4(t *testing.T) {
 		t.Error("api-2.jsonl has no pre_kill lifecycle line with read_ok true, want the killed process's")
 	}
 	t.Logf("run %s: check_bud11 %s", r.runID, bytes.TrimSpace(out))
+}
+
+// runCheckBud11 runs `python3 -m refmodel.check_bud11 dir` from the repo root, within
+// checkBudWait, and returns its exit code and output; err reports a python3 that did not exit
+// by itself.
+func runCheckBud11(t *testing.T, root, dir string) (code int, out []byte, err error) {
+	t.Helper()
+	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")}
+	c, err := startProcessIn(t, root, t.TempDir(), root, "python3", []string{"-m", "refmodel.check_bud11", dir}, env, "check_bud11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.exitedWithin(checkBudWait) {
+		c.kill(t)
+		t.Fatalf("python3 -m refmodel.check_bud11 %s did not exit within %v", dir, checkBudWait)
+	}
+	c.checkRecord(t)
+	if out, err = os.ReadFile(c.Out); err != nil {
+		t.Fatal(err)
+	}
+	code, err = exitCode(c.waitErr)
+	return code, out, err
+}
+
+// decodeVerdict decodes check_bud11's output, one verdict JSON object.
+func decodeVerdict(t *testing.T, out []byte) budVerdict {
+	t.Helper()
+	var v budVerdict
+	if err := json.Unmarshal(bytes.TrimSpace(out), &v); err != nil {
+		t.Fatalf("check_bud11's output is not one verdict JSON object: %v\n%s", err, out)
+	}
+	return v
 }

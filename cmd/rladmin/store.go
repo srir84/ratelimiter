@@ -23,7 +23,8 @@ type conn struct {
 }
 
 // dial connects to addr and authenticates as user, all within ctx's deadline; cancelling ctx
-// ends the wait at once. Errors never contain pass (resp.Handshake redacts the server's text).
+// ends the wait at once, and dial then reports ctx's error. Errors never contain pass
+// (resp.Handshake redacts the server's text).
 func dial(ctx context.Context, addr, user, pass string) (*conn, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -34,14 +35,14 @@ func dial(ctx context.Context, addr, user, pass string) (*conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the store at %s: %w", addr, err)
 	}
-	stop := context.AfterFunc(ctx, func() { _ = nc.SetDeadline(time.Now()) })
+	// Cancelling ctx closes the connection, which ends any wait on it for good. A past
+	// deadline would not do: resp.Handshake sets its own deadline first, which replaces one
+	// that a cancel just before had set.
+	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
 	err = resp.Handshake(nc, user, pass, deadline, nil)
 	stop()
-	if err == nil {
-		err = ctx.Err()
-	}
-	if err != nil {
-		_ = nc.Close() // the connection is unusable either way
+	if err = ioCause(ctx, err); err != nil { // ctx ended: its error, not the closed connection's
+		_ = nc.Close() // the connection is unusable either way; a second close changes nothing
 		return nil, fmt.Errorf("authenticating to the store at %s: %w", addr, err)
 	}
 	return &conn{nc: nc, r: resp.NewReader(nc)}, nil
@@ -73,7 +74,8 @@ func (c *conn) do(ctx context.Context, label string, args ...string) (resp.Value
 	return v, nil
 }
 
-// ioCause is ctx's error when ctx ended (its deadline or a signal made the I/O fail), else err.
+// ioCause is ctx's error when ctx has ended (its deadline or a signal), else err: an I/O
+// error that ctx's end caused then reads as that end.
 func ioCause(ctx context.Context, err error) error {
 	if cerr := ctx.Err(); cerr != nil {
 		return cerr
