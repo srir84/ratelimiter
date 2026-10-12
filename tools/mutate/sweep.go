@@ -245,7 +245,7 @@ func writeMutants(ctx context.Context, cfg config, files, total int, budget time
 		total, files, budget, count[killed], count[survived], count[notKilled], count[invalid], len(untried))
 	var b strings.Builder
 	b.WriteString("# bin/mutate --sweep (DESIGN §C9): mutants that were not killed, then mutants left untried.\n")
-	b.WriteString("# Each survivor needs a killing test or a one-line \"equivalent because …\" in the slice report.\n")
+	b.WriteString("# Each survivor needs a killing test, a one-line \"equivalent because …\" or another verdict AGENTS.md §5 allows in the slice report.\n")
 	b.WriteString("# " + summary + "\n")
 	for _, d := range done {
 		if d.res.verdict == killed || d.res.verdict == invalid {

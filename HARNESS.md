@@ -97,7 +97,7 @@ How the API processes meet the host integration contract in SPEC §9.
 | HTTP-5 | Arrival time | Wall-clock integer nanoseconds since the UTC epoch, captured first, before limiter or database work. Real resolution depends on the machine. |
 | HTTP-6 | Success JSON | `user_id`, `request_id`, `arrival_ns` (decimal string), `existed` (row already existed), `degraded` (open-mode bypass), `decision_ns` (the acquire's `decision_ns` as a decimal string; absent for degraded). `429` JSON also carries `decision_ns`. |
 | HTTP-7 | Error JSON | Stable `error` code (`ERR` table) plus a short message; include valid IDs when available. |
-| HTTP-8 | Caching | `Cache-Control: no-store` on every response. |
+| HTTP-8 | Caching | `Cache-Control: no-store` on every response the API writes (replies the HTTP server sends itself before any handler runs, such as those to a request it cannot parse, are not written by the API). |
 | HTTP-9 | `429` hints | `Retry-After` in whole seconds rounded up, and JSON `retry_after_ms` rounded up, from `retry_after_ns`. [HTTP 429](https://www.rfc-editor.org/rfc/rfc6585.html#section-4) |
 | HTTP-10 | `200` | Only after a timestamp commit or finding an existing row. An existing row returns its original timestamp. |
 | HTTP-11 | Database safety | Validate input, use parameterized queries, enforce key uniqueness in storage. Uniqueness blocks a second row even for concurrent retries; it does not replay errors or give exactly-once HTTP. [Retry background](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.2.2) |
@@ -223,7 +223,7 @@ Limiter correctness tests are in SPEC §10. These tests check the harness's own 
 | T-HTTP-4 | Healthy new operations | Exactly one row each; quota rejections and invalid requests write none | ERR-1, ERR-4, REF-1, HOST-1 |
 | T-HTTP-5 | Confirmed failure after commit; database unavailable | Row may remain / no row; refund applied; error response sent before the refund completes; unique rows match recorded events | ERR-13, ERR-14, REF-2, FLT-5, HTTP-14 |
 | T-HTTP-6 | `429` with limiter delays of 1 ns, 999,999 ns, 1 ms, 1 s + 1 ns | `Retry-After` and `retry_after_ms` both rounded up, never 0 | HTTP-9 |
-| T-HTTP-7 | Response contract | Success/error JSON fields and types (`arrival_ns`, `decision_ns` as strings), stable `error` codes, `Cache-Control: no-store` on every response | HTTP-5, HTTP-6, HTTP-7, HTTP-8 |
+| T-HTTP-7 | Response contract | Success/error JSON fields and types (`arrival_ns`, `decision_ns` as strings), stable `error` codes, `Cache-Control: no-store` on every response the API writes | HTTP-5, HTTP-6, HTTP-7, HTTP-8 |
 | T-HTTP-8 | Call health and metrics endpoints under load | No allowance spent, no rows; health shows library readiness and clock source | HAR-16 |
 | T-HTTP-9 | Force every limiter result and post-acquire outcome through `/hit` | Each maps to exactly its `ERR` row (status, `error`, tokens, row); only `limited` gives `429` | ERR-3, ERR-7, ERR-8, ERR-9, ERR-9a, ERR-10, ERR-11, ERR-12, ERR-12a, ERR-12b, ERR-12c, ERR-12d, ERR-15, HAR-18, HOST-4 |
 | T-HFLT-1 | In-flight cap full | `503 service_overloaded`; no acquire sent | HAR-14, ERR-7, HOST-7 |
@@ -236,7 +236,7 @@ Limiter correctness tests are in SPEC §10. These tests check the harness's own 
 | T-FIX-2 | Launch a benchmark with the controlled clock, a fault wrapper, or the control endpoint enabled | Orchestrator refuses to launch | HAR-24 |
 | T-TRF-1 | Generator retry policy | Retries only after `429`, same IDs, wait ≥ hint, ≤ 2 extra attempts; no retry after any other result | TRF-5 |
 | T-RPT-1 | Every benchmark report | Contains all `PRF-1`…`PRF-5` fields: planned vs sent arrivals, scheduling lag, arrival vs decision vs monotonic durations kept separate, run-log schedule and routing, baseline comparison | TRF-1, TRF-3, TRF-4, TRF-6, TRF-7, TRF-8, TRF-10, HAR-17, PRF-1, PRF-2, PRF-3, PRF-4, PRF-5 |
-| T-RPT-2 | Every capacity and spike report | Thresholds and the spike recovery deadline were recorded before the run and left unchanged; spike recovery was met by its deadline; generator-limited steps are flagged and excluded from capacity; overload returned explicit failures within resource bounds; admitted and `429` throughput reported separately; sustainable capacity chosen per `PRF-11` | PRF-6, PRF-7, PRF-8, PRF-9, PRF-10, PRF-11 |
+| T-RPT-2 | Every capacity and spike report | Thresholds and the spike recovery deadline were recorded before the run and left unchanged; spike recovery was met by its deadline, except that where the run's own evidence shows a store stall (slow limiter decisions while the resource sampler's store read times out) overlapping the time from 2 s before the deadline to the end of the observation window, the window's p99 latency and so the met verdict are recorded rather than required, and so is the spike backlog at the deadline when that stall starts by the deadline; generator-limited steps are flagged and excluded from capacity; overload returned explicit failures within resource bounds; admitted and `429` throughput reported separately; sustainable capacity chosen per `PRF-11` | PRF-6, PRF-7, PRF-8, PRF-9, PRF-10, PRF-11 |
 
 - Review-only: `HAR-1`…`HAR-9`, `HAR-20`…`HAR-23`, `TRF-9`, scenario rows `TRF-S*` (exercised by `T-RPT-1` and SPEC tests).
 

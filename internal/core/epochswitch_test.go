@@ -563,9 +563,9 @@ func TestEpochWatch_EarlyRereadFromRefundAndCleanup(t *testing.T) {
 // carries its scope: on acquire, code 22 gives Diag.Scope epoch and code 23 key, Diag.Reason
 // the reply's reason; on a cleanup pass, a 22 from due_entries or cleanup_entry stops the pass
 // with scope epoch and the reply's reason, while a per-key result (code 32) is counted and
-// stops nothing. A refund's results reach no Diag (§A5.2: RefundEvent has none; plan S8
-// conflict in the slice report): there the scope decides the early epoch read, so 22 is
-// epoch-wide and 23 per key, both retried, never final.
+// stops nothing. A refund's results reach no Diag (§A5.2: RefundEvent has none): there the
+// scope decides the early epoch read, so 22 is epoch-wide and 23 per key, both retried, never
+// final.
 func TestIntegrityScope(t *testing.T) {
 	p, _ := cleanSettings()
 	fp := fingerprint.Of(p)

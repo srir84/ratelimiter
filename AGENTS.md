@@ -77,7 +77,8 @@ flowchart LR
     - Env reads: in `main*.go`, `harness/config`, `internal/testutil` and tests.
 - **Context:**
   - Every operation that waits on the network, the disk or another process for a caller takes `ctx context.Context` first. That includes test helpers, which take a ctx or a `testing.TB`.
-  - Exceptions: lifecycle methods like `Close()` (bounded by their drain timeout), standard interfaces like `io.Reader`, and RESP primitives that take an explicit deadline, which the adapter derives from ctx.
+  - Exceptions: lifecycle methods like `Close()` (bounded by their drain timeout plus a short listener grace), standard interfaces like `io.Reader`, RESP primitives that take an explicit deadline, which the adapter derives from ctx, and the test-only `storeproc` client and the helpers that reach the store only through such a connection (`storestate.Snapshot`, `storeproc.LoadPaddingAt`, and in tests `harness/fixtures`' `Clock` and `Tamper`), whose every command has the client's own 30 s I/O deadline (the teardown audits run in `t.Cleanup`, after `t.Context()` has ended). `faultctl` and the orchestrator talk to the store over connections of their own (`harness/fixtures`' `opsConn`, which `StoreConn` wraps and `StoreDown` and `StorePause` also use, and the orchestrator's `storeConn`), each dialed with a ctx whose deadline (200 ms to 5 min, by what the connection is for) bounds the dial; the calls made on them take no ctx, and each command such a call sends ends by that deadline, or at once when that ctx ends: `opsConn`'s `do` and `info`, `StoreConn.Do` and `Info`, `faultctl`'s `configGet`, the orchestrator's `storeConn.do`, `storeConn.command`, `persistenceInfo` and `fixtureConn.Do`, and `Clock` and `Tamper`.
+  - Regular-file I/O (opening, reading, writing, appending, syncing or renaming a regular file) takes no ctx, because a ctx cannot interrupt it (a regular file takes no deadline, and a hung mount holds the call): for example `harness/config`'s `Load` and `LoadScenario`, `runlog.Open`, `runlog.Append` and `runlog.WritePIDs`, `rladmin`'s policy load, the driver's `SaveOpLog`, `hitgen`'s `writeSchedule` and the orchestrator's `writeNewFile`.
   - A store call's deadline is `min(ctx deadline, start + D)`.
   - Work that outlives a call (refunds, cleanup, the epoch watch) runs on the instance lifetime context that `internal/core/limiter.go` creates, with its own deadlines.
   - Code that must not end when its caller gives up uses `context.WithoutCancel(ctx)` and adds its own deadline. For example, `hitapi`'s `P` deadline must survive a client disconnect.
@@ -104,7 +105,7 @@ flowchart LR
   - Never `t.Skip`: a missing store or tool is a failure.
   - Use `-race` for L1 and L3.
   - Order is shuffled: `bin/trace gotest` adds `-shuffle=on`, and the saved stream holds the seed. Repeat an order with `-shuffle=<seed>`.
-  - No mutable package-level state in `_test.go` files or in test-helper packages (under `internal/testutil/` and `harness/{driver,fixtures,spectest,e2e,pgtest}/`): no assignment, `++`/`--`, map or slice element write, or `&v` outside the declaration. Read-only tables, constants and `//go:embed` vars are fine. Only the hooks `measurements` and `maxInFlight` (§5) may be written. `bin/trace testglobals` checks this.
+  - No mutable package-level state in `_test.go` files or in test-helper packages (under `internal/testutil/` and `harness/{driver,fixtures,spectest,e2e,pgtest}/`): no assignment, `++`/`--`, map or slice element write, `&v`, send, `delete`/`clear`/`copy`/`close`, in-place standard-library mutation (`sort.Strings`, `slices.Sort`, …) or pointer-receiver method call outside the declaration (DESIGN §C7 has the exact forms), and no package-level variable that holds a value that exists to be mutated (a `sync` or `sync/atomic` value, a channel, a `strings.Builder`, a `bytes.Buffer` or a `math/rand/v2` generator). Read-only tables, constants and `//go:embed` vars are fine. Only the hooks `measurements` and `maxInFlight` (§5) may be written. `bin/trace testglobals` checks this.
 - **Checked by:** golangci-lint v2 (`.golangci.yml`), run once per build: untagged, `-tags rltest`, `-tags conformance` and `-tags scripttest`.
 
 ## 3. Lua (store scripts in `internal/scripts`)
@@ -170,7 +171,9 @@ Scripts run inside Valkey's Lua 5.1 sandbox. When a script fails halfway, its ea
 - **Fuzzing:** the targets are `FuzzReader` (RESP), `FuzzDecode` (store replies: never a panic; unknown shapes and out-of-range values are `outcome_unknown`), `FuzzValidate` (settings) and `FuzzEncodeInjective` (keys). Their seed corpora run in `make test-unit`.
 - **Mutation testing** (`bin/mutate`, `make mutate`): mutants run only L1, L2 and pytest tests, never L3.
   - Each curated planted bug (DESIGN §C9, PB1…) must make one of its named tests fail with an assertion; a panic, a build error or a timeout is not a kill. `slice-check` runs `bin/mutate --curated` for every row whose file exists. If one can't be killed without a contract change, stop and report (plan §5).
-  - Each survivor of the operator sweep (`bin/mutate --sweep`, at the end of S4–S8 on the slice's product files; S4's first sweep also covers S2's and S3's) needs a killing test or a one-line "equivalent because …" in the slice report.
+  - Each survivor of the operator sweep (`bin/mutate --sweep`, at the end of S4–S8 on the slice's product files; S4's first sweep also covers S2's and S3's) needs a killing test or a one-line "equivalent because …" in the slice report. Two other verdicts are allowed, each with its reason in the slice report, and only within these limits:
+    - "not killed (panic): crash-only": no input reaches the change without crashing first, so the mutant's only effect is a crash before any output a test could assert on. The crash stays visible to `bin/mutate`: never caught by a `recover` or a disguised one (such as `fmt` recovering a panic in a `String` method), and never counted as a kill through a child process's crash (`testutil.InChild` reports a child's crash as a crash).
+    - "not killed, by orchestrator decision": only `testing/synctest` could kill the mutant, because it differs only on an exact timer tie. §7 excludes a fake clock for Go timers, and synctest is newer than the module's `go 1.24` line. Only the orchestrator (plan §7) records this verdict, and it is not an equivalence.
 
 ## 6. Who owns retries, timeouts and contracts
 
@@ -204,9 +207,9 @@ Scripts run inside Valkey's Lua 5.1 sandbox. When a script fails halfway, its ea
 
 - [ ] Used the abstraction DESIGN names, and extended it instead of bypassing it
 - [ ] `make check` passes, with no new suppressions or config exceptions
-- [ ] New I/O takes `ctx` and has a deadline. Nothing retries outside its owner (§6)
+- [ ] New I/O takes `ctx` and has a deadline, or is one of §2's exceptions. Nothing retries outside its owner (§6)
 - [ ] Anything retried is idempotent, or provably never ran (`NOSCRIPT`)
 - [ ] No contract change was needed (or the work stopped and was reported)
 - [ ] Tests are at the right layer, and `make slice-check S=<id>` passes at the end of the slice (run by the orchestrator under plan §7)
 - [ ] Every plan-named test up to this slice exists and passes, and every curated mutant whose file exists is killed (both checked by `slice-check`)
-- [ ] Each operator-sweep survivor (S4–S8) has a killing test or a one-line "equivalent because …" in the slice report
+- [ ] Each operator-sweep survivor (S4–S8) has a killing test, a one-line "equivalent because …" or another verdict §5 allows in the slice report

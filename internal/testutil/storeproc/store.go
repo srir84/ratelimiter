@@ -66,9 +66,10 @@ const (
 // well as the soft one, and the hard limit is what the code relies on: maxclients can then
 // go up to 8,160 (8,192 less Valkey's 32 reserved descriptors) and no further, which
 // TestC2_DurableProfile checks (CONFIG SET maxclients 8000 accepted, 8161 refused with
-// "try with 8160"). DESIGN §B1 expects Valkey to lower maxclients when its limit is too
-// low; on macOS, without the wrapper, it was seen instead to raise its own limit to 4,128
-// when the hard limit allowed and keep maxclients 4,096.
+// "try with 8160"). Without the wrapper, Valkey raises its own limit to 4,128 (maxclients
+// 4,096 + 32) only from a soft limit below that, as macOS's default 256 is, keeping
+// maxclients 4,096 when the hard limit allows and lowering maxclients only when the hard
+// limit is lower; from a higher inherited limit it keeps that limit (DESIGN §B1).
 const spawnScript = `ulimit -n 8192 && exec "$0" "$@"`
 
 // errPortTaken marks a start that failed because the picked port was taken meanwhile.

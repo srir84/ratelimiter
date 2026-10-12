@@ -56,7 +56,7 @@ valkey-server deploy/valkey-durable.conf --port 6390 --dir /path/to/store --aclf
 | `aof-use-rdb-preamble`, `save` | `yes`, `""`: the AOF is the record | — |
 | `maxmemory` / `maxmemory-policy` | sized per `STA-7` (512 MB in the shipped file, the harness size) / `noeviction` | `STA-16` |
 | `maxclients` | 4,096 | the connection budget below |
-| `auto-aof-rewrite-percentage` / `auto-aof-rewrite-min-size` | production: 100 / `1gb`, about one rewrite every 4–5 min at 10,000 allowed acquires/s (~400 B of AOF each; limited acquires write nothing). Capacity benchmarks pass 0 and rewrite between runs | DESIGN §D1 |
+| `auto-aof-rewrite-percentage` / `auto-aof-rewrite-min-size` | production: 100 / `1gb`, about one rewrite every 4–5 min at 10,000 allowed acquires/s (~400 B of AOF each; limited acquires write nothing). Capacity benchmarks pass `--auto-aof-rewrite-percentage 0` (the min-size stays `1gb`) and rewrite between runs | DESIGN §D1 |
 | `bind`, `protected-mode`, `port` | `127.0.0.1`, `yes`; the harness uses port 6390 | `HAR-20` |
 | ACL file | Rendered with freshly generated passwords, mode 0600; its first line is `user default off`, so only the listed users connect | `STA-16` |
 
@@ -93,7 +93,7 @@ The deployment declares the failure load it supports and sizes the limits and st
 | Per-key step cost | O(markers on the key), at most `max_markers_per_key`, for acquire, refund and cleanup | measured at 1,000 and 10,000 markers |
 
 - **Connection budget:** at 11 connections per instance, plus one during a reconnect, a store with `maxclients` 4,096 serves about **340 instances** (4,096 ÷ 12). Alert at 80 % of `maxclients`; past that, raise `maxclients` and the file limit, or split deployments (one store per deployment).
-- Valkey lowers `maxclients` by itself when its file-descriptor limit is too low: give the store process a soft `RLIMIT_NOFILE` above `maxclients` (the harness raises it to 8,192 and refuses a run unless `CONFIG GET maxclients` returns 4,096).
+- Valkey needs `maxclients` + 32 file descriptors. It raises its own `RLIMIT_NOFILE` that far when the hard limit allows, and otherwise lowers `maxclients` by itself: give the store process a hard limit of at least `maxclients` + 32 (the harness raises the soft limit to 8,192 and refuses a run unless `CONFIG GET maxclients` returns 4,096).
 
 ## Admin tool (`rladmin`)
 
@@ -101,11 +101,11 @@ The deployment declares the failure load it supports and sizes the limits and st
 
 | Command | Operation | Output and exit |
 |---|---|---|
-| `rladmin start-epoch --policy shared.toml [--replace --expect-epoch ID]` | `ADM-1`: a new epoch with a new 128-bit ID and the policy's fingerprint. Without `--replace` it needs no readable record (a fresh or wiped store, or a malformed record); with it, the current ID must equal `ID`. Every budget restarts full | prints `epoch_id`; exit 0, 2 refused, 3 store error |
+| `rladmin start-epoch --policy shared.toml [--replace --expect-epoch ID]` | `ADM-1`: a new epoch with a new 128-bit ID and the policy's fingerprint. Without `--replace` it needs no readable record (a fresh or wiped store, or a malformed record); with it, the current ID must equal `ID`. Every budget restarts full | prints `epoch_id`; exit 0, 2 refused, 3 store error, 4 `clock_error` |
 | `rladmin status` | `ADM-4`: epoch ID, fingerprint, integrity hold, high-water mark, tracked buckets, live markers, quarantined keys | table or `--json` |
 | `rladmin inspect --key K` | `ADM-4`: one key's stored state: present, balance, last update, generation, sequence, latest receipt expiry, markers, index entry, quarantine flag | table or `--json` |
 | `rladmin restore --policy shared.toml --key K [--balance-units U \| --balance-tokens T] --expect-epoch ID` | `ADM-2`, for a quarantined key: deletes its stored data except the flag and writes a bucket with a new generation and the balance: 0 units by default, `0 ≤ U ≤ capacity × rate_period_ns`, `T` sent as `T × rate_period_ns` | the new generation |
-| `rladmin clear --policy shared.toml --key K --expect-epoch ID` | `ADM-3`: removes the quarantine flag once a bucket is present and the key passes every consistency check | exit 0, 2 refused |
+| `rladmin clear --policy shared.toml --key K --expect-epoch ID` | `ADM-3`: removes the quarantine flag once a bucket is present and the key passes every consistency check | exit 0, 2 refused, 3 store or integrity problem, 4 `clock_error` |
 | `rladmin store-info [--json]` | The store's `INFO` (persistence, clients, memory, stats) and `SLOWLOG GET 20` | table or JSON; monitoring runs it on a schedule |
 | `rladmin store-rewrite` | `BGREWRITEAOF`, then waits for it to finish | exit 0, 3 |
 
@@ -174,7 +174,7 @@ Every signal comes from the library (each instance's `Health` and `Metrics`, exp
 | `rl_cleanup_stops_total` | counter | `result`: what stopped a pass (5 values) | Passes stopped early |
 | `rl_cleanup_lag_seconds` | gauge | — | Age of the oldest due cleanup entry at the start of the last pass |
 | `rl_clock_lag_microseconds` | gauge | — | How far the store clock is behind the high-water mark (0 when it is not behind, or unreadable) |
-| `rl_listener_drops_total` | counter | — | Refund events dropped because the host's listener queue was full |
+| `rl_listener_drops_total` | counter | — | Refund events dropped because the host's listener queue was full, or because `Close` stopped the listener before they were delivered |
 | `rl_integrity_hold` | gauge | — | 1 while the epoch's integrity hold is set |
 | `rl_reclaim_keys_total` | counter | — | Old-epoch keys unlinked |
 | `rl_acquire_results_total` | counter | `result`: the 14 result kinds | Acquire results |

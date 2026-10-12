@@ -162,8 +162,9 @@ fi
 
 # --- Harness PostgreSQL cluster (.data/pg, port 5433) --------------------------
 
-# The five DESIGN §C8 settings, then no Unix socket (owner decision 2026-10-04): every
-# client connects over TCP to 127.0.0.1:5433, so the server writes nothing to /tmp.
+# The six DESIGN §C8 settings. The last turns off the Unix socket (owner decision
+# 2026-10-04): every client connects over TCP to 127.0.0.1:5433, so the server writes
+# nothing to /tmp.
 pg_settings=(
   "max_connections = 300"
   "port = $PG_PORT"

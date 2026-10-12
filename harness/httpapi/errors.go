@@ -66,10 +66,10 @@ func refusal(k limiter.ResultKind) (status int, code string, ok bool) {
 }
 
 // dbOutcome maps a database outcome to the permit's finish and the response (DESIGN §B3 DB
-// outcome table): release only for a confirmed failure; status 200 with code "" for
-// committed. Work that SIGTERM cancelled before its first statement is the refusal after
-// acquire (ERR-15). A class outside the closed set is treated as Unknown, the class that
-// never refunds.
+// outcome table): release for a confirmed failure, and for work that SIGTERM cancelled before
+// its first statement (cancelled: the refusal after acquire, ERR-15); status 200 with code ""
+// for committed. A class outside the closed set is treated as Unknown, the class that never
+// refunds.
 func dbOutcome(c dbclient.Class) (release bool, status int, code string) {
 	switch c {
 	case dbclient.Committed:

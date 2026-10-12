@@ -211,10 +211,10 @@ func TestNewSignerWrapper(t *testing.T) {
 // (the instance never joins an epoch, so each attempt sends nothing and is retried) returns no
 // earlier than its 100 ms drain timeout and within 5 s, the refund ended unresolved (closed),
 // and the listener's dispatcher stopped; the refund's event, queued at the drain's end, was
-// delivered before Close returned and nothing was dropped (API-1d drops an event only on
-// overflow). A release() after Close ends unresolved (closed), and its event is dropped and
-// counted, never delivered; Health's ListenerDrops is the listener's count, and every slot is
-// free.
+// delivered before Close returned and nothing was dropped (API-1e: Close waits, within
+// its listener window, for the queued events). A release() after Close ends unresolved
+// (closed), and its event is dropped and counted, never delivered; Health's ListenerDrops is
+// the listener's count, and every slot is free.
 func TestCloseRefundsAndListener(t *testing.T) {
 	p, in := lifecycleSettings()
 	in.DrainTimeoutNs = 100_000_000

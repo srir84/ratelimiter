@@ -541,8 +541,8 @@ func TestRetentionTimer(t *testing.T) {
 // TestCloseDrain (plan S6 step 7; SPEC API-1d, API-1e, STA-15, T-REF-6 at L1): (a) refunds the
 // store refuses: Close(WithDrainTimeout(150 ms)) returns after about 150 ms with the refund
 // ended unresolved (closed), its event delivered before Close returns and nothing dropped
-// (API-1d drops an event only on overflow), its slots freed, Acquire not_ready with nothing
-// sent and Health closing;
+// (API-1e: Close waits, within its listener window, for the queued events), its slots freed,
+// Acquire not_ready with nothing sent and Health closing;
 // (b) a refund still in flight when Close begins is applied, and its event delivered, before
 // Close returns, and a release() during the drain ends unresolved (closed) at once, its event
 // delivered too; a second Close returns at once; (c) with nothing pending, a slow listener
@@ -563,7 +563,7 @@ func TestCloseDrain(t *testing.T) {
 		}
 		// The drain used its whole timeout; its end queued the event, which Close lets the
 		// dispatcher deliver before it stops it (SPEC API-1d, API-1e: the remaining refunds emit
-		// unresolved (closed), and only an overflow drops an event).
+		// unresolved (closed), and Close waits, within its listener window, for their events).
 		evs, drops := log.events(), l.Health().ListenerDrops
 		if len(evs) != 1 || drops != 0 {
 			t.Fatalf("when Close returned: %d events delivered and %d dropped, want 1 and 0", len(evs), drops)
@@ -689,8 +689,8 @@ func TestCloseDrain(t *testing.T) {
 // unresolved (closed). Their 32 events, queued at the drain's end in a listener queue with room
 // for them, are all delivered before Close returns, though the listener takes 20 ms over the
 // first while the rest wait in the queue; each counts its sent attempts (≥ 1), and none is
-// dropped: API-1d drops an event only on overflow. Close returns within the drain plus the
-// listener's short grace.
+// dropped: Close's listener window (API-1e) lets the listener take them all. Close returns
+// within the drain plus the listener's short grace.
 func TestCloseDeliversDrainEndEvents(t *testing.T) {
 	const (
 		n     = 32

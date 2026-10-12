@@ -113,7 +113,7 @@ ratelimiter/
 | `aof-use-rdb-preamble`, `save` | `yes`, `""` (AOF is the record) | same | — |
 | `maxmemory` / `maxmemory-policy` | sized per `STA-7` (harness: 512 MB) / `noeviction` | 128 MB / `noeviction` | `STA-16` |
 | `maxclients` | `4096` | `4096` | §A7 connection budget |
-| `auto-aof-rewrite-percentage` / `auto-aof-rewrite-min-size` | production: `100` / `1gb` (about one rewrite per 4–5 min at 10,000 allowed acquires/s, ~400 B of AOF each; limited acquires write nothing); capacity benchmarks: `0`, rewrite between runs; `TRF-S7`: production values plus forced rewrites at 3 and 7 min | `0` | §D1 |
+| `auto-aof-rewrite-percentage` / `auto-aof-rewrite-min-size` | production: `100` / `1gb` (about one rewrite per 4–5 min at 10,000 allowed acquires/s, ~400 B of AOF each; limited acquires write nothing); capacity benchmarks: `0` / `1gb`, rewrite between runs; `TRF-S7`: production values plus forced rewrites at 3 and 7 min | `0` / `1gb` | §D1 |
 | `bind`, `protected-mode`, `port` | `127.0.0.1`, `yes`, harness `6390` | free port | `HAR-20` |
 | ACL file | rendered from `deploy/acl.conf.tmpl` with freshly generated passwords into the run or test directory (mode 0600) | same | `STA-16` |
 
@@ -145,7 +145,7 @@ Measured on this laptop (Redis 8.6.2, macOS 26.6, M3 Max, 2026-10-03); reviewers
 | 5 | Script errors after a write | **The earlier write stays** | Every script checks everything before its first write (`CMP-2`) |
 | 6 | Out of memory, plain `#!lua` writing script | Refused **before execution** ("OOM command not allowed…"); `allow-oom` scripts run | acquire/refund `OOM` reply provably wrote nothing → `capacity_error`; maintenance scripts use `allow-oom` (§A4.8) |
 | 7 | Unknown SHA | `NOSCRIPT No matching script` | Reload once, retry (`API-22`) |
-| 8 | AOF content for a script | Effects wrapped in `MULTI … EXEC` | Crash recovery replays a script's writes all or none |
+| 8 | AOF content for a script | Effects wrapped in `MULTI … EXEC` (in a fresh AOF, the first entry also holds `SELECT 0` after `MULTI`) | Crash recovery replays a script's writes all or none |
 | 9 | `appendfsync always` cost | 50 clients: ~3,000 ops/s, p50 14 ms; 600 clients: ~29,800 ops/s, p50 19 ms, p99 33 ms; with automatic AOF rewrite on, p99 up to 760 ms; `everysec`: ~83,000 ops/s, p50 0.5 ms. Raw single-writer `F_FULLFSYNC` p50 ≈ 6.3 ms, plain `fsync` ≈ 0.02 ms | Throughput comes from group commit: keep many commands in flight (row 13); automatic rewrite off for capacity benchmarks |
 | 10 | A Lua table with a `nil` converted to a reply | The array stops at the first `nil` | Reply arrays never contain `nil` (§A4.9) |
 | 11 | `unpack` of a 10,000-element list | Error "too many results to unpack" | No `unpack` over store-sized lists; chunk commands to ≤ 500 elements |
@@ -522,7 +522,7 @@ A value out of range is treated like a wrong shape: `outcome_unknown` with the r
 
 ### A5.1 Packages and goroutines
 
-![Flowchart](diagrams/DESIGN-d3-7db0788a.png)
+![Flowchart](diagrams/DESIGN-d3-9c3016f0.png)
 
 <details><summary>Diagram source (mermaid — flowchart)</summary>
 
@@ -535,7 +535,7 @@ flowchart TB
   workers["Refund workers ×128<br/>over 2 pipelined refund connections"]
   timers["Retention and backoff timers"]
   disp["Listener dispatcher<br/>bounded channel · drop counter"]
-  watch["Epoch watch goroutine<br/>every 1 s + early trigger"]
+  watch["Epoch watch goroutine<br/>every re-read interval (1 s by default) + early trigger"]
   clean["Cleanup runner goroutine<br/>every cleanup_interval × U[0.9, 1.0] · reclaimer"]
   pool["Call connections ×8<br/>pipelined · classification"]
   maint["Maintenance connection ×1<br/>cleanup · reclaim"]
@@ -680,7 +680,7 @@ flowchart TB
 
 </details>
 
-- **Sent** means at least one byte of that command was written to the socket; the writer tracks each command's byte range, so a partial batch write tells exactly which commands left. A dial whose TCP connect, `AUTH`, or any handshake step fails or times out is **not sent** → `unavailable`, because nothing that can change limiter state was sent (`API-22`).
+- **Sent** means at least one byte of that command was written to the socket; the writer tracks each command's byte range, so a partial batch write tells exactly which commands left. A dial whose TCP connect, `AUTH`, or any handshake step fails or times out is **not sent** → `unavailable`, because nothing that can change limiter state was sent (`API-22`). A `LOADING` or `BUSY` reply also counts as **not sent** → `unavailable`: a store not ready to serve refused the command before running it (`API-22`'s one exception for error replies).
 - **Connections:** each instance keeps `StoreConns` (8) call connections for acquire, the epoch watch, and `hold`; one maintenance connection for cleanup and reclaim; and `RefundConns` (2) refund connections used only by refund workers. A command is written at once, pipelined, on the ready connection with the fewest commands in flight; one reader goroutine per connection matches replies in order. There is no pool to wait for: local concurrency is already bounded by the slots (`busy`).
 - **Deadlines and failures:** each call has its own deadline, `min(host deadline, start + D)` with `D` = dependency deadline, covering the whole call: waiting for a connection, the write, the reply, and a `NOSCRIPT` reload and retry. When it passes after the command was written, only that call ends (`outcome_unknown`); the command stays on the connection and the reader drains its late reply (an allow it carried stays charged, `API-1`). A connection is closed only on an I/O error, or when its oldest written command has waited `D` since its write: then every command still in flight on it becomes `outcome_unknown`, and commands not yet written move to another ready connection within their own deadline.
 - **Reconnects:** a failed connection is redialed with backoff `min(1 s, 50 ms × 2^n) × U[0.5, 1.0]`; each dial plus `AUTH` has a deadline ≤ `D`. While no connection of a kind is ready and the last dial failed within the current backoff, calls fail fast as `unavailable` (nothing sent) instead of each waiting out its deadline.
@@ -819,7 +819,7 @@ flowchart LR
 
 ### A5.11 Listener, health, metrics, diagnostics
 
-- **Listener:** events go into a channel of `ListenerQueueSize`; one dispatcher goroutine calls the listener inside `recover()`. A full channel drops the event and increments `listener_drops` (`API-1d`, `HOST-8`). After the drain, `Close` lets the dispatcher deliver the queued events until the drain deadline, or for a listener grace of 100 ms past the drain's end when that is later, and goes on as soon as the queue is empty; then it stops the dispatcher without waiting for a blocked callback, and the events still queued, and any emitted later, are dropped and counted.
+- **Listener:** events go into a channel of `ListenerQueueSize`; one dispatcher goroutine calls the listener inside `recover()`. A full channel drops the event and increments `listener_drops` (`API-1d`, `HOST-8`). After the drain, `Close` lets the dispatcher deliver the queued events until the drain deadline, or for a listener grace of 100 ms past the drain's end when that is later, and goes on as soon as the queue is empty and no callback is running; then it stops the dispatcher without waiting for a blocked callback, and the events still queued, and any emitted later, are dropped and counted.
 - **Health** (struct; the harness serves it as JSON): `status`, `reason`, `epoch_id`, `clock_source`, per-instance settings, `listener_drops`, `store_error` (last), `fixtures` (true only for limiters built through `core.NewWithHooks`).
 - **Metrics** (`MetricsSnapshot`; the harness renders Prometheus text):
 
@@ -841,7 +841,7 @@ flowchart LR
 | `rl_tracked_buckets`, `rl_live_markers`, `rl_quarantined_keys` | gauge | from each epoch read (§A5.7) |
 | `rl_store_connections` | gauge | `kind` = call / refund / maintenance; ready connections |
 
-- **Diagnostics** (`Diag`): `Scope` (`key`/`epoch`), `Reason` (the reason strings in §A3.3 and §A4.9), `StoreError` (raw error reply text, for operators only).
+- **Diagnostics** (`Diag`): `Scope` (`key`/`epoch`), `Reason` (the reason strings in §A3.3 and §A4.9; for a local refusal (§A5.3, §A5.8), the epoch-watch state's health reason, or `read_epoch`'s reason for `state_lost`; `signer_unusable` when the signer is unusable, and `signing_failed` for a `receipt_error`), `StoreError` (raw error reply text, or the raw reply that failed the §A4.9 checks; for operators only).
 
 ### A5.12 Test-only entry point
 
@@ -870,17 +870,17 @@ func Kill(l *limiter.Limiter)                        // stops goroutines and con
 
 | Command | Operation | Output / exit |
 |---|---|---|
-| `rladmin start-epoch --policy shared.toml [--replace --expect-epoch ID]` | `ADM-1` (new 128-bit ID) | prints `epoch_id`; exit 0 / 2 refused / 3 store error |
+| `rladmin start-epoch --policy shared.toml [--replace --expect-epoch ID]` | `ADM-1` (new 128-bit ID) | prints `epoch_id`; exit 0 / 2 refused / 3 store error / 4 `clock_error` |
 | `rladmin status` | `ADM-4` status | table or `--json` |
 | `rladmin inspect --key K` | `ADM-4` per-key inspect | table or `--json` |
 | `rladmin restore --policy shared.toml --key K [--balance-units U \| --balance-tokens T] --expect-epoch ID` | `ADM-2`; balance default 0 units, `0 ≤ U ≤ capacity × rate_period_ns`, `T` sent as `T × rate_period_ns`; `fp`, `cap_units`, and `lifetime_us` (`receipt_lifetime_ns / 1000`) derived from the policy file | new generation |
-| `rladmin clear --policy shared.toml --key K --expect-epoch ID` | `ADM-3` | exit 0 / 2 refused |
+| `rladmin clear --policy shared.toml --key K --expect-epoch ID` | `ADM-3` | exit 0 / 2 refused / 3 store or integrity problem / 4 `clock_error` |
 | `rladmin store-info [--json]` | The store's `INFO` (persistence, clients, memory, stats) and `SLOWLOG GET 20` | table or JSON; monitoring runs it on a schedule |
 | `rladmin store-rewrite` | `BGREWRITEAOF`, then waits for it to finish | exit 0 / 3 |
 
 - Reads the store address and credentials from `--store` / environment (`RL_STORE_ADDR`, `RL_ADMIN_USER`, `RL_ADMIN_PASSWORD`); the expected ID comes from `read_epoch.lua`.
 - `store-info` and `store-rewrite` give production operators what they need through the admin tool, so no other user reaches the store (`STA-16`).
-- **Exit codes** (all commands): 0 ok; 2 refused (`{41}`, reason printed); 3 store or integrity problem (`{20}`, `{22}`, `{25}`, an error reply, a reply that fails the §A4.9 layout or range checks, or "epoch changed during read"); 4 `clock_error` (`{21}`).
+- **Exit codes** (all commands): 0 ok; 2 refused (`{41}`, reason printed), an invalid policy file, or a usage error; 3 store or integrity problem (`{20}`, `{22}`, `{25}`, an error reply, a reply that fails the §A4.9 layout or range checks, "epoch changed during read", or a failed connection, `AUTH` or exchange, including one ended by the command's deadline or a signal); 4 `clock_error` (`{21}`).
 
 ## A7. Numbers and proofs
 
@@ -969,7 +969,7 @@ flowchart LR
 | `bin/bench/` | `hitapi` and `rladmin` built without tags: the system under test and the product tool |
 | `bin/test/` | Every binary built with `-tags rltest`; harness tools (`orchestrator`, `hitgen`, `sampler`, `faultctl`) always run from here, in both run kinds |
 
-- **File descriptors:** the orchestrator raises the soft `RLIMIT_NOFILE` to 8,192 for `valkey-server` and `hitapi` children (Go restores the original soft limit for children it starts). `hitapi` records its effective limit in its `start` record and refuses to start below 1,024 (12 store + 64 DB + 512 HTTP, plus spare). Valkey lowers `maxclients` by itself when its limit is too low, so the orchestrator refuses the run unless `CONFIG GET maxclients` (as `rl_ops`) returns 4,096.
+- **File descriptors:** the orchestrator raises the soft `RLIMIT_NOFILE` to 8,192 for `valkey-server` and `hitapi` children (Go restores the original soft limit for children it starts). `hitapi` records its effective limit in its `start` record and refuses to start below 1,024 (12 store + 64 DB + 512 HTTP, plus spare). Valkey needs `maxclients` + 32 descriptors: when its soft limit is lower, it raises its own limit that far if the hard limit allows (4,128 from macOS's default of 256), and otherwise lowers `maxclients` by itself, so the orchestrator refuses the run unless `CONFIG GET maxclients` (as `rl_ops`) returns 4,096.
 
 ## B2. Shared config file (`HAR-12`)
 
@@ -1008,7 +1008,7 @@ db_dsn = "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conn
 
 ## B3. `hitapi` request handling
 
-![Flowchart](diagrams/DESIGN-d9-08fa7563.png)
+![Flowchart](diagrams/DESIGN-d9-6c3f7c00.png)
 
 <details><summary>Diagram source (mermaid — flowchart)</summary>
 
@@ -1031,6 +1031,7 @@ flowchart TB
   db -->|"committed / existed"| okd["permit.Done() · 200"]
   db -->|"confirmed failure"| rel["permit.Release() · 500/503"]
   db -->|"unknown"| unk["permit.Done() · 503 ERR-16"]
+  db -->|"cancelled: SIGTERM, nothing sent"| e15
 ```
 
 </details>
@@ -1041,11 +1042,12 @@ flowchart TB
 |---|---|---|---|
 | Row inserted, or existing row read | committed | `done()` | 200 (`ERR-1`/`ERR-2`) |
 | `pgconn.SafeToRetry(err)` true (nothing sent: refused, dial timeout, ctx done before send) | confirmed failure, no row | `release()` | 503 `ERR-14` |
-| Server error with SQLSTATE (statement failed, rolled back), including the 2.5 s `statement_timeout` | confirmed failure, no row | `release()` | 503 `ERR-14` |
+| Server error with SQLSTATE (statement failed, rolled back), including the 2.5 s `statement_timeout`, but not one of severity `PANIC` | confirmed failure, no row | `release()` | 503 `ERR-14` |
 | DB fixture "fail after commit" | confirmed failure, row may remain | `release()` | 500 `ERR-13` |
-| Timeout or connection loss after send, or `P` passed without a confirmed rollback | unknown | `done()` | 503 `ERR-16` |
+| Timeout or connection loss after send, a server error of severity `PANIC` (crash recovery decides whether the row exists), or `P` passed without a confirmed rollback | unknown | `done()` | 503 `ERR-16` |
+| `SIGTERM` began (`HAR-15`) before the first statement was sent: seen while waiting for a pool connection (the wait ends at once) or in a last check before the `INSERT` | cancelled, nothing sent | `release()` | 503 `ERR-15` |
 
-- **Refusal after acquire** (`ERR-15`, both builds): a request whose FNV-1a 64-bit hash of `user_id ‖ 0x00 ‖ request_id` mod 10,000 is below `refuse_after_acquire_bp`, or whose work `SIGTERM` cancels before its first DB statement is sent (`HAR-15`), skips the DB work, calls `permit.Release()` (a no-op for a degraded permit; no permit in baseline runs), and returns 503 `ERR-15`. Selection depends only on the IDs, so baseline and limiter runs refuse the same requests. This is the application refusing work, not a limiter fixture (`HAR-24`); it gives benchmark runs their refund population (`TRF-S7`) and `T-HTTP-9` its `ERR-15` case.
+- **Refusal after acquire** (`ERR-15`, both builds): a request whose FNV-1a 64-bit hash of `user_id ‖ 0x00 ‖ request_id` mod 10,000 is below `refuse_after_acquire_bp`, or whose work `SIGTERM` cancels before its first DB statement is sent (`HAR-15`), sends no DB statement, calls `permit.Release()` (a no-op for a degraded permit; no permit in baseline runs), and returns 503 `ERR-15`. `SIGTERM` is checked just before the DB work and again inside it, up to the `INSERT` (the cancelled class above). Selection depends only on the IDs, so baseline and limiter runs refuse the same requests. This is the application refusing work, not a limiter fixture (`HAR-24`); it gives benchmark runs their refund population (`TRF-S7`) and `T-HTTP-9` its `ERR-15` case.
 - **Two statements:** `INSERT … ON CONFLICT (user_id, request_id) DO NOTHING RETURNING arrival_ns`, then, only if nothing was returned, `SELECT arrival_ns` (sets `existed = true`). Each is its own implicit transaction; `ON CONFLICT` waits for a concurrent uncommitted inserter of the same key, so the `SELECT` sees the committed row.
 - `P` deadline: a `context.WithDeadline` created just before `Acquire`; the same context bounds the DB work (`HTTP-13`).
 - **Run-log writer:** a 100,000-entry channel drained by one goroutine that issues one `write(2)` per line on an `O_APPEND` file (no userspace buffer), so a line handed to the kernel survives `SIGKILL`. A full channel counts a drop; any drop invalidates the run (§B8).
@@ -1127,13 +1129,13 @@ sequenceDiagram
 | `FLT-1` (b) refuse | Adapter wrapper returns `unavailable` without sending | `POST /_test/faults {target:"store", mode:"refuse", match:"acquire", duration_ms}` |
 | `FLT-2` blackhole | `SIGSTOP` / `SIGCONT` on the store process; the send observer records which commands were sent. The outage is measured from `SIGSTOP` to the first successful `PING` after `SIGCONT`; scenarios arm 4.5 s so it stays within the 5 s limit | `faultctl store pause 4.5s` |
 | `FLT-3` / `FLT-4` lost reply | Wrapper calls the real adapter, discards the reply, returns `outcome_unknown` | `mode:"drop_reply", match:"acquire"/"refund", count` |
-| `FLT-5` | DB wrapper: fail before insert / fail after commit | `target:"db", mode:"fail_before"/"fail_after_commit"` |
-| `FLT-6` | `faultctl api kill N --restart`: reads the target's `/health` (`listener_drops`, `log_drops`) just before `SIGKILL` and writes a lifecycle record; a failed read marks the refund evidence incomplete (`HAR-13`) | `faultctl api kill N --restart` |
-| `FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): delete bucket fields, delete `k`, delete `mi` or one of its members, delete the `ix` member, delete a marker field, corrupt a field, add a malformed `ix` member, change a shared key's type, delete `hwm`, corrupt the record, wipe | `faultctl tamper <op> --key K` |
+| `FLT-5` | DB wrapper: fail before insert / fail after commit | `target:"db", mode:"fail_before"/"fail_after_commit"` (the next DB operation; with `count` N, the next N) |
+| `FLT-6` | `faultctl api kill N --restart`: calls `POST /_test/prekill` on the target (it stops `/hit`, waits up to `P` + 1 s for in-flight requests, drains the run-log queue, and replies `listener_drops`, `log_drops` and `log_queue_len`), then appends a `pre_kill` lifecycle record to the target's `api-N.jsonl`, and then sends `SIGKILL`; a failed call or an undrained queue gives `read_ok:false`, which marks the refund evidence incomplete (`HAR-13`) | `faultctl api kill N --restart` |
+| `FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): delete bucket fields, delete `k`, delete `mi` or one of its members, delete the `ix` member, delete a marker field, corrupt a field, add a malformed `ix` member, change a shared key's type, delete `hwm`, corrupt the record, wipe | `faultctl tamper <op> [--key K]` |
 | `FLT-8` | Small `max_*` limits in the scenario config | config |
-| `FLT-9` | DB wrapper: commit, then return an unknown-outcome error | `target:"db", mode:"lose_commit_reply"` |
+| `FLT-9` | DB wrapper: commit, then return an unknown-outcome error | `target:"db", mode:"lose_commit_reply"` (the next DB operation; with `count` N, the next N) |
 | `FLT-10` | Signer wrapper: fail / corrupt / unusable | `target:"signer", mode:…` |
-| Barriers | Adapter wrapper blocks before send or after reply until released | `POST /_test/barrier {name, at}`, `POST /_test/barrier/release` |
+| Barriers | Adapter wrapper blocks before send or after reply until released | `POST /_test/barrier {name, at}` (every call; `match:"acquire"/"refund"` narrows it), `POST /_test/barrier/release` |
 | Controlled time | `rl:ctl:time` via `rl_fixture`; `faultctl clock` and the driver take **ns** and reject values that are not multiples of 1,000 (µs store granularity) | `faultctl clock set|advance|back` |
 
 - `/_test/*` routes are compiled only with `-tags rltest` and bound to loopback.
@@ -1151,16 +1153,17 @@ sequenceDiagram
 | `api-N.jsonl` `request` | completed `/hit` call | run_id, epoch_id, instance, user_id, request_id, arrival_ns, decision_ns, deduction_id, result, existed, http_status, error, limiter_ns, db_ns, total_ns |
 | `api-N.jsonl` `release` | `permit.Release()` called | deduction_id, release_mono_ns |
 | `api-N.jsonl` `refund` | listener event | deduction_id, result, reason, attempts, credit_decision_ns, release_mono_ns, final_mono_ns |
-| `api-N.jsonl` `lifecycle` | start, ready, pre-kill read, stop | start: max_in_flight, queue length (0), P, dependency_deadline, drain_timeout, nofile_limit (`HAR-14`, `HAR-15`); pre-kill and stop: listener_drops, log_drops |
+| `api-N.jsonl` `lifecycle` | start, ready, pre-kill read, stop | start: max_in_flight, queue length (0), P, dependency_deadline, drain_timeout, nofile_limit (`HAR-14`, `HAR-15`); pre-kill: listener_drops, log_drops, read_ok; stop: listener_drops, log_drops |
 | `gen.jsonl` | sent request or retry; one final `summary` line | §B4 |
 | `samples.jsonl` | sample | process stats, metrics snapshot, `ADM-4` status |
 | `db_rows.json` | run | final `SELECT count(*) FROM hits` |
-| `context.json` | run | hardware, OS, versions (Go, Valkey, PostgreSQL), store and PostgreSQL settings, F_FULLFSYNC floor and durable single-client script p50 (latest §C2 result), settings, seed, schedule hash, frozen thresholds hash, faults with actual start/end, start/end (`PRF-5`) |
+| `context.json` | run | hardware, OS, versions (Go, Valkey, PostgreSQL), store and PostgreSQL settings, F_FULLFSYNC floor and durable single-client script p50 (latest §C2 result), settings, scenario name, path and SHA-256, seed, schedule hash, frozen thresholds hash, faults with actual start/end, start/end (`PRF-5`) |
 
-**Report** (`report.md` + `report.json`): run context and run kind; load (planned vs sent, lag, retries); results by outcome; timing (limiter decision time from `limiter_ns`, DB time, refund release-to-final time, end-to-end from `gen.jsonl`, p50/p95/p99 per class, and p99 inside AOF rewrite windows for `TRF-S7`); resources; correctness (`BUD-11`/`BUD-11a` window check via `refmodel` from `decision` and `refund` records); baseline comparison; capacity verdicts (`T-RPT-2`, benchmark runs only); **evidence validity** (log drops = 0, listener drops = 0 summed over every process including pre-kill reads, fixtures off for benchmarks, measured outage ≤ 5 s, store outage segments armed ≤ 1, `gen.jsonl` summary present with log_drops = 0, and for `TRF-S7` at least one AOF rewrite window observed).
+**Report** (`report.md` + `report.json`): run context and run kind; load (planned vs sent, lag, retries); results by outcome; timing (limiter decision time from `limiter_ns`, DB time, refund release-to-final time, end-to-end from `gen.jsonl`, p50/p95/p99 per class, and p99 inside AOF rewrite windows for `TRF-S7`); resources; correctness (`BUD-11`/`BUD-11a` window check via `refmodel` from `decision`, `release`, `refund` and `lifecycle` records); baseline comparison; capacity verdicts (`T-RPT-2`, benchmark runs only); **evidence validity** (log drops = 0, listener drops = 0 summed over every process including pre-kill reads, every pre-kill read successful (`read_ok`), every process segment of an instance log (from one `start` line to the next) holding a `stop` or `pre_kill` line, fixtures off for benchmarks (at least one `/health` read, each showing fixtures off and the store clock, and no fault), a measured outage (`context.json` faults `outage_ns`) for every `faultctl store down` or `store pause` that ran, and every measured outage ≤ 5 s, store outage segments armed ≤ 1, `gen.jsonl` summary present with log_drops = 0, for `TRF-S7` at least one AOF rewrite window observed, and the correctness verdict pass or violation, not invalid (`HAR-13`)).
 
 - `hitapi` `/health` = the library `Health` JSON plus `log_drops`, `in_flight`, and `nofile_limit`.
 - **Golden lines:** `harness/runlog/testdata/golden/` holds hand-written example lines for `api-N.jsonl`, `gen.jsonl` and `samples.jsonl` (§C5).
+- **Saved evidence (`HAR-9`):** the report builder and `report/validate.py` read only saved files: the run directory, `runs/index.jsonl`, the frozen thresholds file, and the baseline run's `context.json` and `report.json`. The scenario file is not copied into the run directory; it is evidence by its pin, the path and SHA-256 that `context.json` records. Both read it from that path and fail when its SHA-256 differs, so a scenario file must not change while a run that pins it is kept.
 
 ## B9. Baseline and thresholds (`PRF-6`, `PRF-7`)
 
@@ -1240,7 +1243,7 @@ Re-runs §A3.0 rows 1–8, 10–12, 15, and 16 as assertions and records rows 9,
 - durable profile active, read as `rl_ops` (`appendfsync always`, `no-appendfsync-on-rewrite no`, `noeviction`, `maxclients` 4096), and AOF `MULTI … EXEC` wrapping;
 - `valkey-server --version` reports 9.1.x; a `redis-server` fallback (§C1) may run the other layers but is marked not conformance-eligible;
 - a single-writer `F_FULLFSYNC` loop on the run disk sets the floor; the durable single-client script p50 must be ≥ 0.5 × that floor (a plain `fsync` would be about 300× below it); both are written to `.data/conformance.json`, which the orchestrator copies into each run's `context.json`;
-- the durable latency/throughput curve (row 13) for 2, 4, 8, and 16 connections at pipeline depths 1, 16, and 64, with both row 13's command size and maximum-size commands (256-byte keys), is recorded; the plan sets `store_conns` from the maximum-size curve;
+- the durable latency/throughput curve (row 13) for 2, 4, 8, and 16 connections at pipeline depths 1, 16, and 64, with both row 13's command size and maximum-size commands (256-byte keys), is recorded, with the curve's `recommended_store_conns`; `store_conns` stays 8 (owner decision);
 - **crash test:** 32 writers on the durable profile, `SIGKILL` the store mid-load, restart; every acknowledged write must be present (§A3.0 row 15), three times;
 - `LOADING` while a restarted store loads a large AOF, and `BUSY` during a script past `busy-reply-threshold`, arrive before the command runs (§A3.0 row 16); the reload time for the §A7-sized dataset is recorded for the runbook (§A8).
 
@@ -1262,7 +1265,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 - **Store audit after every L2 test:** each L2 script test gets its store from `scriptrun.Store(t, …)` (`internal/testutil/scriptrun`), which registers `storestate.Audit(snapshot, AuditConfig) []string` in `t.Cleanup`, with `AuditConfig{Policy, Damaged []string, Restored []string, FillerPrefixes []string, Canaries [][]byte}`. A test that crafts a malformed state names those keys with `Damaged(keys…)` on the handle `scriptrun.Store` returns. Any finding fails the test. The rules (L3 uses them too, §C4):
   - **Grammar, every key:** only `rl:epoch`, `rl:ctl:time`, `rl:e:<32 hex>:{ix,q,k:<enc>,mi:<enc>}` (`enc` per `is_enc`) and the filler prefixes (`rl:pad:` and `rl:fill:`); a key not in `Damaged` must also have its §A3.2 type.
   - **Current epoch only** (the namespace that `rl:epoch.id` names; other namespaces, such as one awaiting reclaim, get the grammar check only), for keys not in `Damaged`: every key passes §A3.3 (`ok`); 0 ≤ `u` ≤ `cap_units`; 1 ≤ `g` ≤ `gen`; each marker expiry ≤ `x`; every stored `t` and marker credit time ≤ `hwm`; the `ix` score follows the §A3.2 rule (keys in `Restored` exempt).
-  - **Counters, only when `Damaged` is empty:** `nm` = the sum of `mc` = the sum of `ZCARD mi`; `ZCARD ix` = the `k:` key count ≤ `nb` ≤ that count + the `Restored` count (§A3.3 counter rule: a restore may count a key once too many); `q` is empty. With damage, `q` may hold only `Damaged` keys.
+  - **Counters, only when `Damaged` is empty:** `nm` = the sum of `mc` = the sum of `ZCARD mi`; `ZCARD ix` = the `k:` key count ≤ `nb` ≤ that count + the number of distinct current-epoch budget keys that `Restored` names (§A3.3 counter rule: a restore may count a key once too many; a key named twice counts once); `q` is empty. With damage, `q` may hold only `Damaged` keys.
   - **Policy:** the limits come from the policy whose fingerprint equals `rl:epoch.fp` (`T-CFG-5` replaces the settings).
   - **Canaries:** L3 only (§C4).
 - **Script discipline run:** `make test-scripts` runs the L2 packages twice, plain (`.out/test-scripts.json`) and with `RL_SCRIPT_AUDIT=1` (`.out/test-scripts-audit.json`; the variable is read only in `internal/testutil`, AGENTS.md §1). With it set, `scriptrun.Run(t, adapter, req)` (`req` is S3's `store.Request`, so a refund case can carry the receipt expiry) calls an instrumented variant built with `scripts.New(name, text)`: the assembled text with `redis.call(` → `audit_call(`, `redis.pcall(` → `audit_rpcall(` and `pcall(redis.call,` → `audit_pcall_call(`, and the wrapper functions inserted after the header line. Each wrapper checks before it calls, so its `error('AUDIT …')` is never caught by the script's own `pcall`; it reaches the test as a script error, and `Run` fails the test. The checks:
@@ -1279,7 +1282,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 - `harness/driver` builds N `limitertest.New(...)` instances against one store and exposes `Clock()` (ns, µs multiples only), `Tamper()`, per-instance wrappers, barriers, and an op log.
 - Every SPEC test is a Go test named after its ID, for example `func TestT_COR_1(t *testing.T)`; SPEC tests marked **[D]** run only through the driver.
 - **Design checks beyond SPEC IDs** (L3, named `TestDesign_…`): a pass during which the controlled clock regresses below the cutoff terminates and handles every key due at the cutoff; after a store restart (empty script cache) a cleanup pass completes through the pipeline `NOSCRIPT` reload (§A5.4); `New` with settings that fail the §A5.6 inequality is permanently `not_ready`; restoring an older AOF of the same epoch under running instances, with traffic during and after the restore, sets the hold at the first script that runs on the restored store or at the next epoch read, and a store restored from an earlier epoch is caught too (§A5.7); a host deadline on one call leaves the other calls on its connection unaffected, while a command that waits `D` closes the connection, fails exactly the commands in flight on it, and later commands succeed on a new connection.
-- **Go ↔ Python bridge:** a SPEC test that needs the reference model is a Go test (it owns the ID). It writes `oplog.jsonl` into `t.TempDir()` and runs `python3 -m refmodel.replay <file>` with the working directory at the repo root. Exit 0 = pass; a non-zero exit or a missing `python3` is a failure, never a skip. The record types are defined by the plan (policy, epoch origin, clock operations, acquire, refund, cleanup, restore, `ADM-4` inspect snapshots).
+- **Go ↔ Python bridge:** a SPEC test that needs the reference model is a Go test (it owns the ID). It writes `oplog.jsonl` into `t.TempDir()` and runs `python3 -m refmodel.replay <file>` with the working directory at the repo root. Exit 0 = pass; a non-zero exit or a missing `python3` is a failure, never a skip. The record types are defined by the plan (policy, epoch origin, clock operations, acquire, release and done, refund, cleanup steps and page reads, restore and clear, `ADM-4` inspect snapshots).
 - **Store audit at teardown:** after every instance is closed or killed, the driver's cleanup takes snapshots until two in a row are identical (≤ 5 tries, 100 ms apart; otherwise the test fails with "store not quiet") and audits the last one with the §C3 rules. `Tamper()` and `Fixture()` writes add the keys they touch to `Damaged` automatically, and `Restore`/`Clear` add theirs to `Restored`; the clock driver's `rl:ctl:time` writes are normal.
 - **Canaries:** the driver gives each instance a distinct 32-byte `WithKeyReader` canary, derived from the test name and the instance index. The audit fails if any key, field, value or AOF file in the store's directory contains a canary raw, in hex (either case) or in base64 (standard or URL alphabet, padded or not). This covers `RCP-4`'s "never stored" without a separate test.
 - **`BUD-11` at teardown:** for every L3 test that logged ops, sequential or concurrent, the driver's cleanup runs `python3 -m refmodel.check_bud11 <oplog>` (the check sorts by budget time): segmented by epoch, `ADM-2` restores counted as credit (SPEC `BUD-11`), unknown-time credits per HARNESS `T-HFLT-4`, degraded bypasses excluded. Tests that used `Tamper()` or `Fixture()` writes are exempt: they assert their refusals directly.
@@ -1298,7 +1301,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 - HARNESS tests (`T-HTTP-*`, `T-HFLT-*`, `T-HAR-1`, `T-FIX-*`, `T-TRF-1`) run in `make test-e2e` against `bin/test` binaries; `T-RPT-*` run in `make test-report` (below).
 - **Golden run-log lines** (`harness/runlog/testdata/golden/`): hand-written example lines, written from §B8 and the plan and never captured from the code's output: one per record kind and `event` of `api-N.jsonl`, one per attempt outcome plus the `summary` of `gen.jsonl`, and one per tick shape of `samples.jsonl`. Each Go writer's test checks its lines with `golden.Match` (`internal/testutil/golden`): a written line pairs with the golden line that has the same values for the test's exact keys (by position when it names none); paired lines must have the same keys at every level and the same JSON type for each value (arrays element by element, of equal length); other values may differ. Each line is added by the slice that builds its writer. The Python readers (`report`, `refmodel.check_bud11`) are tested on the same files, so a writer and its reader cannot drift apart. A golden line changes only together with the doc text it follows, or to correct a departure from that text.
 - `TRF-S6` and every fault run are test-build runs (`bin/test`); `TRF-S1`…`S5` and `S7` are benchmark runs (`bin/bench`).
-- `report/validate.py` checks a finished run: the `T-RPT-1` fields for every benchmark report, and for capacity and spike **limiter** runs the `T-RPT-2` checks (frozen thresholds hash matches, generator-limited steps excluded, `PRF-11` choice). A baseline run (`limiter_enabled = false`) is checked in **baseline mode**: §B8 evidence validity and the `T-RPT-1` fields except the baseline comparison. It runs at the end of every `make run`; a failure marks the report invalid. `test_t_rpt_1` and `test_t_rpt_2` (pytest, marker `run_evidence`, excluded from `make test-py`) run it against two short benchmark runs with their baselines, produced by `make test-report`: `scenarios/smoke-ramp.toml` (`verdict = "capacity"`, three 20 s steps) and `scenarios/smoke-spike.toml` (`verdict = "spike"`: base 30 s, 5× for 10 s, base 90 s).
+- `report/validate.py` checks a finished run: the `T-RPT-1` fields for every benchmark report, and for capacity and spike **limiter** runs the `T-RPT-2` checks (frozen thresholds hash matches, generator-limited steps excluded, `PRF-11` choice). A baseline run (`limiter_enabled = false`) is checked in **baseline mode**: §B8 evidence validity and the `T-RPT-1` fields except the baseline comparison. It runs at the end of every `make run`; a failure marks the report invalid. `test_t_rpt_1` and `test_t_rpt_2` (pytest, marker `run_evidence`, excluded from `make test-py`) run it against two short benchmark runs with their baselines, produced by `make test-report`: `scenarios/smoke-ramp.toml` (`verdict = "capacity"`, three 20 s steps) and `scenarios/smoke-spike.toml` (`verdict = "spike"`: base 30 s, 5× for 10 s, base 90 s). This laptop's SSD stalls on `F_FULLFSYNC` for 3.5–5 s about once every 2,300–2,800 flushes under `appendfsync always`, so a 60 s window's p99 can far exceed the 33 ms of §A3.0 row 9 that §B9's +50 ms allowance assumes. The §B9 thresholds make no allowance for such stalls, and the report shows the miss. `test_t_rpt_2` relaxes only what such a stall breaks, and only when the run's own evidence shows the stall (slow `limiter_ns` together with a sampler `INFO` read timing out): a stall overlapping the 2 s before the deadline makes it record the outstanding count instead of asserting 0, and one overlapping the time from then to the end of the window makes it record the window p99 and `met` instead of asserting them. Everything else it checks is asserted either way; the plan gives the exact rule.
 
 ## C6. Reference model
 
@@ -1312,7 +1315,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 
 - `tools/trace` (Go): parses SPEC.md and HARNESS.md for rule and test IDs; fails on a test function that maps to no defined ID, or on two functions for one ID (`TestT_…` in Go, `test_t_…` in Python); completeness, every ID having its function, is checked per slice and at the end of the build; enforces the import boundary of §A1; checks the ACL lists against the scripts' inner commands (§A2); lints `.lua` files (§C3) and runs luacheck on each script as the store receives it; fails on inline lint suppressions (`suppress`) and on rltest-only files without their build line (`tags`). Runs in `make check`.
 - **Plan-named tests** (`slices --upto <id>`, run by `make slice-check`): besides the 83 IDs, every test named in backticks in a slice's **Tests** section, for slices up to `<id>` on its dependency path (S2 and S3 don't depend on S1, so their checks skip it), is checked: Go `Test…`, `Fuzz…` and `Example…`; Python `path::name` and `test_…`. A brace list `Name_{A,B}` means `Name_A` or the subtest `Name/A`; `Name_*` needs at least one match; names in other sections (Goal, Watch out) are ignored. Each test must exist in source (Go: under any build tag; Python: a `def` in that file). If any `.out/*.json` stream (or JUnit `.out/*.xml`) has results for the test's package, the test must have a pass result; tests that a target excludes with `-skip`, and tests in packages that no slice-check target runs, only need to exist. (`go test -run X` exits 0 when nothing matches `X`, so Verify commands alone miss a skipped or renamed test.)
-- **`testglobals`** (in `make check`): in `_test.go` files and in test-helper packages (`internal/testutil/**`, `harness/{driver,fixtures,spectest,e2e,pgtest}/**`), an assignment, `++`/`--`, map or slice element write, or `&v` of a package-level variable outside its declaration fails. Read-only tables, constants and `//go:embed` variables pass. The only allowed hooks: the conformance collector `measurements` (`internal/testutil/conformance`) and `maxInFlight` (`cmd/hitgen`). This enforces AGENTS.md §5, which `.golangci.yml` cannot (gochecknoglobals is off for tests and the harness).
+- **`testglobals`** (in `make check`): in `_test.go` files and in test-helper packages (`internal/testutil/**`, `harness/{driver,fixtures,spectest,e2e,pgtest}/**`), a write to a package-level variable outside its declaration fails: an assignment to it or to a field, element or pointee of it, `++`/`--`, `&v`, a send on it, `delete`, `clear` or `close` on it, `copy` into it, passing it to a standard-library function that changes it in place (`sort.Strings`, `slices.Sort`, `maps.Copy`'s destination, …), or a call `x.m(…)` or method value `x.m` of a pointer-receiver method, for a variable `x` of the file's package or a test-helper package whose type `x`'s package or a test-helper package declares. So does a package-level variable declared there that holds a value that exists to be mutated, directly, through one pointer, or inside a struct or array value: a `sync` or `sync/atomic` value, a channel, a `strings.Builder`, a `bytes.Buffer` or a `math/rand/v2` generator. Read-only tables, constants and `//go:embed` variables pass. The only allowed hooks: the conformance collector `measurements` (`internal/testutil/conformance`) and `maxInFlight` (`cmd/hitgen`). This enforces AGENTS.md §5, which `.golangci.yml` cannot (gochecknoglobals is off for tests and the harness).
 - **`oracle`** (in `make check`): in `_test.go` files under `harness/spectest/` and `internal/scripts/`, a selector on the `ratelimiter/internal/core` import (whatever its local name) naming `RetryAfterNs` or `DecisionNs` fails: expected values come from literals, `math/big` or the reference model. Field reads such as `res.RetryAfterNs` and keys in composite literals are not selectors on the package, so they pass. (forbidigo cannot do this: with `analyze-types` it also flags the field key in `Result{RetryAfterNs: …}`.)
 - **`replies`** (run by `make slice-check` after the test targets): the reply-code closure of §C3.
 - **`api`** (in `make check`; passes while `limiter/` does not exist): loads `ratelimiter/limiter` (untagged) and `ratelimiter/limitertest` (`rltest`) with `go/types` and the standard-library source importer, resolving aliases to their core types and method sets. It fails on any exported name that appears in none of: the §A5.2 Go listing and its comments, §A5.11, §A5.12, or a plan Build item (for example `limitertest.ListenerQueueLen`). Names compare case- and underscore-insensitively (`ListenerDrops` matches §A5.11's `listener_drops`). For every struct and function that the §A5.2 listing declares, the (name, type) set of its fields and its signature must match exactly once they exist (order ignored: grouping is listing style). `--complete`, run at the end of the build, also fails when a §A5.2 item is missing. Staging is expected: `Close()` starts without options, and `RunCleanupPass` arrives with cleanup.
@@ -1324,7 +1327,7 @@ It must pass on the pinned Valkey before any slice that runs scripts against the
 
 | Target | Does |
 |---|---|
-| `make setup` | Installs the pinned lint tools (AGENTS.md); checks Go 1.24+, Python 3.13+, a store binary (offers `brew unlink redis && brew install valkey`; the two Homebrew formulas conflict), PostgreSQL 14+. Initializes `.data/pg`: `postgresql.conf` with `max_connections = 300`, `port = 5433`, `listen_addresses = '127.0.0.1'`, `fsync = on`, `synchronous_commit = on`; creates role `rl` and database `hits`; applies `deploy/pg-schema.sql` (`CREATE TABLE hits (user_id text, request_id text, arrival_ns bigint NOT NULL, PRIMARY KEY (user_id, request_id))`) |
+| `make setup` | Installs the pinned lint tools (AGENTS.md); checks Go 1.24+, Python 3.13+, a store binary (offers `brew unlink redis && brew install valkey`; the two Homebrew formulas conflict), PostgreSQL 14+. Initializes `.data/pg`: `postgresql.conf` with `max_connections = 300`, `port = 5433`, `listen_addresses = '127.0.0.1'`, `fsync = on`, `synchronous_commit = on`, `unix_socket_directories = ''` (no Unix socket, so nothing lands in `/tmp`, and every client connects over TCP to `127.0.0.1:5433`); creates role `rl` and database `hits`; applies `deploy/pg-schema.sql` (`CREATE TABLE hits (user_id text, request_id text, arrival_ns bigint NOT NULL, PRIMARY KEY (user_id, request_id))`) |
 | `make build` | `bin/bench/*` (no tags) and `bin/test/*` (`-tags rltest`) |
 | `make check` | golangci-lint (untagged, then once per tag: `rltest`, `conformance`, `scripttest`), `stylua --check`, `ruff check --ignore-noqa`, `ruff format --check`, `mypy`, `tools/trace` (AGENTS.md) |
 | `make fmt` | `golangci-lint fmt`, `stylua .`, `ruff format` |
@@ -1389,7 +1392,7 @@ The tests and checkers are tested too: every checker has fixtures it must catch,
 - Lua operators: delete one write-call line; delete one `write_hwm()`; `finish(` ↔ `reply(`; `'GT'` ↔ `'LT'`; delete `'XX'`; swap two reply-code names.
 - Go operators, on `internal/core`, `internal/store`, `internal/receipt`, `internal/keys` and `internal/settings`: flip `<`/`<=`/`>`/`>=` and `==`/`!=`; negate an `if` condition; return `nil` instead of an error.
 - Runtime budget: `--budget 30m` (the default).
-- Survivors go to `.out/mutants.txt`; each needs a killing test, or a one-line "equivalent because …" in the slice report. Survivors don't fail the build, because some are equivalent: for example, deleting a `write_hwm()` that never fires because `t ≤ hwm` there.
+- Survivors go to `.out/mutants.txt`; each needs a killing test, or a one-line "equivalent because …" in the slice report, or one of the two limited verdicts AGENTS.md §5 allows (crash-only; an orchestrator decision on an exact timer tie). Survivors don't fail the build, because some are equivalent: for example, deleting a `write_hwm()` that never fires because `t ≤ hwm` there.
 
 ---
 

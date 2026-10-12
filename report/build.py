@@ -786,9 +786,9 @@ class SpikeAcc:
     its latency population (those with an HTTP response) and its error denominator, as a step's
     observation window does.
 
-    The outstanding rule, the orchestrator's reading of plan H5 step 4 under PRF-6 (the spike's
-    backlog clears by the deadline; read literally, the step would also count the ordinary
-    requests still in flight at the deadline): an attempt-1 request planned before cutoff_ns
+    The outstanding rule of plan H5 step 4 under PRF-6 (the spike's backlog clears by the
+    deadline; an ordinary request planned less than a latency threshold before it may still be
+    in flight there, so it is not judged): an attempt-1 request planned before cutoff_ns
     (the deadline − the post-spike step's latency_threshold_ns from the frozen thresholds) is
     outstanding when no response or failure was logged by the deadline. A written one ended at
     sent_ns + latency (latency runs from the write to the response or the failure, both on
@@ -1057,9 +1057,9 @@ class ApiAcc:
 
     def read(self, path: Path, instance: int) -> None:
         """One instance's run log. Each process segment (from a start line, or from the file's
-        first line, whatever it is) must end with a stop or a pre_kill line, which carries its
-        drop counts (HAR-13); a segment without one, an empty file included, counts in
-        segments_unread."""
+        first line, whatever it is) must hold a stop or a pre_kill line, which carries its drop
+        counts (HAR-13), though not necessarily as its last line; a segment without one, an
+        empty file included, counts in segments_unread."""
         self.per_instance.setdefault(instance, 0)
         started = terminal = False
         for where, rec in rf.iter_jsonl(path):

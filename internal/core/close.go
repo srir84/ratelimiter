@@ -4,8 +4,9 @@ import "time"
 
 // listenerGrace is how long past the drain's end Close still lets the listener's dispatcher
 // deliver the events already queued, when the drain deadline leaves it less (plan S6 step 7),
-// to meet SPEC API-1d (an event is dropped only on overflow), API-1e and STA-15 (the refunds
-// still pending after the drain are emitted as unresolved (closed)) and T-REF-6 (b).
+// to meet SPEC API-1e (Close waits, within this window, for the queued events to be
+// delivered), API-1d (the promise holds while no event is dropped), STA-15 (the refunds still
+// pending after the drain are emitted as unresolved (closed)) and T-REF-6 (b).
 // The drain's end queues at most one event per pending refund (MaxPendingRefunds, 1,152 at
 // harness values) besides the odd release() after Close began, and a listener that hands
 // events off (HOST-8) takes microseconds per event, so the queue empties within milliseconds,
@@ -41,15 +42,14 @@ func WithDrainTimeout(d time.Duration) CloseOption {
 // (WithDrainTimeout, else DrainTimeoutNs) passes. Then the workers and every retention and
 // backoff timer stop: the attempts still in flight are cancelled and counted (refunds.drain),
 // and the refunds still pending end as unresolved (closed), their events queued for the
-// listener (SPEC API-1d drops an event only on overflow; API-1e, STA-15). The listener gets
-// until the drain deadline, or listenerGrace past the drain's end when that is later, to
-// deliver the queued events, and Close moves on as soon as the queue is empty; then its
-// dispatcher is stopped without waiting for a callback that is blocked, and the events still
-// queued behind such a callback, and later events, are dropped: when Close returns, every
-// event is delivered, dropped and counted, or in a callback still running. Last, the epoch
-// watch and the cleanup runner stop (a timed pass from Close's start on returns unavailable,
-// sending nothing), and then every connection closes. Close returns as soon as that is done;
-// a second Close returns at once (plan choice).
+// listener (SPEC API-1d, API-1e, STA-15). The listener gets until the drain deadline, or
+// listenerGrace past the drain's end when that is later, to deliver the queued events, and
+// Close moves on as soon as the queue is empty; then its dispatcher is stopped without waiting
+// for a callback that is blocked, and the events still queued behind such a callback, and later
+// events, are dropped: when Close returns, every event is delivered, dropped and counted, or in
+// a callback still running. Last, the epoch watch and the cleanup runner stop (a timed pass
+// from Close's start on returns unavailable, sending nothing), and then every connection
+// closes. Close returns as soon as that is done; a second Close returns at once (plan choice).
 func (l *Limiter) Close(opts ...CloseOption) {
 	o := closeOptions{drain: time.Duration(l.in.DrainTimeoutNs)}
 	for _, opt := range opts {

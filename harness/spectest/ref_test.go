@@ -329,14 +329,14 @@ func TestT_REF_5(t *testing.T) {
 // sent, and health is not_ready (closing). (b) Refunds refused, 5 released,
 // Close(WithDrainTimeout(500 ms)) returns in 500–800 ms, the 5 counted as unresolved in
 // rl_refund_results_total, and all 5 received as unresolved (closed), none dropped, when it
-// returns: the drain's end emits them into a queue with room for them, and API-1d drops an
-// event only on overflow (T-REF-6 (b): "the rest emitted as unresolved (closed)"). Another
-// instance keeps serving. (c) On a second deployment, the default drain (3.5 s) with T-REF-2 (a)'s
-// outage (the refunds held at a barrier until 1.5 s after release, then a 0.5 s refuse outage
-// on a store wrapper of the test's, nearer the store, which every refund let go meets): all
-// confirmed within 3.5 s of release, each after at least 2 refund calls, one refused before
-// the confirming one (retried during Close's drain); the other instance keeps serving, and
-// the key's allows total 20 + the credits.
+// returns: the drain's end emits them into a queue with room for them, and Close waits, within
+// its listener window, for them to be delivered (API-1e; T-REF-6 (b): "the rest emitted as
+// unresolved (closed)"). Another instance keeps serving. (c) On a second deployment, the
+// default drain (3.5 s) with T-REF-2 (a)'s outage (the refunds held at a barrier until 1.5 s
+// after release, then a 0.5 s refuse outage on a store wrapper of the test's, nearer the store,
+// which every refund let go meets): all confirmed within 3.5 s of release, each after at least
+// 2 refund calls, one refused before the confirming one (retried during Close's drain); the
+// other instance keeps serving, and the key's allows total 20 + the credits.
 func TestT_REF_6(t *testing.T) {
 	d := fastDriver(t, 3, nil)
 	var ops []driver.Op
@@ -601,8 +601,8 @@ func TestT_REF_7(t *testing.T) {
 // them while its refunds are refused, then is killed, and the refusal is lifted: after twice
 // the time a live instance needs to retry and refund (2 × (2 × RefundBackoffMax + D) =
 // 1.2 s), Inspect shows K as after the 5 acquires (u, g, s, and no marker), and instance 1 wrote
-// no refund command and emitted no refund event; instance 2 acquires and refunds K as usual;
-// instance 1 still emitted no refund event.
+// no refund command and no refund event reached its listener; instance 2 acquires and refunds
+// K as usual; still no refund event reached instance 1's listener.
 func TestT_REF_8(t *testing.T) {
 	d := fastDriver(t, 2, nil)
 	const key = "ref8"
@@ -628,7 +628,7 @@ func TestT_REF_8(t *testing.T) {
 		t.Errorf("the killed instance wrote %d refund commands, want none: every attempt before the kill was refused", n)
 	}
 	if evs := d.RefundEvents(0); len(evs) != 0 {
-		t.Errorf("the killed instance emitted %+v %v after the kill, want no refund event", evs, 2*retryWindow)
+		t.Errorf("the killed instance's listener received %+v %v after the kill, want no refund event", evs, 2*retryWindow)
 	}
 	op := allowed(t, d, 1, key)
 	d.Release(op)
@@ -636,6 +636,6 @@ func TestT_REF_8(t *testing.T) {
 		t.Errorf("instance 2's refund: event %+v, want applied", ev)
 	}
 	if evs := d.RefundEvents(0); len(evs) != 0 {
-		t.Errorf("the killed instance emitted %+v, want no refund event", evs)
+		t.Errorf("the killed instance's listener received %+v, want no refund event", evs)
 	}
 }

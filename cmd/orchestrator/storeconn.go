@@ -31,7 +31,8 @@ const (
 	// storeStartPoll is the interval between two connection attempts while the store starts.
 	storeStartPoll = 50 * time.Millisecond
 	// storeMaxClients is the maxclients the store must report (DESIGN §A2, §B1): Valkey lowers
-	// it by itself when its file limit is too low, so the run checks the value in force.
+	// it by itself when its hard file limit is below maxclients + 32, so the run checks the
+	// value in force.
 	storeMaxClients = "4096"
 )
 

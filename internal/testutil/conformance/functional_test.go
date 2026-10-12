@@ -82,7 +82,7 @@ func TestC2_DurableProfile(t *testing.T) {
 		"save":                        "",
 		"maxmemory":                   strconv.Itoa(512 << 20),
 		"maxmemory-policy":            "noeviction",
-		"maxclients":                  "4096", // a low file limit makes Valkey lower it (DESIGN §B1)
+		"maxclients":                  "4096", // lowered when the hard file limit is below maxclients + 32 (DESIGN §B1)
 		"auto-aof-rewrite-percentage": "100",
 		"auto-aof-rewrite-min-size":   strconv.Itoa(1 << 30),
 		"bind":                        "127.0.0.1",

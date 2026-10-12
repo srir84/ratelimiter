@@ -46,16 +46,16 @@ func main() {
 // run's ctx, so the run stops every child's group in order, shuts the store down, removes the
 // pid file and exits 1. SIGHUP (a closed terminal, a dropped SSH session) is among them: its
 // default action would kill the orchestrator alone and leave its children, each in its own
-// process group, running. The orchestrator always catches SIGQUIT, as it does SIGTERM (plan H4
-// step 7; an orchestrator decision): Go's default, a goroutine dump and exit 2, would end the
-// orchestrator in the middle of an in-process store fault (faultctl_rltest.go), leaving a
-// paused store stopped (SIGSTOP) or a shut-down one not restarted; caught, it lets the fault's
-// recovery (SIGCONT, the restart) and the teardown run, as faultctl's own stop signals do. An
-// ignore inherited at startup never keeps SIGQUIT out: Go's runtime installs its own SIGQUIT
-// handler whatever the parent left (os/signal keeps an inherited ignore only for SIGHUP and
-// SIGINT), so ignored never reports SIGQUIT. A SIGINT or SIGHUP that ignored reports ignored at
-// startup (nohup ignores SIGHUP; a shell ignores SIGINT for a background job) is left out, so
-// it stays ignored: catching it would undo the ignore.
+// process group, running. The orchestrator always catches SIGQUIT, as it does SIGTERM (plan H3
+// step 4): Go's default, a goroutine dump and exit 2, would end the orchestrator in the middle
+// of an in-process store fault (faultctl_rltest.go), leaving a paused store stopped (SIGSTOP)
+// or a shut-down one not restarted; caught, it lets the fault's recovery (SIGCONT, the restart)
+// and the teardown run, as faultctl's own stop signals do. An ignore inherited at startup never
+// keeps SIGQUIT out: Go's runtime installs its own SIGQUIT handler whatever the parent left
+// (os/signal keeps an inherited ignore only for SIGHUP and SIGINT), so ignored never reports
+// SIGQUIT. A SIGINT or SIGHUP that ignored reports ignored at startup (nohup ignores SIGHUP; a
+// shell ignores SIGINT for a background job) is left out, so it stays ignored: catching it
+// would undo the ignore.
 func stopSignals(ignored func(os.Signal) bool) []os.Signal {
 	sigs := []os.Signal{syscall.SIGTERM, syscall.SIGQUIT}
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGHUP} {

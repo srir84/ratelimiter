@@ -694,7 +694,8 @@ func TestHTTPAPI_RefuseSelection(t *testing.T) {
 // per the DESIGN §B3 table: done() 200 for committed (an existing row keeps its original
 // arrival_ns, HTTP-10); release() 503 database_unavailable for a confirmed failure with no
 // row; release() 500 internal_error when the row may remain; done() 503
-// application_outcome_unknown for an unknown outcome.
+// application_outcome_unknown for an unknown outcome; release() 503
+// service_aborted_after_acquire when SIGTERM cancelled the work before its first statement.
 func TestHTTPAPI_DBOutcomeToPermit(t *testing.T) {
 	for _, c := range []struct {
 		name           string

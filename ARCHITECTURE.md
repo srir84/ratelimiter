@@ -18,7 +18,7 @@ Colours: **blue = rate limiter (the product)**, grey = the app using it, yellow 
 
 ### 1.1 The rate limiter by itself
 
-![Flowchart](diagrams/ARCHITECTURE-d1-1df9bb4d.png)
+![Flowchart](diagrams/ARCHITECTURE-d1-6d7c8a62.png)
 
 <details><summary>Diagram source (mermaid — flowchart)</summary>
 
@@ -57,7 +57,7 @@ flowchart LR
   end
   host <-->|"calls · refund events"| papi
   ad -->|"runs a script"| scr
-  bun -.->|"loaded at startup"| scr
+  bun -.->|"loaded on first use"| scr
   admin -->|"epoch record · repairs"| dat
   pol -.->|"reads"| conf
   admin -.->|"reads"| conf
@@ -84,7 +84,7 @@ The product has **three parts**:
 | Limiter store | One dedicated store server | Holds all shared state; runs the library's scripts atomically, one at a time, using its own clock (`CMP-2`) |
 | Admin tool | Run by the operator | Starts an epoch, repairs quarantined keys, shows status and per-key state; every change is fenced in the same atomic step: by the expected `epoch_id`, or for a first or recovery start by "no readable epoch record" (`CMP-3`, `ADM-*`) |
 
-- **The library defines everything inside the store:** the key layout and the scripts. It loads the scripts at startup. The operator only starts an empty store server.
+- **The library defines everything inside the store:** the key layout and the scripts. It loads each script on first use, and again after a store restart empties the script cache. The operator only starts an empty store server.
 - **The operator provides two things:** the store server, and identical settings for every instance, delivered however the app likes (`CFG-7`). No keys: each library instance generates its own receipt signing key at startup and keeps it in memory (`RCP-4`).
 - **The fingerprint includes the store schema version**, which changes only on incompatible layout or script changes. Library versions with the same schema version can be rolled out side by side; an incompatible one refuses to serve instead of corrupting data (`CFG-1`).
 - **The public API is the only door.** The host never touches the store, receipts, or retries (`CMP-1`).
@@ -372,7 +372,7 @@ flowchart LR
 
 ### 4.4 Epoch start, join, and repair
 
-![Sequence diagram](diagrams/ARCHITECTURE-d8-ba2efa3c.png)
+![Sequence diagram](diagrams/ARCHITECTURE-d8-98ce9d21.png)
 
 <details><summary>Diagram source (mermaid — sequence diagram)</summary>
 
@@ -382,7 +382,7 @@ sequenceDiagram
   participant S as Limiter store
   participant I as Library instances
   I->>S: read epoch record
-  S-->>I: none → not_ready (no_epoch), re-read every 1 s
+  S-->>I: none → not_ready (no_epoch), re-read every interval (1 s by default)
   O->>S: start epoch (new random ID, fingerprint, high-water)
   I->>S: read epoch record
   S-->>I: found, fingerprint matches → joined, ready
@@ -439,7 +439,7 @@ flowchart LR
 </details>
 
 - Balances never depend on this: they live in the store. Shutdown only decides whether **pending refunds** get finished (`STA-15`, `HOST-6`).
-- The drain defaults to `refund_deadline + outage_tolerance` (35 s) so a graceful stop keeps the refund guarantee; `close` returns early once all refunds are final and the listener has their events; a slow listener holds it until the drain deadline at most (or 100 ms past the drain's end, when that is later). The platform's kill grace period must exceed the release delay plus the drain (`HOST-6`). Other instances keep serving throughout.
+- The drain defaults to `refund_deadline + outage_tolerance` (35 s) so a graceful stop keeps the refund guarantee; `close` returns early once all refunds are final and the listener has handled their events; a slow listener holds it until the drain deadline at most (or 100 ms past the drain's end, when that is later). The platform's kill grace period must exceed the release delay plus the drain (`HOST-6`). Other instances keep serving throughout.
 
 ## 5. Failure handling: where each outcome is decided
 
