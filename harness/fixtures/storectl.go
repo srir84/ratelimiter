@@ -538,10 +538,10 @@ type opsConn struct {
 }
 
 // dialOps connects to t.Addr and authenticates as t.OpsUser within ctx, which must have a
-// deadline. Errors never hold the password (resp.Handshake redacts the store's reply).
+// deadline; ctx ending ends the wait at once, and dialOps then reports ctx's error
+// (authenticate). Errors never hold the password (resp.Handshake redacts the store's reply).
 func dialOps(ctx context.Context, t StoreTarget) (*opsConn, error) {
-	deadline, ok := ctx.Deadline()
-	if !ok {
+	if _, ok := ctx.Deadline(); !ok {
 		return nil, errors.New("connecting to the store: no deadline")
 	}
 	var d net.Dialer
@@ -549,17 +549,30 @@ func dialOps(ctx context.Context, t StoreTarget) (*opsConn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("connecting to the store at %s: %w", t.Addr, err)
 	}
-	stop := context.AfterFunc(ctx, func() { _ = nc.SetDeadline(time.Now()) })
-	err = resp.Handshake(nc, t.OpsUser, t.OpsPassword, deadline, nil)
+	if err := authenticate(ctx, nc, t.OpsUser, t.OpsPassword); err != nil {
+		return nil, fmt.Errorf("authenticating to the store at %s as %s: %w", t.Addr, t.OpsUser, err)
+	}
+	return &opsConn{ctx: ctx, nc: nc, r: resp.NewReader(nc)}, nil
+}
+
+// authenticate runs resp.Handshake on the freshly dialed nc as user, within ctx's deadline
+// (ctx must have one). ctx ending closes nc, which ends any wait on it for good; a past
+// deadline would not do, since resp.Handshake sets its own deadline first and that replaces
+// one a cancel just before had set. On an error nc is closed, and the error is ctx's once ctx
+// has ended (the closed connection's error is then only its effect).
+func authenticate(ctx context.Context, nc net.Conn, user, pass string) error {
+	deadline, _ := ctx.Deadline()
+	stop := context.AfterFunc(ctx, func() { _ = nc.Close() })
+	err := resp.Handshake(nc, user, pass, deadline, nil)
 	stop()
 	if cerr := ctx.Err(); cerr != nil {
 		err = cerr
 	}
 	if err != nil {
-		_ = nc.Close() // unusable either way; the handshake error is reported
-		return nil, fmt.Errorf("authenticating to the store at %s as %s: %w", t.Addr, t.OpsUser, err)
+		_ = nc.Close() // unusable either way; a second close changes nothing
+		return err
 	}
-	return &opsConn{ctx: ctx, nc: nc, r: resp.NewReader(nc)}, nil
+	return nil
 }
 
 // do sends one command and returns its reply; an error reply is a reply, not an error.

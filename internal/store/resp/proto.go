@@ -176,7 +176,9 @@ func AppendValue(buf []byte, v Value) []byte {
 }
 
 // ProtocolError reports a reply that breaks RESP2 framing or one of the reader's limits.
-// Reason never quotes the stream's bytes.
+// Reason names the broken rule and quotes none of the stream's text. It may give the stream's
+// type byte in hex, or a length the stream sent, which can echo a decimal password (Handshake
+// withholds a reason that holds its password).
 type ProtocolError struct{ Reason string }
 
 func (e *ProtocolError) Error() string { return "RESP protocol error: " + e.Reason }

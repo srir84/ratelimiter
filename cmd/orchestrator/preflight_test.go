@@ -208,15 +208,23 @@ func testNow() time.Time { return time.Date(2026, 10, 8, 14, 22, 33, 123456789, 
 
 // /_test/faults bodies (DESIGN §B6). hitapi decodes a body into typed fields (harness/httpapi
 // faultRequest): a later null leaves an earlier duration_ms in place, a key matches its field
-// in any case, and an absent or 0 duration_ms means no limit.
+// in any case, and an absent, null or 0 count or duration_ms means no limit.
 const (
 	// refuseBody arms a timed store refusal: one outage segment. So do refuseNullRepeat and
 	// refuseNullCase, each a 4000 ms refusal to hitapi.
 	refuseBody       = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000}`
 	refuseNullRepeat = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"duration_ms":null}`
 	refuseNullCase   = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"Duration_MS":null}`
-	// refuseNoLimit refuses until disarmed: no timed segment.
+	// refuseNoLimit, with neither a count nor a duration_ms, refuses until DELETE /_test/faults,
+	// which a scenario cannot send: an unbounded outage segment, refused as store_refuse_unbounded.
+	// So are refuseAbsent and refuseNull.
 	refuseNoLimit = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":0}`
+	refuseAbsent  = `{"target":"store","mode":"refuse","match":"acquire"}`
+	refuseNull    = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":null}`
+	// refuse5000 and refuse5001 are timed refusals of exactly the 5 s outage_tolerance
+	// (harness.toml's [policy] outage_tolerance_ns) and 1 ms more.
+	refuse5000 = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":5000}`
+	refuse5001 = `{"target":"store","mode":"refuse","match":"acquire","duration_ms":5001}`
 	// delayBody and dropReplyBody are timed store faults that are not refusals.
 	delayBody     = `{"target":"store","mode":"delay","match":"acquire","delay_ms":100,"duration_ms":4000}`
 	dropReplyBody = `{"target":"store","mode":"drop_reply","match":"refund","duration_ms":4000}`
@@ -357,6 +365,18 @@ func TestPreflight_Refusals(t *testing.T) {
 		{name: "two refuse bodies whose duration_ms repeats as null, then in another case", want: []string{reasonOutageSegments},
 			scenario: scenario("test", "", oneStep+
 				"[[faults]]\nat_s = 1\ncmd = '"+refuseNullRepeat+"'\n[[faults]]\nat_s = 5\ncmd = '"+refuseNullCase+"'\n")},
+		// A store refusal without a limit refuses until DELETE /_test/faults, which a scenario
+		// cannot send, and one longer than the 5 s outage_tolerance outlasts REF-5's one segment
+		// (DESIGN §A7; HARNESS FLT-1).
+		{name: "a store refuse body with neither count nor duration_ms", want: []string{reasonRefuseUnbounded},
+			scenario: scenario("test", "", oneStep+"[[faults]]\nat_s = 1\ncmd = '"+refuseAbsent+"'\n")},
+		{name: "a store refuse body with duration_ms null", want: []string{reasonRefuseUnbounded},
+			scenario: scenario("test", "", oneStep+"[[faults]]\nat_s = 1\ncmd = '"+refuseNull+"'\n")},
+		{name: "two refuse bodies with duration_ms 0, two unbounded segments", want: []string{reasonRefuseUnbounded, reasonRefuseUnbounded, reasonOutageSegments},
+			scenario: scenario("test", "", oneStep+
+				"[[faults]]\nat_s = 1\ncmd = '"+refuseNoLimit+"'\n[[faults]]\nat_s = 5\ncmd = '"+refuseNoLimit+"'\n")},
+		{name: "a store refuse body of duration_ms 5001, above the 5 s outage_tolerance", want: []string{reasonRefuseTooLong},
+			scenario: scenario("test", "", oneStep+"[[faults]]\nat_s = 1\ncmd = '"+refuse5001+"'\n")},
 		{name: "--instance-config on a bench run", want: []string{reasonInstanceConfBench},
 			scenario: scenario("bench", "", ""),
 			args:     []string{"--instance-config", "3=" + instanceConfig}},
@@ -480,11 +500,16 @@ func TestPreflight_Refusals(t *testing.T) {
 		{name: "one refuse body with duration_ms, one without", scenario: scenario("test", "", oneStep+
 			"[[faults]]\nat_s = 1\ncmd = '"+refuseBody+"'\n"+
 			"[[faults]]\nat_s = 5\ncmd = '{\"target\":\"store\",\"mode\":\"refuse\",\"match\":\"acquire\",\"count\":3}'\n")},
-		{name: "two refuse bodies with duration_ms 0, no limit to hitapi", scenario: scenario("test", "", oneStep+
-			"[[faults]]\nat_s = 1\ncmd = '"+refuseNoLimit+"'\n[[faults]]\nat_s = 5\ncmd = '"+refuseNoLimit+"'\n")},
+		{name: "a store refuse body of duration_ms 5000, the 5 s outage_tolerance", scenario: scenario("test", "", oneStep+
+			"[[faults]]\nat_s = 1\ncmd = '"+refuse5000+"'\n")},
 		{name: "a refuse body and timed store delay and drop_reply bodies", scenario: scenario("test", "", oneStep+
 			"[[faults]]\nat_s = 1\ncmd = '"+refuseBody+"'\n[[faults]]\nat_s = 2\ncmd = '"+delayBody+"'\n"+
 			"[[faults]]\nat_s = 3\ncmd = '"+dropReplyBody+"'\n")},
+		// Only refusals need a limit: a delay after the reply with neither count nor duration_ms
+		// (scenarios/hflt4-faults.toml holds one) and such a drop_reply are not outage segments.
+		{name: "store delay and drop_reply bodies with neither count nor duration_ms", scenario: scenario("test", "", oneStep+
+			"[[faults]]\nat_s = 1\ncmd = '{\"target\":\"store\",\"mode\":\"delay\",\"at\":\"after_reply\",\"delay_ms\":10000,\"match\":\"refund\"}'\n"+
+			"[[faults]]\nat_s = 2\ncmd = '{\"target\":\"store\",\"mode\":\"drop_reply\",\"match\":\"refund\"}'\n")},
 		{name: "stale pid file", scenario: scenario("test", "", ""),
 			edit: func(t *testing.T, s site) {
 				writeFile(t, s.path(pidFileName), strconv.Itoa(deadPID(t))+"\n", 0o600)
@@ -532,10 +557,11 @@ func TestPreflight_Refusals(t *testing.T) {
 
 // TestPreflight_OutageSegments (plan H3 step 1): the store outage segments the [[faults]] arm,
 // one per entry: each faultctl store down or store pause entry, and each /_test/faults body
-// that, read in hitapi's field types, arms a timed store refusal (target store, mode refuse,
-// duration_ms above 0; unknown keys ignored, so the count fails closed); more than one is
-// refused as store_outage_segments. Checked here directly, so the cases with faultctl entries
-// do not depend on the interim faultctl refusal.
+// that, read in hitapi's field types, arms a store refusal (target store, mode refuse) that is
+// timed (duration_ms above 0) or unbounded (neither count nor duration_ms); unknown keys are
+// ignored, so the count fails closed; more than one is refused as store_outage_segments.
+// Checked here directly, so the cases with faultctl entries do not depend on the interim
+// faultctl refusal.
 func TestPreflight_OutageSegments(t *testing.T) {
 	const (
 		down  = "faultctl store down 4s"
@@ -554,8 +580,12 @@ func TestPreflight_OutageSegments(t *testing.T) {
 		{"duration_ms repeated as null", []string{refuseNullRepeat}, 1},
 		{"duration_ms repeated as null in another case", []string{refuseNullCase}, 1},
 		{"duration_ms in another case", []string{`{"target":"store","mode":"refuse","match":"acquire","DURATION_MS":4000}`}, 1},
-		{"duration_ms 0", []string{refuseNoLimit}, 0},
-		{"duration_ms null", []string{`{"target":"store","mode":"refuse","match":"acquire","duration_ms":null}`}, 0},
+		// Unbounded refusals: they refuse until DELETE /_test/faults.
+		{"duration_ms 0", []string{refuseNoLimit}, 1},
+		{"duration_ms null", []string{refuseNull}, 1},
+		{"neither count nor duration_ms", []string{refuseAbsent}, 1},
+		{"count 0 and no duration_ms", []string{`{"target":"store","mode":"refuse","match":"acquire","count":0}`}, 1},
+		{"two unbounded refusals", []string{refuseAbsent, refuseNoLimit}, 2},
 		{"a count and no duration_ms", []string{`{"target":"store","mode":"refuse","match":"acquire","count":3}`}, 0},
 		{"timed store delay and drop_reply", []string{delayBody, dropReplyBody}, 0},
 		{"target db with mode refuse", []string{`{"target":"db","mode":"refuse","duration_ms":4000}`}, 0},
@@ -567,6 +597,7 @@ func TestPreflight_OutageSegments(t *testing.T) {
 		{"an unknown key", []string{`{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"instance":2}`}, 1},
 		// Bodies hitapi answers with 400, arming nothing.
 		{"a negative duration_ms", []string{`{"target":"store","mode":"refuse","match":"acquire","duration_ms":-5}`}, 0},
+		{"a negative count", []string{`{"target":"store","mode":"refuse","match":"acquire","count":-1}`}, 0},
 		{"duration_ms as a string", []string{`{"target":"store","mode":"refuse","match":"acquire","duration_ms":"4000"}`}, 0},
 		{"a second JSON value", []string{refuseBody + " {}"}, 0},
 	} {

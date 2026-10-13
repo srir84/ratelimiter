@@ -73,11 +73,18 @@ func (l *Limiter) send(ctx context.Context, enc string, st *epochState) Result {
 	case store.OK:
 		return l.decide(enc, st, sentAt, resp)
 	case store.Unavailable:
-		// Nothing was sent. When Close or Kill began meanwhile, the instance's own shutdown
-		// closed the adapter under this acquire, not a store found unavailable: a closing
-		// instance refuses in both modes (API-1e, API-8a, API-21). shutdown marks closing
-		// before it ends the lifetime and closes the adapter, so this load sees it.
-		if l.closing.Load() {
+		// Nothing was sent. From the start of Kill, or of the shutdown that ends Close (after
+		// its drain and the listener's window), the instance stops: its own lifetime end or
+		// adapter close may have failed this acquire, not a store found unavailable, so it
+		// refuses in both modes and nothing fails open because the instance stops (API-1e,
+		// API-21). Kill and shutdown set shuttingDown before they stop anything, so this load
+		// sees it. The causes are not told apart: an unavailable the store returned just as
+		// the shutdown began reads not_ready (closing) too, as every unavailable seen once the
+		// shutdown has begun is put down to it; that fails closed. Before that, through Close's
+		// drain and the listener's window, the adapter is open: an unavailable there comes
+		// from the store, and the failure mode decides (API-8a's closing covers new acquires
+		// only; API-20a, API-20b).
+		if l.shuttingDown.Load() {
 			return Result{Kind: NotReady, Diag: Diag{Reason: reasonClosing}}
 		}
 		// The one failure-mode branch (API-20a, API-20b, API-21).

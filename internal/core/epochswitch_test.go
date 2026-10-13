@@ -336,8 +336,8 @@ func TestEpochSwitch_ResetsFloors(t *testing.T) {
 	var permits [3]*Permit
 	for i := range permits {
 		res := l.Acquire(ctx, "k")
-		if res.Kind != Allowed {
-			t.Fatalf("acquire %d in A: %v (%+v), want allowed", i+1, res.Kind, res.Diag)
+		if res.Kind != Allowed || res.Permit == nil {
+			t.Fatalf("acquire %d in A: %v (%+v), permit %v; want allowed with a permit", i+1, res.Kind, res.Diag, res.Permit != nil)
 		}
 		permits[i] = res.Permit
 	}

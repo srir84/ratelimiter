@@ -399,8 +399,8 @@ func TestT_REF_6(t *testing.T) {
 		t.Errorf(`(b) rl_refund_results_total{result="unresolved"} = %v, want 5`, v)
 	}
 	// The drain used its whole timeout; Close then lets the dispatcher deliver the events its end
-	// queued before it stops the dispatcher, and returns once the queue is empty, so the
-	// driver's callback has taken all 5.
+	// queued before it stops the dispatcher, and returns once the queue is empty and the
+	// callback has returned, so the driver's callback has taken all 5.
 	received := 0
 	for _, ev := range d.RefundEvents(1) {
 		if ev.Result != limiter.Unresolved || ev.Reason != limiter.UnresolvedClosed {

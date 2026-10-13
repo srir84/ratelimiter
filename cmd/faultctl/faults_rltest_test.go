@@ -1354,8 +1354,10 @@ func TestTamperEpochFromHealth(t *testing.T) {
 // and clock set, advance and back, exits 2 with nothing done (no line, no store connection)
 // and points to [[faults]], which context.json records, while the run's orchestrator is live:
 // .data/orchestrator.pid in the repository root (the run directory's grandparent) names a live
-// process. A standalone stack's run directory, which has no context.json, refuses nothing when
-// there is no pid file, or one naming no live process or holding no PID: the store and api
+// process (kill(pid, 0) succeeds, or fails with EPERM, as for PID 1 without root). A standalone
+// stack's run directory, which has no context.json, refuses nothing when there is no pid file,
+// or one naming no live process or holding no PID (not a number, or one above math.MaxInt32,
+// which kill(2) would truncate to another PID): the store and api
 // commands fail (exit 1 with their line and its error, no store connection: the run has no
 // pids.json), and the tamper and clock commands run (exit 0, their commands sent to the fake
 // store); and store pause 1s, in a standalone run directory whose config.toml and pids.json
@@ -1455,7 +1457,9 @@ func TestRefusesUnderOrchestrator(t *testing.T) {
 		refused bool
 	}{
 		{strconv.Itoa(os.Getpid()) + "\n", true}, // this test process: live
+		{"1\n", true},                            // init or launchd: live, though kill(1, 0) gives EPERM without root
 		{"2147483647\n", false},                  // math.MaxInt32: no such process
+		{"4294967297\n", false},                  // above math.MaxInt32: no PID, though kill(2) would truncate it to 1
 		{"not a pid\n", false},
 	} {
 		if err := os.WriteFile(pidFile, []byte(c.content), 0o600); err != nil {

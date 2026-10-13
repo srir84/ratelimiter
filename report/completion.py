@@ -191,13 +191,15 @@ released after P, or excused by REF-9 (d). A release without its request line is
 when its refund was not confirmed in time (P cannot be judged).
 The run's measured outage is context.json's faults outage_ns (H4: faultctl's measure of a store
 down or pause). REF-5 allows "at most outage_tolerance, in one contiguous segment", so a run whose
-context.json shows more than one store outage segment (a faultctl store down or pause, a timed
-store refusal: target store, mode refuse, duration_ms above 0, as report.build.is_outage_segment
-counts them for the orchestrator's rule, DESIGN §A7 item 5; or any fault with an outage_ns), or one
-longer than config.toml's [policy] outage_tolerance_ns (its outage_ns, or a refusal's
-duration_ms), has no REF-5 bound to judge: an input error (orchestrator decision R3 of the H6
-slice review), found after the run's failure mode was read (orchestrator decision V4 of the H6
-round-1 repair), so the run still counts in check 4's failure modes.
+context.json shows more than one store outage segment (a faultctl store down or pause, a store
+refusal: target store, mode refuse, and a duration_ms above 0 or neither a count nor a
+duration_ms, as report.build.is_outage_segment counts them for the orchestrator's rule, DESIGN §A7
+item 5; or any fault with an outage_ns), or one longer than config.toml's [policy]
+outage_tolerance_ns (its outage_ns, or a refusal's duration_ms; a refusal with neither, which
+refuses until DELETE /_test/faults, is longer than any), has no REF-5 bound to judge: an input
+error (orchestrator decision R3 of the H6 slice review), found after the run's failure mode was
+read (orchestrator decision V4 of the H6 round-1 repair), so the run still counts in check 4's
+failure modes.
 hitapi writes a permit's decision line before the database step and its release line right after
 the failed step, through one ordered queue, and the request line once the response is written, so
 the join keeps only the decisions in flight and the releases (a killed segment's until the next
@@ -1128,9 +1130,10 @@ def store_wide_of(ctx: rf.Context, commands: list[FaultCommand | None]) -> list[
 
 def measured_outage(ctx: rf.Context, tolerance_ns: int) -> int:
     """The run's measured outage, which the REF-5 bound adds: context.json's faults outage_ns,
-    from at most one store outage segment (a faultctl store down or pause, a timed store refusal,
-    or any fault with an outage_ns) of at most [policy] outage_tolerance_ns (its outage_ns, or a
-    refusal's duration_ms), as REF-5 allows; else InputError (decision R3)."""
+    from at most one store outage segment (a faultctl store down or pause, a store refusal that
+    is timed or unbounded, or any fault with an outage_ns) of at most [policy]
+    outage_tolerance_ns (its outage_ns, or a refusal's duration_ms; an unbounded refusal is
+    longer than any), as REF-5 allows; else InputError (decision R3)."""
     segments = [
         (i, f)
         for i, f in enumerate(ctx.faults)
@@ -1150,7 +1153,16 @@ def measured_outage(ctx: rf.Context, tolerance_ns: int) -> int:
         if f.outage_ns is not None and f.outage_ns > tolerance_ns:
             raise InputError(place, "outage_ns", f"{f.outage_ns}: a store outage {longer}")
         body = fault_body(f.cmd)
-        if body is not None and is_outage_segment(f.cmd) and body.duration_ms * MS > tolerance_ns:
+        if body is None or not is_outage_segment(f.cmd):
+            continue
+        if body.unbounded():
+            raise InputError(
+                place,
+                "cmd",
+                "a store refusal with neither count nor duration_ms (it refuses until DELETE "
+                f"/_test/faults), {longer}",
+            )
+        if body.duration_ms * MS > tolerance_ns:
             raise InputError(
                 place, "cmd", f"a store refusal of duration_ms {body.duration_ms}, {longer}"
             )

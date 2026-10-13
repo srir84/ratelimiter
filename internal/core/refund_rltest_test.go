@@ -760,10 +760,11 @@ func TestCloseDeliversDrainEndEvents(t *testing.T) {
 // a drain that used its whole timeout. The listener is blocked in its callback for an applied
 // refund, and a second refund, which the store refuses, is pending.
 // Close(WithDrainTimeout(100 ms)) ends it unresolved (closed) at the drain's end and waits for
-// the queue to empty for the whole 100 ms grace (no less), then stops the dispatcher without
-// waiting for the blocked callback (at most 100 ms more; the measured overhead is about 2 ms,
-// so a grace about 100 ms longer fails here; TestListenerGraceBudget fails any grace over
-// 100 ms): its event, still queued, is dropped and counted, and the listener was called once.
+// the queue to empty and the callback to return for the whole 100 ms grace (no less), then
+// stops the dispatcher without waiting for the blocked callback (at most 100 ms more; the
+// measured overhead is about 2 ms, so a grace about 100 ms longer fails here;
+// TestListenerGraceBudget fails any grace over 100 ms): its event, still queued, is dropped
+// and counted, and the listener was called once.
 func TestCloseListenerGrace(t *testing.T) {
 	const (
 		drain = 100 * time.Millisecond
@@ -1479,4 +1480,56 @@ func TestRefundInstanceSettings(t *testing.T) {
 			t.Errorf("second attempt %v after the first, want 150–400 ms: min(1 s, 300 ms × 2^0) × [0.5, 1.0]", gap)
 		}
 	})
+}
+
+// TestListenerQueueLen (plan H1 step 9: the accessor behind limitertest.ListenerQueueLen and
+// hitapi's /health listener_queue_len in test builds): it counts the refund events waiting in
+// the listener's queue, not the one in the running callback. ListenerQueueSize 4: with the
+// listener blocked in its first callback and 2 more events emitted, 3 are queued (one in the
+// callback) and the length is 2, strictly between none and the capacity; once the callbacks
+// have taken all 3, it is 0. A nil limiter and a limiter without a listener give 0.
+func TestListenerQueueLen(t *testing.T) {
+	s := newTestStore(t)
+	p := testPolicy(Closed)
+	in := refundInstance(p)
+	in.ListenerQueueSize = 4
+	if n := ListenerQueueLen(nil); n != 0 {
+		t.Errorf("ListenerQueueLen(nil) = %d, want 0", n)
+	}
+	if n := ListenerQueueLen(s.ready(t, p, in, newFake(joined(p), sequence()), Hooks{}, reasonReady)); n != 0 {
+		t.Errorf("ListenerQueueLen of a limiter without a listener = %d, want 0", n)
+	}
+	fake := newFake(joined(p), sequence())
+	fake.setRefund(replies(appliedAt(tNow + 1_000)))
+	gate := make(chan struct{})
+	var gateOnce sync.Once
+	openGate := func() { gateOnce.Do(func() { close(gate) }) }
+	var calls atomic.Int32
+	l := s.ready(t, p, in, fake, Hooks{}, reasonReady, WithRefundListener(func(RefundEvent) {
+		calls.Add(1)
+		<-gate
+	}))
+	t.Cleanup(openGate) // registered after the limiter: runs before its cleanup Close
+	acquireOK(t, l).Release()
+	waitFor(t, "the listener blocked in its first callback", func() bool { return calls.Load() == 1 })
+	permits := []*Permit{acquireOK(t, l), acquireOK(t, l)}
+	for _, pm := range permits {
+		pm.Release()
+	}
+	waitFor(t, "3 events queued, the first in the callback", func() bool {
+		l.lis.mu.Lock()
+		defer l.lis.mu.Unlock()
+		return l.lis.queued == 3
+	})
+	if n := ListenerQueueLen(l); n != 2 {
+		t.Errorf("ListenerQueueLen = %d, want 2: 3 events queued, 1 of them in the callback", n)
+	}
+	openGate()
+	waitFor(t, "the callbacks for all 3 events", func() bool { return calls.Load() == 3 })
+	if n := ListenerQueueLen(l); n != 0 {
+		t.Errorf("ListenerQueueLen once the callbacks took every event = %d, want 0", n)
+	}
+	if d := l.Health().ListenerDrops; d != 0 {
+		t.Errorf("listener drops %d, want 0: the queue had room for every event", d)
+	}
 }

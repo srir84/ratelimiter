@@ -300,11 +300,229 @@ const ignoredHUPEnv = "RL_ORCH_TEST_IGNORED_HUP"
 // ignoredHUPPassed is what ignoredHUPCheck prints once every check passed.
 const ignoredHUPPassed = "an ignored SIGHUP stays ignored"
 
-// TestMain runs the tests, or ignoredHUPCheck in the re-run TestOrchestrate_StopSignalsIgnored
-// starts under nohup.
+// mainSignalWaits are TestMainStopSignals's waits from the signal to the scenario's write: the
+// first try's, then each retry's.
+var mainSignalWaits = []time.Duration{300 * time.Millisecond, 1200 * time.Millisecond, 4800 * time.Millisecond}
+
+const (
+	// mainFIFOWait bounds the wait for a child to open its scenario, and mainExitWait the wait
+	// for its exit once the scenario is written.
+	mainFIFOWait = 10 * time.Second
+	mainExitWait = 10 * time.Second
+	// mainScenario is the scenario a child reads: it does not load (no seed, run_kind, steps or
+	// users), so preflight returns at once, before it reads harness.toml or probes a port.
+	mainScenario = "name = \"stopped\"\n"
+)
+
+// mainEnv makes this test binary run main on its own command line in place of the tests
+// (TestMain): TestMainStopSignals starts it so.
+const mainEnv = "RL_ORCH_TEST_MAIN"
+
+// TestMainStopSignals (IMPLEMENTATION_PLAN H3 step 4): main itself catches SIGHUP, SIGQUIT,
+// SIGTERM and SIGINT, each ending the ctx it gives orchestrate. A child process runs main
+// (this test binary, TestMain) as orchestrator --scenario <FIFO>, in its own temporary
+// directory: main resolves harness.toml, bin/, .data/, runs/ and the pid file there, from
+// ".". Preflight blocks reading the FIFO, after main has caught its signals and before
+// anything else; once the test's open of the FIFO for writing succeeds (only a reader lets it),
+// the test signals the child (its own process, never a group), waits, then writes a scenario
+// that does not load. The child must exit 1, not killed by the signal, with "stopped during
+// preflight" on stderr, leaving its directory as it was: the signal ended the ctx before
+// preflight returned. A child that exits 2 with the scenario refusal instead had the signal
+// handled only after the scenario was read: that case is tried again with a longer wait, at
+// most twice. A death by the signal (its default action, as for SIGHUP) or Go's SIGQUIT dump
+// and exit 2 fails at once. Each child starts with SIGHUP and SIGINT at their default action,
+// whatever this process inherited (go test under nohup ignores SIGHUP, a shell's background
+// job SIGINT, and an ignored signal stays ignored across exec, where main would leave it out):
+// while this process catches them, exec gives a child the default action. Go's runtime never
+// keeps an inherited ignore of SIGQUIT or SIGTERM. One more child starts through /usr/bin/nohup,
+// so SIGHUP is ignored when main starts (`nohup make run`), and main must leave it so: sent
+// SIGHUP, it waits as long as the longest try above, then the scenario is written, and the
+// child must exit 2 with the scenario's refusal as its only output, neither stopped nor killed
+// by the signal. That case is never tried again: a late signal would give the same outcome.
+func TestMainStopSignals(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	caught := make(chan os.Signal, 1)
+	signal.Notify(caught, syscall.SIGHUP, syscall.SIGINT)
+	t.Cleanup(func() { signal.Stop(caught) }) // once the parallel subtests have ended too
+	for _, c := range []struct {
+		name string
+		sig  syscall.Signal
+	}{
+		{"SIGHUP", syscall.SIGHUP},
+		{"SIGQUIT", syscall.SIGQUIT},
+		{"SIGTERM", syscall.SIGTERM},
+		{"SIGINT", syscall.SIGINT},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			for try, wait := range mainSignalWaits {
+				r := runMainSignalled(t, exe, c.sig, wait, false)
+				ws, _ := r.state.Sys().(syscall.WaitStatus)
+				stopped := strings.Contains(r.stderr, `"msg":"stopped during preflight"`)
+				late := !ws.Signaled() && ws.ExitStatus() == exitRefused && scenarioRefused(r.stderr)
+				switch {
+				case !ws.Signaled() && ws.ExitStatus() == exitFailure && stopped:
+					if len(r.left) != 1 || r.left[0] != "scenario.toml" {
+						t.Errorf("main's directory after it stopped holds %q, want only its scenario.toml", r.left)
+					}
+					return
+				case late && try < len(mainSignalWaits)-1:
+					t.Logf("main, sent %s %v before its scenario was written, exited 2 with the scenario refusal: the signal "+
+						"was handled after the scenario was read; trying again with a longer wait", c.name, wait)
+				default:
+					t.Fatalf("main, sent %s %v before its scenario was written: %v, stderr:\n%s\nwant exit 1, not killed by the "+
+						"signal, after \"stopped during preflight\"", c.name, wait, r.state, r.stderr)
+				}
+			}
+		})
+	}
+	t.Run("SIGHUP ignored at startup", func(t *testing.T) {
+		t.Parallel()
+		wait := mainSignalWaits[len(mainSignalWaits)-1]
+		r := runMainSignalled(t, exe, syscall.SIGHUP, wait, true)
+		ws, _ := r.state.Sys().(syscall.WaitStatus)
+		if ws.Signaled() || ws.ExitStatus() != exitRefused || !onlyScenarioRefused(r.stderr) {
+			t.Fatalf("main, started under nohup and sent SIGHUP %v before its scenario was written: %v, stderr:\n%s\nwant exit 2 "+
+				"with only the scenario refusal: the ignored SIGHUP neither stops the run nor kills it", wait, r.state, r.stderr)
+		}
+		if len(r.left) != 1 || r.left[0] != "scenario.toml" {
+			t.Errorf("main's directory after it refused the scenario holds %q, want only its scenario.toml", r.left)
+		}
+	})
+}
+
+// onlyScenarioRefused reports whether stderr is one line, the orchestrator's refusal of a
+// scenario that does not load (scenarioRefused): nothing else, "stopped during preflight"
+// included.
+func onlyScenarioRefused(stderr string) bool {
+	return !strings.Contains(strings.TrimSpace(stderr), "\n") && scenarioRefused(stderr)
+}
+
+// scenarioRefused reports whether stderr holds only the orchestrator's JSON log lines, the
+// refusal of a scenario that does not load among them: not Go's SIGQUIT dump, nor a race report.
+func scenarioRefused(stderr string) bool {
+	refused := false
+	for _, line := range strings.Split(strings.TrimSpace(stderr), "\n") {
+		var rec struct{ Msg, Reason string }
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			return false
+		}
+		refused = refused || (rec.Msg == "refusing the run" && rec.Reason == reasonScenario)
+	}
+	return refused
+}
+
+// mainRun is how a child running main ended: its state, its stderr and what its directory
+// held then.
+type mainRun struct {
+	state  *os.ProcessState
+	stderr string
+	left   []string
+}
+
+// runMainSignalled runs main in a child process (TestMainStopSignals), started through
+// /usr/bin/nohup when nohup is true, sends it sig once it reads its scenario FIFO, waits for
+// wait, then writes mainScenario and waits for the child's exit. Every wait is bounded; a child
+// still running at the end of the test is killed.
+func runMainSignalled(t *testing.T, exe string, sig syscall.Signal, wait time.Duration, nohup bool) mainRun {
+	t.Helper()
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "scenario.toml")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The child is killed once the test ends, if it still runs then; its stderr is read while it
+	// may still write, on a failure.
+	stderr := &lockedBuffer{}
+	cmd := exec.CommandContext(t.Context(), exe, "--scenario", fifo)
+	if nohup { // nohup ignores SIGHUP, then execs main in its own process: the pid stays
+		cmd = exec.CommandContext(t.Context(), "/usr/bin/nohup", exe, "--scenario", fifo)
+	}
+	cmd.Dir = dir
+	cmd.Env = []string{"PATH=/usr/bin:/bin", mainEnv + "=1"}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait() // its outcome is cmd.ProcessState, read once exited is closed
+		close(exited)
+	}()
+	t.Cleanup(func() { <-exited }) // t.Context() has ended by then, so the child was killed
+	f := openFIFOWriter(t, fifo, exited)
+	if f == nil {
+		select {
+		case <-exited:
+			t.Fatalf("main exited before it opened its scenario: %v, stderr:\n%s", cmd.ProcessState, stderr.String())
+		default:
+			t.Fatalf("main did not open its scenario within %v", mainFIFOWait)
+		}
+	}
+	if err := syscall.Kill(cmd.Process.Pid, sig); err != nil {
+		_ = f.Close() // the test ends here either way
+		t.Fatalf("sending %v to main's process %d: %v", sig, cmd.Process.Pid, err)
+	}
+	timer := time.NewTimer(wait)
+	select {
+	case <-exited: // ended by the signal: the checks report how
+	case <-timer.C:
+	}
+	timer.Stop()
+	_, _ = f.Write([]byte(mainScenario)) // fails only when the child has gone: its exit tells
+	_ = f.Close()                        // the child reads to the end of the file
+	timer = time.NewTimer(mainExitWait)
+	defer timer.Stop()
+	select {
+	case <-exited:
+	case <-timer.C:
+		t.Fatalf("main did not exit within %v of reading its scenario; stderr so far:\n%s", mainExitWait, stderr.String())
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var left []string
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	return mainRun{state: cmd.ProcessState, stderr: stderr.String(), left: left}
+}
+
+// openFIFOWriter opens the FIFO at path for writing once a reader has it open: O_NONBLOCK, so
+// the open fails (ENXIO) instead of waiting while there is none. It tries every millisecond, at
+// most mainFIFOWait, and returns nil when that passes or exited closes first.
+func openFIFOWriter(t *testing.T, path string, exited <-chan struct{}) *os.File {
+	t.Helper()
+	for limit := time.Now().Add(mainFIFOWait); time.Now().Before(limit); time.Sleep(time.Millisecond) {
+		f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if err == nil {
+			return f
+		}
+		if !errors.Is(err, syscall.ENXIO) {
+			t.Fatalf("opening the scenario FIFO for writing: %v", err)
+		}
+		select {
+		case <-exited:
+			return nil
+		default:
+		}
+	}
+	return nil
+}
+
+// TestMain runs the tests; ignoredHUPCheck in the re-run TestOrchestrate_StopSignalsIgnored
+// starts under nohup; or main, on its own command line, in the children TestMainStopSignals
+// starts.
 func TestMain(m *testing.M) {
 	if os.Getenv(ignoredHUPEnv) == "1" {
 		os.Exit(ignoredHUPCheck())
+	}
+	if os.Getenv(mainEnv) == "1" {
+		main() // it exits
 	}
 	os.Exit(m.Run())
 }

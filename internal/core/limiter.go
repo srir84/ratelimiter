@@ -38,6 +38,7 @@ type Limiter struct {
 
 	epoch        atomic.Pointer[epochState] // the watch's latest snapshot
 	closing      atomic.Bool                // Close or Kill began
+	shuttingDown atomic.Bool                // Kill or Close's shutdown began: an unavailable acquire reads not_ready
 	closeStarted atomic.Bool                // Close or Kill ran: a later Close returns at once
 
 	storeMu  sync.Mutex
@@ -175,10 +176,15 @@ func newSigner(keyReader io.Reader, wrap func(receipt.Signer) receipt.Signer) (r
 	return s, nil
 }
 
-// shutdown marks the instance closing, ends the lifetime context, waits for the watch and the
-// cleanup runner, and then closes the adapter, which fails the calls in flight and waits for
-// its goroutines. Close (close.go) runs it after the drain, Kill at once.
+// shutdown marks the instance shutting down and closing, ends the lifetime context, waits for
+// the watch and the cleanup runner, and then closes the adapter, which fails the calls in
+// flight and waits for its goroutines. Close (close.go) runs it after the drain and the
+// listener's window; Kill, which marks the instance shutting down at its start, runs it once
+// the listener and the refund workers have stopped. shuttingDown is set first, before
+// anything here can fail a call, so an acquire that the lifetime's end or the adapter's close
+// failed sees it (send).
 func (l *Limiter) shutdown() {
+	l.shuttingDown.Store(true)
 	l.closing.Store(true)
 	l.closeOnce.Do(func() {
 		if l.stop != nil {

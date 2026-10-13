@@ -75,6 +75,11 @@ func TestRegistryFamilies(t *testing.T) {
 			if (len(s.Buckets) != 0) != (w.typ == "histogram") {
 				t.Errorf("%s{%s}: %d buckets", f.Name, s.LabelValue, len(s.Buckets))
 			}
+			if w.typ == "histogram" && !slices.Equal(s.Buckets, []Bucket{
+				{0.001, 0}, {0.002, 0}, {0.005, 0}, {0.01, 0}, {0.02, 0}, {0.05, 0}, {0.1, 0}, {0.2, 0}, {0.5, 0}, {1, 0}, {2, 0},
+			}) {
+				t.Errorf("%s{%s}: buckets %v, want le 0.001 … 2 s, each holding 0", f.Name, s.LabelValue, s.Buckets)
+			}
 		}
 	}
 	// The Metric constants name the families in this order.
@@ -118,6 +123,50 @@ func TestRegistryFamilies(t *testing.T) {
 		if got := snap.Families[c.m].Series[c.i].LabelValue; got != c.value {
 			t.Errorf("%s label index %d = %q, want %q", snap.Families[c.m].Name, c.i, got, c.value)
 		}
+	}
+}
+
+// TestRegistryRecords: each method records into a series of its own type, in range. It runs
+// before TestSeriesBounded, which passes out-of-range indexes and a nil registry before it
+// asserts, so a method that drops in-range calls and crashes on those fails here by assertion
+// first (DESIGN §C9: a crash is no kill); each call runs on a goroutine of its own with a
+// bounded wait, so one that never returns fails here too.
+func TestRegistryRecords(t *testing.T) {
+	r := NewRegistry()
+	for _, c := range []struct {
+		what string
+		call func()
+	}{
+		{"Inc", func() { r.Inc(AcquireResults, 1) }},
+		{"Add", func() { r.Add(RefundResults, RefundUnresolved, 5) }},
+		{"Set", func() { r.Set(TrackedBuckets, 0, 7) }},
+		{"AddGauge", func() { r.AddGauge(SlotsInUse, SlotReceipt, 2.5) }},
+		{"Observe", func() { r.Observe(StoreCallSeconds, ScriptHold, 3*time.Millisecond) }},
+	} {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.call()
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s still running 5 s later", c.what)
+		}
+	}
+	snap := r.Snapshot()
+	for _, c := range []struct {
+		m    Metric
+		i    int
+		want float64
+	}{{AcquireResults, 1, 1}, {RefundResults, RefundUnresolved, 5}, {TrackedBuckets, 0, 7}, {SlotsInUse, SlotReceipt, 2.5}} {
+		if s := snap.Families[c.m].Series[c.i]; s.Value != c.want {
+			t.Errorf("%s{%s} = %v, want %v", snap.Families[c.m].Name, s.LabelValue, s.Value, c.want)
+		}
+	}
+	h := snap.Families[StoreCallSeconds].Series[ScriptHold]
+	if h.Count != 1 || h.Sum != 0.003 || h.Buckets[1].Count != 0 || h.Buckets[2].Count != 1 {
+		t.Errorf("rl_store_call_seconds{hold} = count %d, sum %v, buckets %v; want 1, 0.003, from the 5 ms bucket on", h.Count, h.Sum, h.Buckets)
 	}
 }
 
@@ -239,6 +288,20 @@ func TestHistogramBuckets(t *testing.T) {
 		if c.d <= 0 && s.Sum != 0 {
 			t.Errorf("Observe(%v): sum %v, want 0", c.d, s.Sum)
 		}
+	}
+}
+
+// TestHistogramSumRange: a series' sum stays positive and right past 2^63 ns of observed time.
+// Two observations of the longest duration sum to 2 × (2^63 − 1) ns, about 1.8 × 10^10 s,
+// which an int64 count of nanoseconds cannot hold.
+func TestHistogramSumRange(t *testing.T) {
+	r := NewRegistry()
+	r.Observe(StoreCallSeconds, ScriptRefund, time.Duration(math.MaxInt64))
+	r.Observe(StoreCallSeconds, ScriptRefund, time.Duration(math.MaxInt64))
+	s := r.Snapshot().Families[StoreCallSeconds].Series[ScriptRefund]
+	const want = 2 * float64(math.MaxInt64) / 1e9 // seconds
+	if s.Count != 2 || s.Sum <= 0 || math.Abs(s.Sum-want) > 1e-6*want {
+		t.Errorf("count %d, sum %v; want 2, %v (within 1e-6 of it)", s.Count, s.Sum, want)
 	}
 }
 

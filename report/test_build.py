@@ -10,7 +10,7 @@ import pytest
 from report import InputError
 from report import runfiles as rf
 from report.__main__ import main
-from report.build import _baseline_run, build
+from report.build import FaultBody, _baseline_run, build, fault_body, is_outage_segment
 from report.synthetic import (
     SECOND,
     T0_WALL_NS,
@@ -523,6 +523,17 @@ def store_fault(cmd: str, at_s: int, outage_ns: int | None) -> dict[str, object]
 
 
 REFUSE_BODY = '{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000}'
+# A store refusal with neither count nor duration_ms: it refuses until DELETE /_test/faults.
+UNBOUNDED_REFUSE_BODY = '{"target":"store","mode":"refuse","match":"acquire"}'
+# A store refusal with a count and no duration_ms: it ends after that many calls.
+COUNT_ONLY_REFUSE_BODY = '{"target":"store","mode":"refuse","match":"acquire","count":3}'
+# preflight_test.go's refuseNullRepeat and refuseNullCase: hitapi arms each as a 4000 ms refusal.
+REFUSE_NULL_REPEAT = (
+    '{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"duration_ms":null}'
+)
+REFUSE_NULL_CASE = (
+    '{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"Duration_MS":null}'
+)
 
 
 def api_sample_of(line: dict[str, object], instance: int) -> dict[str, object]:
@@ -576,6 +587,8 @@ BUD11_INVALID = "correctness"
         ("outage over 5 s", ("outage",)),
         ("outage not measured", ("outage",)),
         ("two outage segments", ("outage_segments",)),
+        ("a pause and an unbounded refusal", ("outage_segments",)),
+        ("a pause and a count-only refusal", ()),
         ("summary missing", ("gen_summary",)),
         ("summary log drop", ("gen_summary",)),
         ("no rewrite window", ("rewrite_windows",)),
@@ -589,7 +602,7 @@ BUD11_INVALID = "correctness"
 def test_evidence_validity(tmp_path: Path, case: str, failing: tuple[str, ...]) -> None:
     """Each §B8 evidence check fails on its own defect, and only then is the run invalid. HAR-13:
     drops count from every stop and pre_kill line, and every process segment (from a start line,
-    or from the file's first line) ends with one, an empty log included; and the correctness
+    or from the file's first line) holds one, an empty log included; and the correctness
     check fails whenever check_bud11's verdict is invalid (incomplete refund evidence), naming
     its invalid_reasons: on those defects, and on a release with no final event in a segment
     that ended with stop, which no other check sees."""
@@ -630,6 +643,16 @@ def test_evidence_validity(tmp_path: Path, case: str, failing: tuple[str, ...]) 
         spec.faults = [
             store_fault("faultctl store pause 4.5s", 2, 4_600 * MS),
             store_fault(REFUSE_BODY, 10, None),
+        ]
+    elif case == "a pause and an unbounded refusal":
+        spec.faults = [
+            store_fault("faultctl store pause 4.5s", 2, 4_600 * MS),
+            store_fault(UNBOUNDED_REFUSE_BODY, 10, None),
+        ]
+    elif case == "a pause and a count-only refusal":
+        spec.faults = [
+            store_fault("faultctl store pause 4.5s", 2, 4_600 * MS),
+            store_fault(COUNT_ONLY_REFUSE_BODY, 10, None),
         ]
     elif case == "summary missing":
         gen_tail = []
@@ -677,6 +700,51 @@ def test_evidence_validity(tmp_path: Path, case: str, failing: tuple[str, ...]) 
         assert correctness["invalid_reasons"] == [
             "api-1.jsonl: line 4: release without final event or segment pre_kill"
         ]
+
+
+@pytest.mark.parametrize(
+    ("body", "decoded", "segment"),
+    [
+        (REFUSE_NULL_REPEAT, FaultBody("store", "refuse", 0, 4000), True),
+        (REFUSE_NULL_CASE, FaultBody("store", "refuse", 0, 4000), True),
+        (
+            '{"target":"store","TARGET":null,"mode":"refuse","duration_ms":4000}',
+            FaultBody("store", "refuse", 0, 4000),
+            True,
+        ),
+        (
+            '{"target":"store","mode":"refuse","count":3,"Count":null}',
+            FaultBody("store", "refuse", 0, 0),
+            True,
+        ),
+        (
+            '{"target":"store","mode":"refuse","count":3,"COUNT":5}',
+            FaultBody("store", "refuse", 5, 0),
+            False,
+        ),
+        ('{"target":"store","mode":"refuse","duration_ms":"4000","duration_ms":4000}', None, False),
+        ('{"target":"store","mode":"refuse","duration_ms":4000,"field":7}', None, False),
+    ],
+    ids=[
+        "duration_ms repeated as null",
+        "duration_ms repeated as null in another case",
+        "target repeated as null",
+        "count reset by a null",
+        "count repeated in another case",
+        "duration_ms of the wrong type before a valid one",
+        "field of the wrong type",
+    ],
+)
+def test_fault_body(body: str, decoded: FaultBody | None, segment: bool) -> None:
+    """A /_test/faults body decodes as Go's decoder fills hitapi's faultRequest: a null leaves a
+    string or int64 field (target, duration_ms) as it was and resets count, a pointer; names
+    match without regard to case, the last member winning; a member with the wrong type for its
+    field (field is a string) refuses the body, even when a later member replaces it. So
+    preflight_test.go's refuseNullRepeat and refuseNullCase each arm one timed outage segment, a
+    refusal whose count a null reset arms an unbounded one, and a count-only refusal or a body
+    hitapi refuses arms none."""
+    assert fault_body(body) == decoded
+    assert is_outage_segment(body) is segment
 
 
 def test_benchmark_fixtures_and_outage_pass(tmp_path: Path) -> None:

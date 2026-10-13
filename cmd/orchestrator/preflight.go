@@ -58,6 +58,8 @@ const (
 	reasonRefusalRate        = "refusal_rate_over_limit"   // refusals/s above 50 × instances (§B4, §A7)
 	reasonSpikeStep          = "spike_step_too_short"      // the step after the spike shorter than 90 s (§B9)
 	reasonOutageSegments     = "store_outage_segments"     // more than one store outage segment (§A7, §B4)
+	reasonRefuseUnbounded    = "store_refuse_unbounded"    // a store refuse body with neither count nor duration_ms (§B6)
+	reasonRefuseTooLong      = "store_refuse_too_long"     // a store refuse body longer than outage_tolerance (§A7, FLT-1)
 	reasonClockUntagged      = "controlled_clock_untagged" // a controlled clock in a !rltest build (clock_stub.go)
 	reasonFaultctlUntagged   = "faultctl_untagged"         // a faultctl cmd in a !rltest build (clock_stub.go)
 	reasonBinaryMissing      = "binary_missing"            // hitapi, rladmin, hitgen or sampler missing (§B1)
@@ -156,6 +158,7 @@ func preflight(ctx context.Context, s site, fl flags) (inputs, []refusal) {
 		limiterRun = f.API.LimiterEnabled
 		controlled = f.Policy.ClockSource == limiter.Controlled
 		refusalRules(&refs, sc, f.API.RefuseAfterAcquireBP)
+		storeRefusalRule(&refs, sc, f.Policy.OutageToleranceNs)
 		dsnRule(&refs, sc, f.API.DBDSN)
 		runDSN = f.API.DBDSN
 	}
@@ -283,9 +286,10 @@ func dsnRefusal(refs *refusals, dsn, source, parseReason string) {
 	}
 }
 
-// scenarioRules checks the scenario's own values: the step after the spike and the store outage
-// segments among the faults. Each build checks the faultctl cmds itself (buildRefusals): the
-// untagged one refuses them, the rltest one refuses those it could not run.
+// scenarioRules checks the scenario's own values: the step after the spike, the store outage
+// segments among the faults, and the store refusals without a limit. Each build checks the
+// faultctl cmds itself (buildRefusals): the untagged one refuses them, the rltest one refuses
+// those it could not run.
 func scenarioRules(refs *refusals, sc config.Scenario) {
 	if sc.Verdict == config.VerdictSpike && sc.SpikeStep != nil {
 		if i := *sc.SpikeStep + 1; i < len(sc.Steps) && sc.Steps[i].DurationS < minRecoveryStepS {
@@ -296,11 +300,33 @@ func scenarioRules(refs *refusals, sc config.Scenario) {
 	if n := outageSegments(sc.Faults); n > 1 {
 		refs.add(reasonOutageSegments, "the [[faults]] arm %d store outage segments: a run arms at most one", n)
 	}
+	for i, f := range sc.Faults {
+		if b, ok := storeRefusal(f.Cmd); ok && b.unbounded() {
+			refs.add(reasonRefuseUnbounded, "faults[%d] %s: a store refusal with neither a count nor a duration_ms refuses until "+
+				"DELETE /_test/faults, which a scenario cannot send: give it a duration_ms of at most outage_tolerance", i, f.Cmd)
+		}
+	}
+}
+
+// storeRefusalRule refuses each store refusal (storeRefusal) whose duration_ms is above
+// toleranceNs, the merged config's [policy] outage_tolerance_ns: REF-5 allows one outage segment
+// of at most outage_tolerance (DESIGN §A7), and HARNESS FLT-1 arms a 5 s outage. A duration_ms
+// of exactly the tolerance passes.
+func storeRefusalRule(refs *refusals, sc config.Scenario, toleranceNs int64) {
+	maxMs := toleranceNs / int64(time.Millisecond) // duration_ms × 1e6 > toleranceNs exactly when duration_ms > maxMs
+	for i, f := range sc.Faults {
+		if b, ok := storeRefusal(f.Cmd); ok && b.DurationMs > 0 && b.DurationMs > maxMs {
+			refs.add(reasonRefuseTooLong, "faults[%d] %s: a store refusal of duration_ms %d is longer than [policy] outage_tolerance_ns %d",
+				i, f.Cmd, b.DurationMs, toleranceNs)
+		}
+	}
 }
 
 // outageSegments counts the store outage segments the faults arm (plan choice; DESIGN §A7,
-// §B4, §B6): one per faultctl "store down" or "store pause" entry, and one per /_test/faults
-// body with target "store", mode "refuse" and a duration_ms, however many instances it goes to.
+// §B4, §B6): one per faultctl "store down" or "store pause" entry, and one per store refusal
+// body (storeRefusal) that is timed (a duration_ms above 0) or unbounded (neither a count nor
+// a duration_ms), however many instances it goes to. A refusal with a count and no duration_ms
+// ends after that many calls: it arms no segment.
 func outageSegments(faults []config.Fault) int {
 	n := 0
 	for _, f := range faults {
@@ -309,7 +335,7 @@ func outageSegments(faults []config.Fault) int {
 			if len(args) >= 3 && args[1] == "store" && (args[2] == "down" || args[2] == "pause") {
 				n++
 			}
-		} else if storeRefuseBody(f.Cmd) {
+		} else if b, ok := storeRefusal(f.Cmd); ok && (b.DurationMs > 0 || b.unbounded()) {
 			n++
 		}
 	}
@@ -327,23 +353,29 @@ type faultBody struct {
 	DelayMs    int64  `json:"delay_ms"`
 }
 
-// storeRefuseBody reports whether a /_test/faults body arms a timed store refusal (FLT-1 (b),
-// DESIGN §B6): decoded into hitapi's field types (one JSON value, so a repeated or case-variant
-// key and a null resolve as they do there), with target "store", mode "refuse" and a
-// duration_ms above 0. hitapi reads an absent, null or 0 duration_ms as no limit. Unknown keys
-// are ignored, so the check fails closed: a key hitapi gains later (H4's "at") still counts,
-// and a key it does not know can only add to the count of a body hitapi answers with 400.
-func storeRefuseBody(body string) bool {
+// storeRefusal decodes a /_test/faults body into hitapi's field types (one JSON value, so a
+// repeated or case-variant key and a null resolve as they do there) and returns it, with ok
+// true when it arms a store refusal (FLT-1 (b), DESIGN §B6): target "store", mode "refuse".
+// Unknown keys are ignored, so the checks on it fail closed: a key hitapi gains later (H4's
+// "at") still counts, and a key it does not know can only add to the segments and refusals of
+// a body hitapi answers with 400.
+func storeRefusal(body string) (faultBody, bool) {
 	dec := json.NewDecoder(strings.NewReader(body))
 	var b faultBody
 	if err := dec.Decode(&b); err != nil {
-		return false // hitapi answers such a body with 400 and arms nothing
+		return faultBody{}, false // hitapi answers such a body with 400 and arms nothing
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return false // a second value: hitapi answers 400 too
+		return faultBody{}, false // a second value: hitapi answers 400 too
 	}
-	return b.Target == "store" && b.Mode == "refuse" && b.DurationMs > 0
+	return b, b.Target == "store" && b.Mode == "refuse"
 }
+
+// unbounded reports whether a store fault body has neither a count nor a duration_ms: hitapi
+// reads an absent, null or 0 count or duration_ms as no limit, so such a refusal refuses every
+// matching call until DELETE /_test/faults. A body with a negative count or duration_ms is not
+// unbounded: hitapi answers it with 400.
+func (b faultBody) unbounded() bool { return (b.Count == nil || *b.Count == 0) && b.DurationMs == 0 }
 
 // instanceConfigRules checks the --instance-config files (plan H3 step 6): only a test run
 // takes them, each for an instance the scenario has, each a config file that loads, with an

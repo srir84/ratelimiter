@@ -664,8 +664,9 @@ func TestAcquireJoinsRefusedRedial(t *testing.T) {
 // answers read_epoch with each limiter's own fingerprint). The normalized results are the
 // row's literal expectation in both modes, except unavailable (Closed) ↔ degraded (Open:
 // permit, DeductionID "", 0 slots, Done a no-op; API-5). An unavailable that comes back after
-// Close or Kill began is not_ready (closing) in both modes (API-21). The adapter receives exactly one
-// acquire per row that reaches send (no retry, API-12) and none for a local refusal. The
+// the shutdown began closing the adapter (Close past its drain, or Kill) is not_ready
+// (closing) in both modes (API-21). The adapter receives exactly one acquire per row that
+// reaches send (no retry, API-12) and none for a local refusal. The
 // wire rows go through the real adapter, which decodes with this instance's limits: an
 // allowed reply one unit past the u bound → outcome_unknown, no permit, the raw reply in
 // Diag; at the bound (expiry_us = t + lifetime_us) → allowed with a permit. Together they pin
@@ -689,9 +690,9 @@ func TestFailureModeTable(t *testing.T) {
 		{name: "out of range", wire: true, u: 19_000_000_001, raw: outOfRange, want: norm{kind: OutcomeUnknown, label: "outcome_unknown"}},
 		{name: "in range", wire: true, u: 19_000_000_000, want: norm{kind: Allowed, decision: dec, permit: true, slots: slotCounts{1, 1}, label: "allowed"}},
 		{name: "unavailable", resp: store.Response{Outcome: store.Unavailable}, want: norm{kind: Unavailable, label: "unavailable"}},
-		// Close or Kill begins while the acquire is in the adapter, which then answers
-		// unavailable (closed, nothing sent): the instance is closing, so not_ready in both
-		// modes (API-21, API-1e, API-8a).
+		// Close (nothing to drain) or Kill runs to its end while the acquire is in the adapter,
+		// which then answers unavailable (closed, nothing sent): the shutdown began closing the
+		// adapter under it, so not_ready (closing) in both modes (API-21, API-1e).
 		{name: "unavailable during Close", resp: store.Response{Outcome: store.Unavailable}, stop: func(l *Limiter) { l.Close() }, want: norm{kind: NotReady, reason: "closing", label: "not_ready"}},
 		{name: "unavailable during Kill", resp: store.Response{Outcome: store.Unavailable}, stop: Kill, want: norm{kind: NotReady, reason: "closing", label: "not_ready"}},
 		{name: "cancelled", resp: store.Response{Outcome: store.Cancelled}, want: norm{kind: Cancelled, label: "cancelled"}},

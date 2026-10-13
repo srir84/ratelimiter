@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -177,6 +178,72 @@ func TestHandshake(t *testing.T) {
 		}
 	})
 
+	// A peer that answers AUTH with an integer, bare or nested: one whose decimal form holds a
+	// decimal password's significant digits (a peer may drop its zeros or its sign) is
+	// redacted; any other integer stays visible, as every integer does for a password that is
+	// not decimal.
+	for _, c := range []struct {
+		name, pass string
+		reply      resp.Value
+		want       string // the whole error
+	}{
+		{"integer echo", "4815162342", resp.Value{Kind: resp.Int, Int: 4815162342}, `AUTH as rl_lib refused: "<password>"`},
+		{"nested integer echo", "4815162342", resp.Value{Kind: resp.Array, Elems: []resp.Value{{Kind: resp.Int, Int: 4815162342}}}, `AUTH as rl_lib refused: ["<password>"]`},
+		{"integer echo without zeros", "007", resp.Value{Kind: resp.Int, Int: 7}, `AUTH as rl_lib refused: "<password>"`},
+		{"integer echo without a plus sign", "+007", resp.Value{Kind: resp.Int, Int: 7}, `AUTH as rl_lib refused: "<password>"`},
+		{"negative integer echo without zeros", "-007", resp.Value{Kind: resp.Int, Int: -7}, `AUTH as rl_lib refused: "<password>"`},
+		{"integer echo of an all-zero password", "000", resp.Value{Kind: resp.Int, Int: 0}, `AUTH as rl_lib refused: "<password>"`},
+		{"other integer refusal to a zero-padded password", "007", resp.Value{Kind: resp.Int, Int: 42}, `AUTH as rl_lib refused: 42`},
+		{"integer refusal to a zero-padded password", "007", resp.Value{Kind: resp.Int, Int: 1}, `AUTH as rl_lib refused: 1`},
+		{"integer refusal to an all-zero password", "000", resp.Value{Kind: resp.Int, Int: 1}, `AUTH as rl_lib refused: 1`},
+		// A hex password whose last digit is f, so it is never a decimal integer.
+		{"integer refusal to a hex password", pw[:len(pw)-1] + "f", resp.Value{Kind: resp.Int, Int: 1}, `AUTH as rl_lib refused: 1`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			peer := fakeresp.Start(t, "rl_lib", c.pass)
+			peer.ReplyValue("AUTH", c.reply, 1)
+			err := resp.Handshake(dialServer(t, peer), "rl_lib", c.pass, time.Now().Add(5*time.Second), nil)
+			// Compared, never printed: a wrong error may hold the password.
+			if err == nil || err.Error() != c.want {
+				t.Errorf("Handshake answered %s: error nil %v, or not %q", c.name, err == nil, c.want)
+			}
+		})
+	}
+
+	// A peer that answers AUTH with bytes that break RESP2: when the reader's reason holds the
+	// password, or a decimal password's significant digits (a bulk or array length the peer
+	// sent can echo it), the error is still a protocol error but with a fixed reason; any other
+	// reason is kept.
+	const readErr = "reading the AUTH reply: RESP protocol error: "
+	for _, c := range []struct {
+		name, pass, raw string
+		want            string // the whole error
+	}{
+		{"bulk length echo", "4815162342", "$4815162342\r\n", readErr + "reason withheld: it may repeat the password"},
+		{"array length echo without zeros", "00123456", "*123456\r\n", readErr + "reason withheld: it may repeat the password"},
+		{"array length refusal to a zero-padded password", "007", "*123456\r\n", readErr + "array of 123456 over the limit of 100000"},
+		{"bulk length refusal to a hex password", pw[:len(pw)-1] + "f", "$4815162342\r\n", readErr + "bulk string of 4815162342 over the limit of 1048576"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conn, peer := net.Pipe()
+			done := make(chan struct{})
+			go func() { // a peer that answers AUTH with c.raw
+				defer close(done)
+				if _, err := resp.NewReader(peer).ReadValue(); err != nil {
+					return
+				}
+				_, _ = peer.Write([]byte(c.raw))
+			}()
+			t.Cleanup(func() { _ = conn.Close(); _ = peer.Close(); <-done })
+			err := resp.Handshake(conn, "rl_lib", c.pass, time.Now().Add(5*time.Second), nil)
+			// Compared, never printed: a wrong error may hold the password.
+			var pe *resp.ProtocolError
+			if !errors.As(err, &pe) || err.Error() != c.want {
+				t.Errorf("Handshake answered %s: a *resp.ProtocolError %v; the error is %q: %v", c.name, pe != nil, c.want, err != nil && err.Error() == c.want)
+			}
+		})
+	}
+
 	t.Run("closed connection", func(t *testing.T) {
 		c := dialServer(t, srv)
 		if err := c.Close(); err != nil {
@@ -244,6 +311,10 @@ func TestHandshake(t *testing.T) {
 		}
 		if el := time.Since(start); el < 200*time.Millisecond || el > 2*time.Second {
 			t.Errorf("Handshake gave up after %v, want its 200 ms deadline", el)
+		}
+		// The read's own error is kept: only a protocol error's reason can repeat the password.
+		if !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Errorf("Handshake error = %v, want one that wraps the read's deadline error", err)
 		}
 	})
 }

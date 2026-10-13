@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"runtime"
 	"sync/atomic"
 	"testing"
@@ -40,7 +41,7 @@ func TestDialCancelEndsWait(t *testing.T) {
 	var slowest time.Duration
 	for i := range sweepDials {
 		at := time.Duration(i) * sweepStep
-		took := dialCancelled(t, srv, "cancelled "+at.String()+" after it started", func(began time.Time, _ <-chan struct{}) {
+		took := dialCancelled(t, srv, "with its cancel planned "+at.String()+" after it started", func(began time.Time, _ <-chan struct{}) {
 			for time.Since(began) < at {
 				yieldIfAlone()
 			}
@@ -49,7 +50,7 @@ func TestDialCancelEndsWait(t *testing.T) {
 	}
 	last := fakeresp.Start(t, "rl_admin", testPW) // counts only the last dial's AUTH
 	last.HangAuth()
-	took := dialCancelled(t, last, "cancelled once its AUTH reached the store", func(began time.Time, done <-chan struct{}) {
+	took := dialCancelled(t, last, "with its cancel planned once its AUTH reached the store", func(began time.Time, done <-chan struct{}) {
 		for last.Count("AUTH") == 0 && time.Since(began) < dialWait {
 			select {
 			case <-done: // it ended before its AUTH arrived: the checks report how
@@ -65,7 +66,11 @@ func TestDialCancelEndsWait(t *testing.T) {
 // dialCancelled runs dial against srv, which never answers AUTH, cancels its ctx once
 // untilCancel(began, done) returns (began: when dial was called; done closes once dial has
 // returned), and ends the test unless dial returned within promptWait of that cancel, with no
-// connection and ctx's error. It returns how long dial took to return after the cancel.
+// connection and ctx's error. It returns how long dial took to return after the cancel. Each
+// failure names when the cancel actually came after the dial's start, which can be later than
+// planned under load, and how many AUTH commands srv received during the dial: srv may be
+// shared by many dials, so this counts from the dial's start and may include a late AUTH of
+// the dial before.
 func dialCancelled(t *testing.T, srv *fakeresp.Server, what string, untilCancel func(began time.Time, done <-chan struct{})) time.Duration {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), ctxWait)
@@ -97,6 +102,7 @@ func dialCancelled(t *testing.T, srv *fakeresp.Server, what string, untilCancel 
 		out <- o
 	}()
 	<-running // so the canceller already spins when dial starts
+	auths := srv.Count("AUTH")
 	start := time.Now()
 	began.Store(&start)
 	c, err := dial(ctx, srv.Addr(), "rl_admin", testPW)
@@ -106,14 +112,17 @@ func dialCancelled(t *testing.T, srv *fakeresp.Server, what string, untilCancel 
 	if c != nil {
 		c.close()
 	}
+	// The actual cancel: when cancel returned, after the dial's start; and the AUTH commands
+	// srv received since the dial started.
+	actual := fmt.Sprintf("cancelled %v after it started, %d AUTH received meanwhile", o.cancelled.Sub(start), srv.Count("AUTH")-auths)
 	switch {
 	case o.released:
-		t.Fatalf("dial %s still waited %v after its cancel, want it ended at once; closing the store's side of the connection then ended it with %v",
-			what, promptWait, err)
+		t.Fatalf("dial %s (%s) still waited %v after its cancel, want it ended at once; closing the store's side of the connection then ended it with %v",
+			what, actual, promptWait, err)
 	case c != nil:
-		t.Fatalf("dial %s connected, want an error: the store never answers AUTH", what)
+		t.Fatalf("dial %s (%s) connected, want an error: the store never answers AUTH", what, actual)
 	case !errors.Is(err, context.Canceled):
-		t.Fatalf("dial %s failed with %v, want ctx's error, context.Canceled", what, err)
+		t.Fatalf("dial %s (%s) failed with %v, want ctx's error, context.Canceled", what, actual, err)
 	}
 	return ended.Sub(o.cancelled)
 }

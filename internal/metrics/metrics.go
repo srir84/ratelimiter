@@ -118,7 +118,7 @@ type Series struct {
 	LabelValue string   // "" for a family without a label
 	Value      float64  // a counter's count or a gauge's value; 0 for a histogram
 	Buckets    []Bucket // histogram only: cumulative counts, upper bounds ascending
-	Sum        float64  // histogram only: seconds observed in total
+	Sum        float64  // histogram only: seconds observed in total, each observation to the µs
 	Count      uint64   // histogram only: observations, the +Inf bucket
 }
 
@@ -143,7 +143,7 @@ type family struct {
 type series struct {
 	value   atomic.Uint64   // counter: the count; gauge: math.Float64bits of the value
 	buckets []atomic.Uint64 // histogram: per-bucket counts, the last one +Inf
-	sumNs   atomic.Int64    // histogram: nanoseconds observed in total
+	sumUs   atomic.Int64    // histogram: microseconds observed in total, each observation rounded
 }
 
 // NewRegistry returns a registry with every family and label value registered and all
@@ -245,7 +245,9 @@ func (r *Registry) AddGauge(m Metric, i int, d float64) {
 }
 
 // Observe records one duration in the histogram m at label index i: it lands in the first
-// bucket whose upper bound is ≥ d (+Inf after 2 s). A negative d counts as 0.
+// bucket whose upper bound is ≥ d (+Inf after 2 s). A negative d counts as 0. The sum adds d
+// rounded to the microsecond (Round saturates, so no observation overflows): one atomic add,
+// with room for 2^63 µs, about 292,000 years of observed time, on one series.
 func (r *Registry) Observe(m Metric, i int, d time.Duration) {
 	s := r.at(m, i, typeHistogram)
 	if s == nil {
@@ -260,7 +262,7 @@ func (r *Registry) Observe(m Metric, i int, d time.Duration) {
 		}
 	}
 	s.buckets[b].Add(1)
-	s.sumNs.Add(int64(d))
+	s.sumUs.Add(int64(d.Round(time.Microsecond) / time.Microsecond))
 }
 
 // Snapshot copies every series. Each value is read atomically; the snapshot as a whole is
@@ -292,7 +294,7 @@ func (r *Registry) Snapshot() MetricsSnapshot {
 					}
 				}
 				ss.Count = cum
-				ss.Sum = time.Duration(s.sumNs.Load()).Seconds()
+				ss.Sum = float64(s.sumUs.Load()) / 1e6
 			}
 			fs.Series[j] = ss
 		}

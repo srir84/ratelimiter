@@ -1215,6 +1215,12 @@ OUTAGE_ERRORS: list[tuple[str, list[dict[str, object]], str]] = [
         [{**REFUSE, "cmd": str(REFUSE["cmd"]).replace("5000", "5001")}],
         f"context.json: faults[0]: field cmd: a store refusal of duration_ms 5001, {TOO_LONG}",
     ),
+    (
+        "a store refusal with neither count nor duration_ms",
+        [{**REFUSE, "cmd": '{"target":"store","mode":"refuse","match":"acquire"}'}],
+        "context.json: faults[0]: field cmd: a store refusal with neither count nor duration_ms "
+        f"(it refuses until DELETE /_test/faults), {TOO_LONG}",
+    ),
 ]
 
 
@@ -1225,9 +1231,10 @@ def test_outage_beyond_ref5(
     tmp_path: Path, case: str, faults: list[dict[str, object]], detail: str
 ) -> None:
     """A run whose context.json shows more than one store outage segment (a faultctl store down
-    or pause, a timed store refusal, or any fault with an outage_ns), or one longer than its
-    policy's outage_tolerance, fails as input, naming the run: REF-5 allows one outage of at most
-    outage_tolerance, so the bound refund_deadline + the measured outage does not hold."""
+    or pause, a timed or unbounded store refusal, or any fault with an outage_ns), or one longer
+    than its policy's outage_tolerance (an unbounded refusal is longer than any), fails as input,
+    naming the run: REF-5 allows one outage of at most outage_tolerance, so the bound
+    refund_deadline + the measured outage does not hold."""
     world = make_world(tmp_path, closed_faults=faults)
     code, lines = check(world.manifest())
     assert code == 1, case
@@ -1279,6 +1286,29 @@ def test_outage_at_tolerance(tmp_path: Path) -> None:
         closed=s6_lines("closed", late),
         closed_faults=[{**STORE_DOWN, "outage_ns": TOLERANCE_NS}, DROP_REPLY],
     )
+    holds(world.manifest())
+
+
+# Store refusals hitapi arms within REF-5, each a closed run's only fault: preflight_test.go's
+# refuseNullRepeat and refuseNullCase (a null leaves duration_ms at 4000), and a count-only
+# refusal, which arms no outage segment.
+WITHIN_REF5 = {
+    "duration_ms repeated as null": (
+        '{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"duration_ms":null}'
+    ),
+    "duration_ms repeated as null in another case": (
+        '{"target":"store","mode":"refuse","match":"acquire","duration_ms":4000,"Duration_MS":null}'
+    ),
+    "a count-only refusal": '{"target":"store","mode":"refuse","match":"acquire","count":3}',
+}
+
+
+@pytest.mark.parametrize("case", list(WITHIN_REF5))
+def test_store_refusal_within_ref5(tmp_path: Path, case: str) -> None:
+    """A store refusal that hitapi arms for 4000 ms, though a later member gives duration_ms as
+    null (Go leaves the field as it was), or one with a count and no duration_ms, is no input
+    error: the run holds."""
+    world = make_world(tmp_path, closed_faults=[{**REFUSE, "cmd": WITHIN_REF5[case]}])
     holds(world.manifest())
 
 

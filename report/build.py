@@ -181,56 +181,76 @@ class Window:
         return {"start_ns": self.start_ns, "end_ns": self.end_ns, "source": self.source}
 
 
-def _fold_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """A /_test/faults body's members as hitapi's JSON decoder reads them: names matched
-    without regard to case, the last of a repeated name winning."""
-    out: dict[str, object] = {}
-    for key, value in pairs:
-        out[key.casefold()] = value
-    return out
+class _Members(list[tuple[str, object]]):
+    """A JSON object's members in their order, each name case-folded (_fold_pairs)."""
+
+
+def _fold_pairs(pairs: list[tuple[str, object]]) -> _Members:
+    """A JSON object's members in their order, as hitapi's JSON decoder takes them: each name
+    matches a field without regard to case."""
+    return _Members((key.casefold(), value) for key, value in pairs)
 
 
 @dataclass(frozen=True)
 class FaultBody:
     target: str
     mode: str
+    count: int
     duration_ms: int
+
+    def unbounded(self) -> bool:
+        """Whether the body has neither a count nor a duration_ms (each decoded as 0: absent, 0,
+        or null with no earlier value, and count also reset by a null): hitapi reads that as no
+        limit, so such a store refusal refuses every matching call until DELETE /_test/faults,
+        which a scenario cannot send. A body with a negative count or duration_ms, which hitapi
+        answers with 400, is not unbounded (as in the orchestrator's preflight)."""
+        return self.count == 0 and self.duration_ms == 0
 
 
 _INT64_MAX = (1 << 63) - 1
 _INT64_MIN = -(1 << 63)
+# hitapi's faultRequest fields (harness/httpapi) by Go type: strings, and integers (count, a
+# pointer, and the int64s duration_ms and delay_ms).
+_FAULT_STRINGS = ("target", "mode", "match", "at", "field")
+_FAULT_INTEGERS = ("count", "duration_ms", "delay_ms")
 
 
 def fault_body(cmd: str) -> FaultBody | None:
-    """A [[faults]] cmd that is a /_test/faults JSON body, decoded into hitapi's field types
-    (harness/httpapi faultRequest, as the orchestrator's preflight reads it): None for a
-    faultctl command or a body hitapi refuses (not one JSON object, or a field of the wrong
-    type). Unknown members are ignored; null leaves a field empty."""
+    """A [[faults]] cmd that is a /_test/faults JSON body, decoded member by member as Go's
+    decoder fills hitapi's faultRequest (harness/httpapi; the orchestrator's preflight reads it
+    the same way): a name matches its field without regard to case, and a later member replaces
+    an earlier one, except that a null leaves a string or int64 field as it was and resets
+    count, a pointer, to absent. None for a faultctl command or a body hitapi refuses: not one
+    JSON object, or a member with the wrong type for its field, even one a later member
+    replaces. Unknown members are ignored (hitapi refuses them, so counting such a body fails
+    closed, as preflight does)."""
     if cmd.startswith("faultctl "):
         return None
     try:
         value = json.loads(cmd, object_pairs_hook=_fold_pairs)
     except (ValueError, RecursionError):
         return None
-    if not isinstance(value, dict):
+    if not isinstance(value, _Members):
         return None
-    strings = {}
-    for key in ("target", "mode", "match", "at"):
-        member = value.get(key)
-        if member is not None and not isinstance(member, str):
-            return None
-        strings[key] = member or ""
-    numbers = {}
-    for key in ("count", "duration_ms", "delay_ms"):
-        member = value.get(key)
+    strings: dict[str, str] = {}
+    numbers: dict[str, int] = {}
+    for name, member in value:
         if member is None:
-            numbers[key] = 0
-        elif type(member) is int and _INT64_MIN <= member <= _INT64_MAX:
-            numbers[key] = member
-        else:
-            return None  # hitapi's decoder refuses the body: it arms nothing
+            if name == "count":
+                numbers.pop(name, None)
+        elif name in _FAULT_STRINGS:
+            if not isinstance(member, str):
+                return None  # hitapi's decoder refuses the body: it arms nothing
+            strings[name] = member
+        elif name in _FAULT_INTEGERS:
+            if type(member) is not int or not _INT64_MIN <= member <= _INT64_MAX:
+                return None
+            numbers[name] = member
     return FaultBody(
-        target=strings["target"], mode=strings["mode"], duration_ms=numbers["duration_ms"]
+        target=strings.get("target", ""),
+        mode=strings.get("mode", ""),
+        count=numbers.get("count", 0),
+        duration_ms=numbers.get("duration_ms", 0),
     )
 
 
@@ -242,8 +262,9 @@ def is_store_outage_cmd(cmd: str) -> bool:
 
 def is_outage_segment(cmd: str) -> bool:
     """Whether a fault arms a store outage segment (§A7 item 5; the orchestrator's preflight
-    rule): a faultctl store down or store pause, or a body with target store, mode refuse and a
-    duration_ms above 0, however many instances it goes to."""
+    rule): a faultctl store down or store pause, or a body with target store and mode refuse
+    that is timed (a duration_ms above 0) or unbounded (FaultBody.unbounded), however many
+    instances it goes to. A refusal with a count and no duration_ms arms none."""
     if cmd.startswith("faultctl "):
         return is_store_outage_cmd(cmd)
     body = fault_body(cmd)
@@ -251,7 +272,7 @@ def is_outage_segment(cmd: str) -> bool:
         body is not None
         and body.target == "store"
         and body.mode == "refuse"
-        and body.duration_ms > 0
+        and (body.duration_ms > 0 or body.unbounded())
     )
 
 
@@ -1718,7 +1739,8 @@ def evidence_section(inp: Inputs, correctness: dict[str, object]) -> dict[str, o
                 "segments_without_count": api.segments_unread,
             },
             "HAR-13: listener_drops summed over every stop and pre_kill line is 0, every "
-            "pre_kill read succeeded (read_ok), and every process ended with one of the two",
+            "pre_kill read succeeded (read_ok), and every process segment holds one of the two, "
+            "not necessarily as its last line",
         ),
         "fixtures_off": _evidence(
             fixtures_ok,
@@ -1741,7 +1763,8 @@ def evidence_section(inp: Inputs, correctness: dict[str, object]) -> dict[str, o
         "outage_segments": _evidence(
             segments <= MAX_OUTAGE_SEGMENTS,
             segments,
-            "store outage segments armed: faultctl store down or pause, and timed store refusals",
+            "store outage segments armed: faultctl store down or pause, and store refusals that "
+            "are timed (a duration_ms above 0) or unbounded (neither count nor duration_ms)",
         ),
         "gen_summary": _evidence(
             summary is not None and summary.log_drops == 0,

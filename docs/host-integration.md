@@ -147,7 +147,7 @@ flowchart LR
 - **Sequence:** stop taking new work, let in-flight work finish or cancel within `P`, then call `Close()`. `Close` drains pending refunds for `DrainTimeoutNs` (default `refund_deadline + outage_tolerance` = 35 s) and returns as soon as all are final and the refund listener has handled their events. It waits for a slow listener only until the drain deadline, or 100 ms past the drain's end when that is later.
 - **Kill grace** must exceed `P + drain_timeout` plus shutdown overhead. The harness uses `P + drain_timeout + 5 s` = 5 + 35 + 5 = **45 s** (DESIGN [§B10](../DESIGN.md#b10-harness-numbers)). A 30 s platform default is too short for the default drain.
 - `Close(limiter.WithDrainTimeout(d))` overrides the drain. A drain shorter than the default gives up the refund guarantee for the refunds still pending (`REF-9`); those end `unresolved` (`closed`).
-- From the start of `Close`, `Acquire` returns `not_ready` with nothing sent, `Health` reports `closing`, and `Release` on an open permit ends `unresolved` (`closed`) without sending.
+- From the start of `Close`, a new `Acquire` returns `not_ready` with nothing sent, `Health` reports `closing`, and `Release` on an open permit ends `unresolved` (`closed`) without sending.
 - A kill without `Close` is a crash: the instance's pending refunds are lost, with no events (`REF-8`, `STA-15`). Budgets in the store are never affected.
 - **Harness** (`HAR-15`, `T-HFLT-5`): on SIGTERM `hitapi` stops accepting `/hit`, refuses work not yet at its first database statement (`Release`, `ERR-15`), waits at most `P` for the rest, calls `Close` with the default drain, empties its run-log queue and exits 0.
 

@@ -34,17 +34,21 @@ func NewWithHooks(p Policy, in Instance, st StoreOptions, h Hooks, opts ...Optio
 	}, opts)
 }
 
-// Kill stops l at once, as a process kill would (DESIGN §A5.12): the listener dispatcher
-// stops first, so no callback starts after that (one already running finishes); then the
-// refund workers and every backoff and retention timer stop, and the epoch watch, the cleanup
-// runner (a pass in progress ends with its calls) and every connection, with no drain.
-// Refunds still pending are lost: none reaches the listener, and an event emitted once the
-// dispatcher has stopped is counted and dropped (DESIGN §A5.12 lists the paths). Afterwards
-// Acquire returns not_ready, Health reports closing, and Close returns at once (plan choice).
+// Kill stops l at once, as a process kill would (DESIGN §A5.12). It is a shutdown from its
+// first step: it marks l shutting down before it stops anything, so from then on an acquire
+// in flight that comes back unavailable reads not_ready (closing) in both modes, as one that
+// starts later does (send). Of the stops, the listener dispatcher's comes first, so no
+// callback starts after that (one already running finishes); then the refund workers and every
+// backoff and retention timer stop, and the epoch watch, the cleanup runner (a pass in
+// progress ends with its calls) and every connection, with no drain. Refunds still pending are
+// lost: none reaches the listener, and an event emitted once the dispatcher has stopped is
+// counted and dropped (DESIGN §A5.12 lists the paths). Afterwards Acquire returns not_ready,
+// Health reports closing, and Close returns at once (plan choice).
 func Kill(l *Limiter) {
 	if l == nil {
 		return
 	}
+	l.shuttingDown.Store(true)
 	l.closeStarted.Store(true)
 	l.closing.Store(true)
 	if l.lis != nil {

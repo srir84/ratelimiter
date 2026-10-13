@@ -124,7 +124,8 @@ func (h *helper) checkKilled(t *testing.T) {
 
 // fakeAPI serves an instance's /_test/prekill and /health (httptest): the pre-kill reply is
 // fixed, or with status 0 never sent (the call is held until its client gives up or the test
-// ends); /health answers health[i] to its i-th GET, the last one from then on.
+// ends); /health answers health[i] to its i-th GET, the last one from then on, after calling
+// the onHealth function, if any, with i.
 type fakeAPI struct {
 	srv       *httptest.Server
 	proc      *helper // the process to be killed; nil when none
@@ -138,6 +139,7 @@ type fakeAPI struct {
 	prekills       int
 	aliveAtPrekill bool
 	healthGets     int
+	beforeHealth   func(i int) // set by onHealth
 }
 
 func newFakeAPI(t *testing.T, proc *helper, status int, body string, health ...string) *fakeAPI {
@@ -173,9 +175,14 @@ func newFakeAPI(t *testing.T, proc *helper, status int, body string, health ...s
 			return
 		}
 		a.mu.Lock()
-		body := a.health[min(a.healthGets, len(a.health)-1)]
+		i := a.healthGets
+		body := a.health[min(i, len(a.health)-1)]
 		a.healthGets++
+		before := a.beforeHealth
 		a.mu.Unlock()
+		if before != nil {
+			before(i)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, body) // a failed write shows as an instance not ready
 	})
@@ -183,6 +190,14 @@ func newFakeAPI(t *testing.T, proc *helper, status int, body string, health ...s
 	t.Cleanup(a.srv.Close)
 	t.Cleanup(func() { close(a.release) }) // runs first: Close waits for a held call to return
 	return a
+}
+
+// onHealth makes /health call fn with the index of each GET (0 for the first) before it
+// answers.
+func (a *fakeAPI) onHealth(fn func(i int)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.beforeHealth = fn
 }
 
 // counts returns the pre-kill calls, whether the process was alive at the first, and the
@@ -314,7 +329,8 @@ func readFIFOLine(t *testing.T, path string) string {
 // before the pre-kill call: nothing is called, written, killed or started. With restart, the
 // instance starts again (through Start after the kill, or from its command line as a detached
 // child with exactly its environment and output file) and KillAPI waits for /health ready; a
-// restarted process that has exited fails that wait at once, ready answer or not.
+// restarted process that has exited fails that wait at once, ready answer or not, and so does
+// one that exits between two reads, at the second, though it answers ready.
 func TestKillAPIPreKillRecord(t *testing.T) {
 	t.Run("read_ok", func(t *testing.T) {
 		proc := startHelper(t)
@@ -624,5 +640,51 @@ func TestKillAPIPreKillRecord(t *testing.T) {
 				checkLog(t, target.LogPath, `{"kind":"lifecycle","event":"pre_kill","listener_drops":0,"log_drops":0,"read_ok":true}`)
 			})
 		}
+	})
+
+	t.Run("restart_exits_while_waiting", func(t *testing.T) {
+		// The restarted process runs at the first /health read, which answers not ready, and is
+		// killed and reaped while the second read answers ready: the wait checks the process
+		// after every read, so it fails there, as the ready answer may be another listener's.
+		old := startHelper(t)
+		api := newFakeAPI(t, old, http.StatusOK, prekillOK, `{"status":"not_ready","reason":"no_epoch"}`, `{"status":"ready","reason":"ready"}`)
+		target := apiTarget(t, api, old.pid, runLog(t))
+		var restarted atomic.Pointer[helper]
+		target.Start = func(context.Context) (int, error) {
+			h := startHelper(t)
+			restarted.Store(h)
+			return h.pid, nil
+		}
+		var reaped atomic.Bool
+		api.onHealth(func(i int) {
+			h := restarted.Load()
+			if i != 1 || h == nil {
+				return
+			}
+			_ = h.cmd.Process.Kill() // reaped by its waiter, which closes done
+			select {
+			case <-h.done:
+				reaped.Store(true)
+			case <-time.After(killWait):
+			}
+		})
+		newPID, err := fixtures.KillAPI(t.Context(), target, true)
+		h := restarted.Load()
+		if h == nil || newPID != h.pid {
+			t.Fatalf("KillAPI returned PID %d, want the one Start started", newPID)
+		}
+		_, _, gets := api.counts()
+		if !reaped.Load() {
+			t.Fatalf("the restarted process %d was not killed and reaped at the second /health read (/health read %d times; KillAPI: %v)",
+				h.pid, gets, err)
+		}
+		if want := fmt.Sprintf("the restarted process %d has exited", h.pid); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("KillAPI whose restarted process exited after the first /health read: %v, want an error saying %q", err, want)
+		}
+		if gets != 2 {
+			t.Errorf("/health read %d times, want 2: the second one's ready answer came after the process had exited", gets)
+		}
+		old.checkKilled(t)
+		checkLog(t, target.LogPath, `{"kind":"lifecycle","event":"pre_kill","listener_drops":0,"log_drops":0,"read_ok":true}`)
 	})
 }

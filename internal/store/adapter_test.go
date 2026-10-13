@@ -28,23 +28,29 @@ var _ Adapter = (*StoreAdapter)(nil)
 // kills; they stay first, in this order. TestPickDecides and TestDialReturnsEachFailure call
 // pick and dial directly, so a pick or a dial that returns neither a connection nor an error
 // fails them before any caller dereferences the missing connection, and TestPickDecides
-// takes a ready connection before any pick finds none ready. TestSuccessfulDialReadiesAtOnce
-// checks the slot's success path before any test's dial fails; TestDialFailuresInChild
-// checks that the adapter uses its injected Dial and Rand before any test builds an adapter
-// without them; TestStallAfterPartialBatchReply checks the stall rule before any reply
-// empties a FIFO, and the send observer before any test writes without one;
-// TestEntriesReturnAndCloseEnds checks Do's observer label for a two-word command before any
-// test sends a one-word one. Each call and each Close there runs on a goroutine of its own
-// with a bounded wait (within, waitDone), so a hang fails the test by assertion; nothing
-// catches a panic, which crashes the test binary.
+// takes a ready connection before any pick finds none ready; it also takes the fail-fast
+// error of a dial the store refused, and TestDialReturnsEachFailure reads a refused AUTH's
+// text (refusalText) and classifies a call that fails fast on it (classify), before any
+// slot's failed dial or any call that sent nothing reaches either.
+// TestSuccessfulDialReadiesAtOnce checks the slot's success path before any test's dial
+// fails; TestDialFailuresInChild checks that the adapter uses its injected Dial and Rand
+// before any test builds an adapter without them; TestStallAfterPartialBatchReply checks the
+// stall rule before any reply empties a FIFO, and the send observer before any test writes
+// without one; TestEntriesReturnAndCloseEnds checks Do's observer label for a two-word
+// command before any test sends a one-word one. Each call and each Close there runs on a
+// goroutine of its own with a bounded wait (within, waitDone), so a hang fails the test by
+// assertion; nothing catches a panic, which crashes the test binary.
 
 // TestPickDecides: pick decides in this order (DESIGN §A5.4; plan S3 step 8): a closed set is
 // unavailable (errAdapterClosed), even with ctx already ended; an ended ctx returns its cause
 // (context.Cause) at once; a ready connection is taken, with n commands reserved on it, even
 // while the kind's last dial failed within its backoff; and with none ready during that
-// backoff, a call fails fast (errFailFast). It runs pick on a bare connSet, with no
-// connection goroutines; the ready connection is a net.Pipe end that nothing reads.
+// backoff, a call fails fast (errFailFast), with a *refusedError that carries the store's
+// error reply when the store refused that dial (plan S9 step 1). It runs pick on a bare
+// connSet, with no connection goroutines; the ready connection is a net.Pipe end that nothing
+// reads.
 func TestPickDecides(t *testing.T) {
+	const wrongPass = "WRONGPASS invalid username-password pair or user is disabled."
 	pick := func(s *connSet, ctx context.Context, n int, what string) (*pipeConn, error) {
 		t.Helper()
 		var pc *pipeConn
@@ -79,15 +85,24 @@ func TestPickDecides(t *testing.T) {
 	if pc, err := pick(open, t.Context(), 1, "a pick within the backoff"); pc != nil || !errors.Is(err, errFailFast) {
 		t.Fatalf("a pick within the backoff of a failed dial = %v, %v; want no connection and %v", pc, err, errFailFast)
 	}
+	open.dialFailed(time.Now().Add(time.Minute), wrongPass) // the store refused the next dial
+	pc, err := pick(open, t.Context(), 1, "a pick within the backoff of a refused dial")
+	var re *refusedError
+	if pc != nil || !errors.As(err, &re) || re.reply != wrongPass || !errors.Is(err, errFailFast) {
+		t.Fatalf("a pick within the backoff of a dial the store refused = %v, %v; want no connection and a *refusedError carrying the reply and wrapping %v", pc, err, errFailFast)
+	}
 }
 
 // TestDialReturnsEachFailure: dial connects one connection and authenticates it (DESIGN
 // §A5.4). It returns the connection once AUTH succeeds; for each way it can fail it returns
 // an error and no connection, and closes the connection it opened: a connect that fails (the
 // dialer's error, wrapped), an AUTH the store refuses, and a connect that completes after its
-// set shut down (errAdapterClosed, with nothing written). It calls dial directly, on an
-// adapter with no connection slots.
+// set shut down (errAdapterClosed, with nothing written). The refused AUTH's error holds the
+// store's reply, which refusalText reads, and a call that fails fast on that refusal is
+// unavailable, sent nothing, and keeps the reply as its StoreError (classify; plan S9 step 1).
+// It calls dial directly, on an adapter with no connection slots.
 func TestDialReturnsEachFailure(t *testing.T) {
+	const wrongPass = "WRONGPASS invalid username-password pair or user is disabled."
 	pw := newPassword(t)
 	srv := fakeresp.Start(t, "rl_lib", pw)
 	refused := errors.New("connection refused (test)")
@@ -127,10 +142,17 @@ func TestDialReturnsEachFailure(t *testing.T) {
 	}
 	failConnect.Store(false)
 
-	srv.ReplyError("AUTH", "WRONGPASS invalid username-password pair or user is disabled.", 1)
+	srv.ReplyError("AUTH", wrongPass, 1)
 	pc, err = a.dial(set)
 	if pc != nil || err == nil || errors.Is(err, errAdapterClosed) {
 		t.Fatalf("a dial whose AUTH the store refuses = %v, %v; want no connection and the handshake's error", pc, err)
+	}
+	if got := refusalText(err); got != wrongPass {
+		t.Fatalf("refusalText of the refused dial's error = %q, want the store's reply %q", got, wrongPass)
+	}
+	failFast := exchanged{err: &refusedError{reply: refusalText(err)}}
+	if r, ok := classify(t.Context(), time.Now().Add(testD), "acquire", failFast); ok || r.Outcome != Unavailable || r.Sent || r.SentCommands != 0 || r.StoreError != wrongPass {
+		t.Fatalf("classify of a call that failed fast on the refusal = %+v, %v; want unavailable, nothing sent, the reply as StoreError, no reply value", r, ok)
 	}
 
 	set.shutdown()
@@ -877,6 +899,60 @@ func TestHostCancelWhileWaitingForWriteLock(t *testing.T) {
 	}
 }
 
+// doneCancelHost is a host ctx with no deadline whose Done channel never closes and whose Err
+// turns context.Canceled once Done has been asked for: a host cancel that lands after pick,
+// which takes a ready connection asking only for Err, and while lockWrite's select, which asks
+// for Done, takes the free write lock. asked records that Done was asked for.
+type doneCancelHost struct {
+	context.Context
+	never chan struct{} // never closed
+	asked atomic.Bool
+}
+
+func (h *doneCancelHost) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (h *doneCancelHost) Done() <-chan struct{} {
+	h.asked.Store(true)
+	return h.never
+}
+
+func (h *doneCancelHost) Err() error {
+	if h.asked.Load() {
+		return context.Canceled
+	}
+	return nil
+}
+
+// TestHostCancelAfterWriteLock: a call whose host cancels after it picked a connection, while
+// it took the write lock, never starts its write: the check between the two finds the call
+// ended, so it sent nothing and its error is the host's cancel (SPEC API-1, API-22; DESIGN
+// §A5.4: no write starts after the call's deadline or its host's end). exchange runs directly
+// on a warmed adapter with one call connection, with a doneCancelHost: pick takes the ready
+// connection while the host is live, and lockWrite takes the free lock just as the host
+// cancels.
+func TestHostCancelAfterWriteLock(t *testing.T) {
+	e := newEnv(t)
+	e.start(withConns(1, 1))
+	e.warm(1, 1)
+	host := &doneCancelHost{Context: t.Context(), never: make(chan struct{})}
+	var out []exchanged
+	mustWithin(t, "exchange(PING)", 2*time.Second, func() {
+		out = e.a.exchange(host, e.a.sets[Call], []command{{label: "PING", args: []string{"PING"}}})
+	})
+	if !host.asked.Load() {
+		t.Fatal("exchange never asked the host ctx for Done: lockWrite's select did not run")
+	}
+	if len(out) != 1 || out[0].sent || !errors.Is(out[0].err, context.Canceled) {
+		t.Fatalf("exchange = %+v; want one command, not sent, with context.Canceled", out)
+	}
+	if got := e.obs.bytesOf("PING"); len(got) != 0 {
+		t.Errorf("observer heard PING writes of %v bytes, want none", got)
+	}
+	if n := e.srv.Count("PING"); n != 0 {
+		t.Errorf("the server received %d PING, want none", n)
+	}
+}
+
 // pendingHost is a live host ctx whose deadline has passed: how classification finds it
 // while the timer goroutine that ends it has not run yet.
 type pendingHost struct {
@@ -921,6 +997,7 @@ func TestNotSentOutcome(t *testing.T) {
 		{"host cancelled, its deadline after start + D", cancelled(deadlineAt(now.Add(time.Hour))), past, context.Canceled, Cancelled},
 		{"adapter closed, host cancelled", cancelled(t.Context()), past, errAdapterClosed, Unavailable},
 		{"no connection within the backoff, host cancelled", cancelled(t.Context()), past, errFailFast, Unavailable},
+		{"the store refused the last dial, host cancelled", cancelled(t.Context()), past, &refusedError{reply: "WRONGPASS invalid username-password pair or user is disabled."}, Unavailable},
 		{"nothing written, host live", t.Context(), now.Add(time.Hour), injectedError{}, Unavailable},
 	}
 	for _, r := range rows {
