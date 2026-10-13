@@ -24,33 +24,34 @@
 #   this file arms FLT-1b, the wrapper refusal of acquires (5 s on instance 2 at 70 s), which
 #   changes no stored state and leaves refunds alone (match "acquire"): the state faults stay the
 #   only thing that touches the store, and closed mode answers the refused acquires with ERR-8.
-# - FLT-11 at 110 s, 10 s before the end (the plan's time). A refund still pending when the hwm goes
-#   invalidates the run: its refund fails hwm_missing (state_integrity_error, retried) until Close's
-#   35 s drain ends, before its retention (acquire + 60 s), and its unresolved (closed) event comes
-#   after the listener's deadline, the drain's, which drops and counts it (internal/core/close.go):
-#   listener_drops > 0, an invalid run (HAR-13). Seed 1 does not reliably avoid it: the schedule
-#   fixes which attempts the application refuses after their acquire, but timing decides whether
-#   such an attempt is allowed and whether its refund is still pending at the HDEL. In the H6 plan
-#   audit's seed-1 simulation the nearest refusal-selected attempts are u000000 retries at about
-#   109.87 s and 110.05 s (and at least 165 ms before each FLT-7 tamper), which a del-hwm landing at
-#   once clears. Four seed-1 runs on 2026-10-10: three valid (the builder's closed and open runs,
-#   and a closed rerun in which del-hwm took 8 ms and the last refund before it was confirmed at
-#   109.387 s, 613 ms earlier; 601 of 601 refunds confirmed); in the fourth, del-hwm ran from
-#   110.002 s to 111.164 s through a store stall (del-ix also took 1.26 s there, 50.003-51.266 s),
-#   four acquires the store decided at 110.89-110.91 s, before its HDEL, were refused after their
-#   acquire, and their refunds stayed pending: four listener drops, an invalid run.
-#   Decision (H6 task 1 repair; the owner's standing instruction: take the recommended option): no
-#   scenario or HARNESS change. A run that comes out invalid with listener drops at the drain's end
-#   (make run fails: the orchestrator exits 1; report.json evidence_validity.checks.listener_drops
-#   not ok) is rerun, as HAR-13 ("invalid (rerun)") and the plan's Watch out ("After a failed run,
-#   rerun only the scenarios that lack a valid run") say; a failed run gets no runs/index.jsonl
-#   line, so completion.py's manifest takes the valid rerun. Removing the risk needs an owner rule
-#   (REF-9 (d) excluded in step 4 and in validity); an earlier FLT-11 alone would turn the drop into
-#   a refund-completion failure (its refund would end unresolved (retention) before the drain ends).
-#   completion.py has no REF-9 (d) exclusion (a quarantine or epoch-wide state loss before the
-#   refund is confirmed), so a refund FLT-7 catches, ending unresolved (retention), fails its
-#   refund completion (none did in these runs). A seed, rate or fault-time change needs both
-#   rechecked.
+# - FLT-11 at 110 s, 10 s before the end (the plan's time). A refund of an undamaged key not yet
+#   applied at del-hwm's HDEL keeps failing with hwm_missing (an epoch-wide state_integrity_error,
+#   retried, API-19) until Close's 35 s drain ends, before its retention (acquire + 60 s), so it
+#   ends unresolved (closed).
+#   Close gives the listener until the drain deadline or 100 ms past the drain's end, whichever is
+#   later (internal/core/close.go). Since hitapi's listener only queues each event for its run log,
+#   the event is delivered, not dropped (a drop would make the run invalid, HAR-13).
+#   The drain ends more than 30 s after the release, so report/completion.py does not count the
+#   release as drained (REF-9 (c)). Instead it excludes the release as lost (REF-9 (d)) if the
+#   release came within P and del-hwm, an epoch-wide state loss (STA-9), ended after the release's
+#   request arrived, began no later than the latest the refund's final event may have come, and
+#   ended by the earliest the refund's REF-5 deadline came on the wall clock (here 28.8 s after the
+#   request arrived: 30 s + a measured outage of 0, less a 4 % slew allowance).
+#   Seed 1 does not fix whether a refund is pending at the HDEL: the schedule fixes which attempts
+#   the application refuses after their acquire, but timing decides whether such an attempt is
+#   allowed and whether its refund is still pending then. In seed-1 runs on 2026-10-10, del-hwm took
+#   about 8 ms in some and 0.5-1.2 s in others. In one, a store stall made it run from 110.002 s to
+#   111.164 s, and four acquires the store decided at 110.89-110.91 s, before its HDEL, were refused
+#   after their acquire and their refunds stayed pending. A refund whose key is tampered with
+#   (FLT-7) and quarantined before the refund applies keeps failing (retried, API-19). It ends
+#   unresolved (retention) when its retention timer fires (acquire + 60 s, before Close here),
+#   unless a retry ends it first with receipt_expired: refund.lua checks the receipt's expiry before
+#   the quarantine flag. completion.py treats both alike: a release within P is excluded as
+#   quarantined if an ERR-11 refusal on its user arrived no earlier than the key's tamper began and
+#   was done both by the earliest the refund's REF-5 deadline came on the wall clock and before any
+#   store-wide tamper began, and is a refund-completion failure if not. As del-hwm is this file's
+#   only store-wide tamper, a seed, rate or fault-time change must keep each tampered key's first
+#   ERR-11 refusal by that deadline and before del-hwm.
 name = "s6-state-closed"
 seed = 1
 run_kind = "test"
@@ -73,15 +74,15 @@ zipf_s = 1.1
 # FLT-7 (an indexed bucket deleted early): HARNESS §6 "State loss | Tamper tool: delete an indexed
 # bucket early; write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6
 # "`FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): delete bucket fields, delete `k`, … |
-# `faultctl tamper <op> --key K`".
+# `faultctl tamper <op> [--key K]`".
 [[faults]]
 at_s = 40
 cmd = "faultctl tamper del-k --key u000001"
 
 # FLT-7 (malformed data): HARNESS §6 "State loss | Tamper tool: delete an indexed bucket early;
 # write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6 "`FLT-7`,
-# `FLT-11` | Tamper tool (`rl_fixture` user): … corrupt a field, … | `faultctl tamper <op> --key
-# K`".
+# `FLT-11` | Tamper tool (`rl_fixture` user): … corrupt a field, … | `faultctl tamper <op> [--key
+# K]`".
 [[faults]]
 at_s = 45
 cmd = "faultctl tamper corrupt-field --key u000002 --field u --value tampered"
@@ -89,7 +90,7 @@ cmd = "faultctl tamper corrupt-field --key u000002 --field u --value tampered"
 # FLT-7 (the bucket's index entry deleted): HARNESS §6 "State loss | Tamper tool: delete an indexed
 # bucket early; write malformed data; wipe state | `state_integrity_error` (`STA-9`)"; DESIGN §B6
 # "`FLT-7`, `FLT-11` | Tamper tool (`rl_fixture` user): … delete the `ix` member, … | `faultctl
-# tamper <op> --key K`".
+# tamper <op> [--key K]`".
 [[faults]]
 at_s = 50
 cmd = "faultctl tamper del-ix --key u000003"
@@ -105,7 +106,7 @@ instance = 2
 
 # FLT-11: HARNESS §6 "High-water mark loss | Tamper tool deletes or corrupts it mid-epoch |
 # Epoch-wide `state_integrity_error` (`CLK-7`)"; DESIGN §B6 "`FLT-7`, `FLT-11` | Tamper tool
-# (`rl_fixture` user): … delete `hwm`, … | `faultctl tamper <op> --key K`" (del-hwm takes no key).
+# (`rl_fixture` user): … delete `hwm`, … | `faultctl tamper <op> [--key K]`" (del-hwm takes no key).
 [[faults]]
 at_s = 110
 cmd = "faultctl tamper del-hwm"

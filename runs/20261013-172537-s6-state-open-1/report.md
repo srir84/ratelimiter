@@ -1,20 +1,20 @@
-# Run report 20261010-151937-s6-capacity-closed-1
+# Run report 20261013-172537-s6-state-open-1
 
 ## Context (PRF-5)
 
 | field | value |
 |---|---|
-| run_id | 20261010-151937-s6-capacity-closed-1 |
-| epoch_id | 3996aac8c53d8ba47ee7934229a230c7 |
+| run_id | 20261013-172537-s6-state-open-1 |
+| epoch_id | 2dd71d0e95c946783deec9331f5070aa |
 | run_kind | test |
 | run_label | test-build scenario, not a benchmark |
 | baseline | false |
 | outcome | ok |
-| start_ns | 1791645577892093000 |
-| end_ns | 1791645714407048000 |
-| scenario.name | s6-capacity-closed |
-| scenario.path | scenarios/s6-capacity-closed.toml |
-| scenario.sha256 | 81feeda404053ec1bd632d94c573237c6364a384e840e9f657831aee2c78be46 |
+| start_ns | 1791912337956718000 |
+| end_ns | 1791912458462578000 |
+| scenario.name | s6-state-open |
+| scenario.path | scenarios/s6-state-open.toml |
+| scenario.sha256 | e32c08a1401c43c0c1942623af41dcb81dce5aca74fce322645f9b9bb9ee7267 |
 | seed | 1 |
 | instances | 3 |
 | hardware.model | Mac15,9 |
@@ -27,7 +27,7 @@
 | versions.valkey | Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=1af85cd1d1bb3237 |
 | versions.valkey_path | /opt/homebrew/bin/valkey-server |
 | versions.postgres | postgres (PostgreSQL) 14.19 (Homebrew) |
-| store_settings.aclfile | /Users/srirondla/distributed-systems/ratelimiter/runs/20261010-151937-s6-capacity-closed-1/store/acl.conf |
+| store_settings.aclfile | /Users/srirondla/distributed-systems/ratelimiter/runs/20261013-172537-s6-state-open-1/store/acl.conf |
 | store_settings.aof-use-rdb-preamble | yes |
 | store_settings.appendfsync | always |
 | store_settings.appendonly | yes |
@@ -47,20 +47,20 @@
 | postgres_settings.synchronous_commit | on |
 | instance_configs | null |
 | controlled_clock_ns | null |
-| schedule_sha256 | a547cf35a179356fc2821dd93bffd7c27fc511f6e408b401f38b78389febf8a4 |
+| schedule_sha256 | b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45 |
 | thresholds_sha256 | null |
 | rewrites | [] |
 | label | test-build scenario, not a benchmark |
-| policy.capacity | 1 |
+| policy.capacity | 20 |
 | policy.cleanup_interval_ns | 5000000000 |
 | policy.clock_source | store |
-| policy.failure_mode | closed |
-| policy.max_live_markers | 20 |
-| policy.max_markers_per_key | 5 |
-| policy.max_tracked_buckets | 50 |
+| policy.failure_mode | open |
+| policy.max_live_markers | 50000 |
+| policy.max_markers_per_key | 1000 |
+| policy.max_tracked_buckets | 100000 |
 | policy.outage_tolerance_ns | 5000000000 |
-| policy.rate_period_ns | 10000000000 |
-| policy.rate_tokens | 1 |
+| policy.rate_period_ns | 1000000000 |
+| policy.rate_tokens | 10 |
 | policy.receipt_lifetime_ns | 60000000000 |
 | policy.refund_deadline_ns | 30000000000 |
 | instance_settings.margin_ns | 1000000000 |
@@ -147,32 +147,36 @@
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | api | postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conns=64 | true | 512 | 300 | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null |
 | instance | null | null | null | null | 1000000000 | 1152 | 1152 | 5000000000 | 128 | null | null | null | null | null | null | null | null | null | null | null | null | null |
-| policy | null | null | null | null | null | null | null | null | null | 1 | 5000000000 | store | closed | 20 | 5 | 50 | 5000000000 | 10000000000 | 1 | 60000000000 | 30000000000 | null |
+| policy | null | null | null | null | null | null | null | null | null | 20 | 5000000000 | store | open | 50000 | 1000 | 100000 | 5000000000 | 1000000000 | 10 | 60000000000 | 30000000000 | null |
 | store | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | null | 127.0.0.1:6390 |
 
 ### context.faults
 
 | at_s | cmd | instance | start_ns | end_ns | outage_start_ns | outage_ns | targets |
 |---|---|---|---|---|---|---|---|
-| 60 | {"target":"store","mode":"refuse","match":"acquire","duration_ms":5000} | 1 | 1791645638402184000 | 1791645638405132000 | null | null | [{"instance":1,"status":200}] |
+| 40 | faultctl tamper del-k --key u000001 | null | 1791912378424662000 | 1791912378454801000 | null | null | [] |
+| 45 | faultctl tamper corrupt-field --key u000002 --field u --value tampered | null | 1791912383425728000 | 1791912383431757000 | null | null | [] |
+| 50 | faultctl tamper del-ix --key u000003 | null | 1791912388424622000 | 1791912388432668000 | null | null | [] |
+| 70 | {"target":"store","mode":"refuse","match":"acquire","duration_ms":5000} | 2 | 1791912408425560000 | 1791912408426095000 | null | null | [{"instance":2,"status":200}] |
+| 110 | faultctl tamper del-hwm | null | 1791912448425342000 | 1791912448432752000 | null | null | [] |
 
 ### context.children
 
 | name | role | pid | exit | exited_before_stop | grace_ns | killed | instance |
 |---|---|---|---|---|---|---|---|
-| hitgen | hitgen | 56414 | exit 0 | true | 35000000000 | false | null |
-| hitapi-1 | hitapi | 56410 | exit 0 | false | 45000000000 | false | 1 |
-| hitapi-2 | hitapi | 56411 | exit 0 | false | 45000000000 | false | 2 |
-| hitapi-3 | hitapi | 56412 | exit 0 | false | 45000000000 | false | 3 |
-| sampler | sampler | 56413 | exit 0 | false | 10000000000 | false | null |
+| hitgen | hitgen | 33758 | exit 0 | true | 35000000000 | false | null |
+| hitapi-1 | hitapi | 33754 | exit 0 | false | 45000000000 | false | 1 |
+| hitapi-2 | hitapi | 33755 | exit 0 | false | 45000000000 | false | 2 |
+| hitapi-3 | hitapi | 33756 | exit 0 | false | 45000000000 | false | 3 |
+| sampler | sampler | 33757 | exit 0 | false | 10000000000 | false | null |
 
 ### context.workload
 
 | field | value |
 |---|---|
-| scenario_file | scenarios/s6-capacity-closed.toml |
+| scenario_file | scenarios/s6-state-open.toml |
 | step_bounds_ns | [0,120000000000] |
-| users | 200 |
+| users | 100 |
 | instances | 3 |
 | verdict | none |
 | spike_step | null |
@@ -194,13 +198,13 @@
 | total.sent | 36066 |
 | total.initial | 36066 |
 | total.duplicates | 0 |
-| total.retries_429 | 49287 |
+| total.retries_429 | 18533 |
 | total.unsent | 0 |
 | total.sched_lag_ns.count | 36066 |
-| total.sched_lag_ns.p50 | 569130 |
-| total.sched_lag_ns.p95 | 1066229 |
-| total.sched_lag_ns.p99 | 1531840 |
-| total.got_conn_wait_ns_p99 | 40250 |
+| total.sched_lag_ns.p50 | 524895 |
+| total.sched_lag_ns.p95 | 998405 |
+| total.sched_lag_ns.p99 | 1135047 |
+| total.got_conn_wait_ns_p99 | 7666 |
 | stopped_after_step | null |
 | excluded_step | null |
 | summary.planned | 36066 |
@@ -218,25 +222,25 @@
 
 | step | rate_per_s | duration_s | start_ns | end_ns | ran | scheduled | planned | sent | initial | duplicates | retries_429 | unsent | achieved_sent_per_s | offered_per_s | sched_lag_ns.count | sched_lag_ns.p50 | sched_lag_ns.p95 | sched_lag_ns.p99 | got_conn_wait_ns_p99 | generator_limited | status_200 | status_429 | unknown_acquires | unknown_application_outcomes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0 | 300 | 120 | 0 | 120000000000 | full | 36066 | 36066 | 36066 | 36066 | 0 | 49287 | 0 | 300.55 | 300.55 | 36066 | 569130 | 1066229 | 1531840 | 40250 | false | 691 | 72429 | 0 | 0 |
+| 0 | 300 | 120 | 0 | 120000000000 | full | 36066 | 36066 | 36066 | 36066 | 0 | 18533 | 0 | 300.55 | 300.55 | 36066 | 524895 | 998405 | 1135047 | 7666 | false | 19852 | 26362 | 0 | 0 |
 
 ## Results (PRF-2)
 
 | field | value |
 |---|---|
-| requests | 85353 |
-| by_err.ERR-1 | 691 |
+| requests | 54599 |
+| by_err.ERR-1 | 19305 |
 | by_err.ERR-2 | 0 |
-| by_err.ERR-3 | 0 |
-| by_err.ERR-4 | 72429 |
+| by_err.ERR-3 | 547 |
+| by_err.ERR-4 | 26362 |
 | by_err.ERR-5 | 0 |
 | by_err.ERR-6 | 0 |
 | by_err.ERR-7 | 0 |
-| by_err.ERR-8 | 1935 |
+| by_err.ERR-8 | 0 |
 | by_err.ERR-9 | 0 |
 | by_err.ERR-9a | 0 |
-| by_err.ERR-10 | 10268 |
-| by_err.ERR-11 | 0 |
+| by_err.ERR-10 | 0 |
+| by_err.ERR-11 | 7770 |
 | by_err.ERR-12 | 0 |
 | by_err.ERR-12a | 0 |
 | by_err.ERR-12b | 0 |
@@ -244,43 +248,43 @@
 | by_err.ERR-12d | 0 |
 | by_err.ERR-13 | 0 |
 | by_err.ERR-14 | 0 |
-| by_err.ERR-15 | 30 |
+| by_err.ERR-15 | 615 |
 | by_err.ERR-16 | 0 |
 | unmatched | {} |
 | transport_errors.total | 0 |
 | transport_errors.by_kind | {} |
-| decisions.allowed | 721 |
-| decisions.degraded | 0 |
-| releases | 30 |
-| refunds.applied | 30 |
+| decisions.allowed | 19902 |
+| decisions.degraded | 565 |
+| releases | 615 |
+| refunds.applied | 597 |
 | refunds.already_applied | 0 |
 | refunds.receipt_expired | 0 |
 | refunds.receipt_invalid | 0 |
 | refunds.unresolved | 0 |
 | unresolved_reasons | {} |
-| db_rows | 691 |
-| prf2.new_rows | 691 |
+| db_rows | 19852 |
+| prf2.new_rows | 19852 |
 | prf2.duplicate_rows_avoided | 0 |
-| prf2.degraded_admissions | 0 |
-| prf2.quota_rejections | 72429 |
-| prf2.capacity_refusals | 10268 |
-| prf2.integrity_failures | 0 |
-| prf2.unavailable | 1935 |
+| prf2.degraded_admissions | 547 |
+| prf2.quota_rejections | 26362 |
+| prf2.capacity_refusals | 0 |
+| prf2.integrity_failures | 7770 |
+| prf2.unavailable | 0 |
 | prf2.unknown_acquires | 0 |
 | prf2.unknown_application_outcomes | 0 |
-| prf2.server_failures | 30 |
+| prf2.server_failures | 615 |
 | prf2.transport_errors | 0 |
 | prf2.expired_refunds | 0 |
 | prf2.unresolved_refunds | 0 |
-| prf2.db_rows | 691 |
+| prf2.db_rows | 19852 |
 
 ### results.attempt_outcomes
 
-| name | 200 | 429 rate_limited | 503 limiter_capacity_exceeded | 503 limiter_unavailable | 503 service_aborted_after_acquire |
-|---|---|---|---|---|---|
-| initial | 117 | 25156 | 10268 | 519 | 6 |
-| duplicate | null | null | null | null | null |
-| retry | 574 | 47273 | null | 1416 | 24 |
+| name | 200 | 429 rate_limited | 503 limiter_state_integrity_error | 503 service_aborted_after_acquire |
+|---|---|---|---|---|
+| initial | 18138 | 9851 | 7515 | 562 |
+| duplicate | null | null | null | null |
+| retry | 1714 | 16511 | 255 | 53 |
 
 ### results.unexpected_errors
 
@@ -288,43 +292,47 @@
 |---|---|
 | rule | attempt-1 requests (§B9): a transport error or timeout (no HTTP response), or a 5xx other than service_aborted_after_acquire whose wall-clock span, from its write to its response, overlaps no fault window [start_ns, end_ns + P]; steps count their observation window: the step minus its first 5 s, by planned_ns |
 | total.attempts | 36066 |
-| total.unexpected | 9963 |
-| total.rate | 0.276244 |
+| total.unexpected | 4952 |
+| total.rate | 0.137304 |
 | total.transport_errors | 0 |
-| total.server_errors | 10793 |
-| total.excluded_service_aborted_after_acquire | 6 |
-| total.excluded_fault_window | 824 |
+| total.server_errors | 8077 |
+| total.excluded_service_aborted_after_acquire | 562 |
+| total.excluded_fault_window | 2563 |
 
 #### results.unexpected_errors.fault_windows
 
 | start_ns | end_ns | source |
 |---|---|---|
-| 1791645638402184000 | 1791645643405132000 | {"target":"store","mode":"refuse","match":"acquire","duration_ms":5000} |
+| 1791912378424662000 | 1791912383454801000 | faultctl tamper del-k --key u000001 |
+| 1791912383425728000 | 1791912388431757000 | faultctl tamper corrupt-field --key u000002 --field u --value tampered |
+| 1791912388424622000 | 1791912393432668000 | faultctl tamper del-ix --key u000003 |
+| 1791912408425560000 | 1791912413426095000 | {"target":"store","mode":"refuse","match":"acquire","duration_ms":5000} |
+| 1791912448425342000 | 1791912453432752000 | faultctl tamper del-hwm |
 
 #### results.unexpected_errors.steps
 
 | step | window_start_ns | window_end_ns | attempts | unexpected | rate | transport_errors | server_errors | excluded_service_aborted_after_acquire | excluded_fault_window |
 |---|---|---|---|---|---|---|---|---|---|
-| 0 | 5000000000 | 120000000000 | 34572 | 9530 | 0.275657 | 0 | 10357 | 3 | 824 |
+| 0 | 5000000000 | 120000000000 | 34572 | 4952 | 0.143237 | 0 | 8047 | 532 | 2563 |
 
 ### results.steps
 
 | step | requests | new_rows | allowed | limited |
 |---|---|---|---|---|
-| 0 | 85353 | 691 | 721 | 72429 |
+| 0 | 54599 | 19852 | 19902 | 26362 |
 
 ## Timing (PRF-3)
 
 | field | value |
 |---|---|
-| db_ns.count | 691 |
-| db_ns.p50 | 362542 |
-| db_ns.p95 | 1886792 |
-| db_ns.p99 | 4046625 |
-| api_total_ns.count | 85353 |
-| api_total_ns.p50 | 253125 |
-| api_total_ns.p95 | 7218583 |
-| api_total_ns.p99 | 12322167 |
+| db_ns.count | 19852 |
+| db_ns.p50 | 186084 |
+| db_ns.p95 | 22196542 |
+| db_ns.p99 | 44102917 |
+| api_total_ns.count | 54599 |
+| api_total_ns.p50 | 7905500 |
+| api_total_ns.p95 | 431003916 |
+| api_total_ns.p99 | 534787833 |
 | rewrite_windows | [] |
 | rewrite_p99_ns | null |
 | rewrite_latency_ns | null |
@@ -334,17 +342,17 @@
 
 | name | count | p50 | p95 | p99 |
 |---|---|---|---|---|
-| allowed | 721 | 7387500 | 13166333 | 16182958 |
-| limited | 72429 | 225500 | 7236625 | 12364958 |
-| degraded | 0 | null | null | null |
-| error | 12203 | 375958 | 1322459 | 7887458 |
+| allowed | 19902 | 8990542 | 446080083 | 537423292 |
+| limited | 26362 | 7556458 | 422318375 | 518306584 |
+| degraded | 565 | 1708 | 3917 | 7750 |
+| error | 7770 | 146417 | 338659667 | 496693500 |
 
 ### timing.refund_ns
 
 | name | count | p50 | p95 | p99 |
 |---|---|---|---|---|
-| all | 30 | 8122500 | 14083875 | 15041708 |
-| applied | 30 | 8122500 | 14083875 | 15041708 |
+| all | 597 | 11069958 | 547797208 | 588036167 |
+| applied | 597 | 11069958 | 547797208 | 588036167 |
 | already_applied | 0 | null | null | null |
 | receipt_expired | 0 | null | null | null |
 | receipt_invalid | 0 | null | null | null |
@@ -354,17 +362,17 @@
 
 | name | count | p50 | p95 | p99 |
 |---|---|---|---|---|
-| all | 36066 | 927875 | 3990125 | 12481584 |
-| success | 117 | 9056667 | 17977708 | 24421208 |
-| limited | 25156 | 946625 | 3666916 | 12049792 |
-| error | 10793 | 876167 | 3438084 | 11708166 |
-| retries | 49287 | 297083 | 9251917 | 14389500 |
+| all | 36066 | 8154750 | 442674375 | 545333667 |
+| success | 18138 | 9227958 | 458853375 | 562434667 |
+| limited | 9851 | 7735125 | 451949375 | 543442667 |
+| error | 8077 | 1571583 | 355093875 | 503701166 |
+| retries | 18533 | 7969834 | 401934625 | 507349458 |
 
 ### timing.steps
 
 | step | window_start_ns | window_end_ns | latency_ns.count | latency_ns.p50 | latency_ns.p95 | latency_ns.p99 |
 |---|---|---|---|---|---|---|
-| 0 | 5000000000 | 120000000000 | 34572 | 926792 | 3737541 | 11907000 |
+| 0 | 5000000000 | 120000000000 | 34572 | 8135917 | 447759709 | 546953708 |
 
 ## Clocks (T-RPT-1)
 
@@ -380,135 +388,135 @@
 | fields.api limiter_ns, db_ns, total_ns | hitapi's monotonic clock, ns (durations) |
 | fields.release release_mono_ns | hitapi's monotonic clock, ns since the process started |
 | fields.refund release_mono_ns, final_mono_ns | the limiter's monotonic clock, ns since it was built |
-| t0_wall_ns | 1791645578400704000 |
+| t0_wall_ns | 1791912338423697000 |
 | t0_rule | hitgen's t0 on the wall clock: the time of its sending log line (hitgen.stderr), written just before it takes t0; it places planned_ns and sent_ns on the wall clock for the fault and rewrite windows and arrival_ns on hitgen's steps |
 
 ## Resources (PRF-4)
 
 | field | value |
 |---|---|
-| samples | 135 |
-| health_reads | 405 |
-| max_in_flight | 28 |
+| samples | 120 |
+| health_reads | 360 |
+| max_in_flight | 95 |
 
 ### resources.processes
 
 | name | cpu_pct_mean | cpu_pct_max | rss_bytes_mean | rss_bytes_max | cpu_readings | rss_readings |
 |---|---|---|---|---|---|---|
-| hitapi-1 | 7.97 | 21.58 | 33831018 | 35127296 | 135 | 135 |
-| hitapi-2 | 8.31 | 24.96 | 34118041 | 35422208 | 135 | 135 |
-| hitapi-3 | 8.38 | 24.67 | 34119012 | 35962880 | 135 | 135 |
-| hitgen | 23.32 | 49.36 | 41160370 | 43155456 | 135 | 135 |
-| postgres | 0.16 | 1.31 | 164595484 | 168034304 | 135 | 135 |
-| sampler | 8.5 | 10.83 | 28411190 | 29360128 | 135 | 135 |
-| valkey-server | 7.5 | 20.08 | 10152133 | 10289152 | 135 | 135 |
+| hitapi-1 | 3.03 | 4.45 | 38897664 | 41074688 | 120 | 120 |
+| hitapi-2 | 3.02 | 4.47 | 39668258 | 42008576 | 120 | 120 |
+| hitapi-3 | 3.03 | 4.37 | 39180151 | 41484288 | 120 | 120 |
+| hitgen | 7.85 | 10.24 | 48087449 | 50888704 | 120 | 120 |
+| postgres | 1.82 | 8.89 | 835231334 | 963723264 | 120 | 120 |
+| sampler | 3.85 | 5.21 | 28158771 | 29097984 | 120 | 120 |
+| valkey-server | 3.99 | 5.96 | 9835724 | 10731520 | 120 | 120 |
 
 ### resources.store_state
 
 | name | max | last | readings |
 |---|---|---|---|
-| live_markers | 16 | 13 | 135 |
-| quarantined_keys | 0 | 0 | 135 |
-| tracked_buckets | 50 | 50 | 135 |
+| live_markers | 391 | 328 | 108 |
+| quarantined_keys | 3 | 3 | 108 |
+| tracked_buckets | 100 | 100 | 108 |
 
 ### resources.instance_series
 
 | instance | series | max | last | readings |
 |---|---|---|---|---|
-| 1 | in_flight | 16 | 0 | 135 |
-| 1 | listener_drops | 0 | 0 | 135 |
-| 1 | log_drops | 0 | 0 | 135 |
-| 1 | rl_cleanup_entries_total{action="moved"} | 9 | 9 | 135 |
-| 1 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_entries_total{action="skipped"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_lag_seconds | 4.55971 | 0 | 135 |
-| 1 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_passes_total{status="complete"} | 28 | 28 | 135 |
-| 1 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_passes_total{status="state_integrity_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_stops_total{result="state_integrity_error"} | 0 | 0 | 135 |
-| 1 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 135 |
-| 1 | rl_clock_lag_microseconds | 0 | 0 | 135 |
-| 1 | rl_listener_drops_total | 0 | 0 | 135 |
-| 1 | rl_live_markers | 16 | 13 | 135 |
-| 1 | rl_pending_refunds | 0 | 0 | 135 |
-| 1 | rl_quarantined_keys | 0 | 0 | 135 |
-| 1 | rl_tracked_buckets | 50 | 50 | 135 |
-| 2 | in_flight | 28 | 0 | 135 |
-| 2 | listener_drops | 0 | 0 | 135 |
-| 2 | log_drops | 0 | 0 | 135 |
-| 2 | rl_cleanup_entries_total{action="moved"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_entries_total{action="skipped"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_lag_seconds | 0 | 0 | 135 |
-| 2 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_passes_total{status="complete"} | 28 | 28 | 135 |
-| 2 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_passes_total{status="state_integrity_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_stops_total{result="state_integrity_error"} | 0 | 0 | 135 |
-| 2 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 135 |
-| 2 | rl_clock_lag_microseconds | 0 | 0 | 135 |
-| 2 | rl_listener_drops_total | 0 | 0 | 135 |
-| 2 | rl_live_markers | 16 | 13 | 135 |
-| 2 | rl_pending_refunds | 0 | 0 | 135 |
-| 2 | rl_quarantined_keys | 0 | 0 | 135 |
-| 2 | rl_tracked_buckets | 50 | 50 | 135 |
-| 3 | in_flight | 21 | 0 | 135 |
-| 3 | listener_drops | 0 | 0 | 135 |
-| 3 | log_drops | 0 | 0 | 135 |
-| 3 | rl_cleanup_entries_total{action="moved"} | 6 | 6 | 135 |
-| 3 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_entries_total{action="skipped"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_lag_seconds | 3.20287 | 1.13237 | 135 |
-| 3 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_passes_total{status="complete"} | 28 | 28 | 135 |
-| 3 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_passes_total{status="state_integrity_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_stops_total{result="state_integrity_error"} | 0 | 0 | 135 |
-| 3 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 135 |
-| 3 | rl_clock_lag_microseconds | 0 | 0 | 135 |
-| 3 | rl_listener_drops_total | 0 | 0 | 135 |
-| 3 | rl_live_markers | 16 | 13 | 135 |
-| 3 | rl_pending_refunds | 0 | 0 | 135 |
-| 3 | rl_quarantined_keys | 0 | 0 | 135 |
-| 3 | rl_tracked_buckets | 50 | 50 | 135 |
+| 1 | in_flight | 92 | 0 | 120 |
+| 1 | listener_drops | 0 | 0 | 120 |
+| 1 | log_drops | 0 | 0 | 120 |
+| 1 | rl_cleanup_entries_total{action="moved"} | 70 | 70 | 120 |
+| 1 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_entries_total{action="skipped"} | 24 | 24 | 120 |
+| 1 | rl_cleanup_lag_seconds | 6.13347 | 0 | 120 |
+| 1 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_passes_total{status="complete"} | 22 | 22 | 120 |
+| 1 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_passes_total{status="state_integrity_error"} | 2 | 2 | 120 |
+| 1 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 120 |
+| 1 | rl_cleanup_stops_total{result="state_integrity_error"} | 2 | 2 | 120 |
+| 1 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 120 |
+| 1 | rl_clock_lag_microseconds | 0 | 0 | 120 |
+| 1 | rl_listener_drops_total | 0 | 0 | 120 |
+| 1 | rl_live_markers | 390 | 328 | 120 |
+| 1 | rl_pending_refunds | 2 | 0 | 120 |
+| 1 | rl_quarantined_keys | 3 | 3 | 120 |
+| 1 | rl_tracked_buckets | 100 | 100 | 120 |
+| 2 | in_flight | 95 | 0 | 120 |
+| 2 | listener_drops | 0 | 0 | 120 |
+| 2 | log_drops | 0 | 0 | 120 |
+| 2 | rl_cleanup_entries_total{action="moved"} | 104 | 104 | 120 |
+| 2 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_entries_total{action="skipped"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_lag_seconds | 6.23642 | 0.173076 | 120 |
+| 2 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_passes_total{status="complete"} | 22 | 22 | 120 |
+| 2 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_passes_total{status="state_integrity_error"} | 2 | 2 | 120 |
+| 2 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 120 |
+| 2 | rl_cleanup_stops_total{result="state_integrity_error"} | 2 | 2 | 120 |
+| 2 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 120 |
+| 2 | rl_clock_lag_microseconds | 0 | 0 | 120 |
+| 2 | rl_listener_drops_total | 0 | 0 | 120 |
+| 2 | rl_live_markers | 390 | 328 | 120 |
+| 2 | rl_pending_refunds | 4 | 0 | 120 |
+| 2 | rl_quarantined_keys | 3 | 3 | 120 |
+| 2 | rl_tracked_buckets | 100 | 100 | 120 |
+| 3 | in_flight | 93 | 0 | 120 |
+| 3 | listener_drops | 0 | 0 | 120 |
+| 3 | log_drops | 0 | 0 | 120 |
+| 3 | rl_cleanup_entries_total{action="moved"} | 24 | 24 | 120 |
+| 3 | rl_cleanup_entries_total{action="quarantined"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_entries_total{action="removed"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_entries_total{action="skipped"} | 23 | 23 | 120 |
+| 3 | rl_cleanup_lag_seconds | 4.74789 | 4.51938 | 120 |
+| 3 | rl_cleanup_passes_total{status="clock_error"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_passes_total{status="complete"} | 22 | 22 | 120 |
+| 3 | rl_cleanup_passes_total{status="config_error"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_passes_total{status="outcome_unknown"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_passes_total{status="state_integrity_error"} | 2 | 2 | 120 |
+| 3 | rl_cleanup_passes_total{status="unavailable"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_stops_total{result="clock_error"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_stops_total{result="config_error"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_stops_total{result="outcome_unknown"} | 0 | 0 | 120 |
+| 3 | rl_cleanup_stops_total{result="state_integrity_error"} | 2 | 2 | 120 |
+| 3 | rl_cleanup_stops_total{result="unavailable"} | 0 | 0 | 120 |
+| 3 | rl_clock_lag_microseconds | 0 | 0 | 120 |
+| 3 | rl_listener_drops_total | 0 | 0 | 120 |
+| 3 | rl_live_markers | 390 | 328 | 120 |
+| 3 | rl_pending_refunds | 2 | 0 | 120 |
+| 3 | rl_quarantined_keys | 3 | 3 | 120 |
+| 3 | rl_tracked_buckets | 100 | 100 | 120 |
 
 ### resources.pids
 
 | role | pid | instance |
 |---|---|---|
-| valkey-server | 56405 | null |
-| hitapi | 56410 | 1 |
-| hitapi | 56411 | 2 |
-| hitapi | 56412 | 3 |
-| sampler | 56413 | null |
-| hitgen | 56414 | null |
+| valkey-server | 33749 | null |
+| hitapi | 33754 | 1 |
+| hitapi | 33755 | 2 |
+| hitapi | 33756 | 3 |
+| sampler | 33757 | null |
+| hitgen | 33758 | null |
 
 ## Traffic (TRF-1, TRF-4)
 
 | field | value |
 |---|---|
-| schedule_path | /Users/srirondla/distributed-systems/ratelimiter/runs/20261010-151937-s6-capacity-closed-1/schedule.jsonl |
-| schedule_sha256 | a547cf35a179356fc2821dd93bffd7c27fc511f6e408b401f38b78389febf8a4 |
-| schedule_sha256_context | a547cf35a179356fc2821dd93bffd7c27fc511f6e408b401f38b78389febf8a4 |
+| schedule_path | /Users/srirondla/distributed-systems/ratelimiter/runs/20261013-172537-s6-state-open-1/schedule.jsonl |
+| schedule_sha256 | b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45 |
+| schedule_sha256_context | b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45 |
 | schedule_sha256_matches | true |
 | schedule_entries | 36066 |
 | planned_per_step | [36066] |
@@ -516,13 +524,13 @@
 | requests_per_instance.1 | 12022 |
 | requests_per_instance.2 | 12022 |
 | requests_per_instance.3 | 12022 |
-| served_per_instance.1 | 27556 |
-| served_per_instance.2 | 28914 |
-| served_per_instance.3 | 28883 |
+| served_per_instance.1 | 18301 |
+| served_per_instance.2 | 18013 |
+| served_per_instance.3 | 18285 |
 | instances_used | 3 |
-| users | 200 |
+| users | 100 |
 | busiest_user.user | u000000 |
-| busiest_user.first_attempts | 7587 |
+| busiest_user.first_attempts | 8317 |
 | busiest_user.instances | [1,2,3] |
 
 ## Baseline comparison
@@ -534,7 +542,7 @@ Not applicable to this run, or not built yet.
 | field | value |
 |---|---|
 | verdict | pass |
-| known_credits | 30 |
+| known_credits | 597 |
 | unknown_credits | 0 |
 | listener_drops | 0 |
 | pre_kill_lines | 0 |
@@ -557,10 +565,10 @@ Not applicable to this run, or not built yet.
 | name | ok | value | detail |
 |---|---|---|---|
 | log_drops | true | 0 | log_drops summed over every stop and pre_kill line of every api-N.jsonl |
-| listener_drops | true | {"sum":0,"stop_lines":3,"pre_kill_lines":0,"pre_kill_unread":0,"segments_without_count":0} | HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process ended with one of the two |
-| fixtures_off | true | {"applies":false,"health_reads":405,"fixtures_on":405,"clock_not_store":0,"faults":1} | benchmark runs: every /health read shows fixtures false on the store clock, at least one was read, and no fault ran |
+| listener_drops | true | {"sum":0,"stop_lines":3,"pre_kill_lines":0,"pre_kill_unread":0,"segments_without_count":0} | HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process segment holds one of the two, not necessarily as its last line |
+| fixtures_off | true | {"applies":false,"health_reads":360,"fixtures_on":360,"clock_not_store":0,"faults":5} | benchmark runs: every /health read shows fixtures false on the store clock, at least one was read, and no fault ran |
 | outage | true | {"max_outage_ns":null,"unmeasured":0} | every store outage measured (context.json outage_ns of each faultctl store down or pause that ran) and at most 5 s |
-| outage_segments | true | 1 | store outage segments armed: faultctl store down or pause, and timed store refusals |
+| outage_segments | true | 1 | store outage segments armed: faultctl store down or pause, and store refusals that are timed (a duration_ms above 0) or unbounded (neither count nor duration_ms) |
 | gen_summary | true | 0 | gen.jsonl ends with its summary line, whose log_drops is 0 |
 | rewrite_windows | true | {"applies":false,"windows":0} | a scenario with forced_aof_rewrites_s observed at least one AOF rewrite window |
 | correctness | true | {"verdict":"pass","invalid_reasons":[]} | HAR-13: refmodel.check_bud11's BUD-11a verdict (correctness) is pass or violation, not invalid: an invalid verdict means the run's refund evidence is incomplete (invalid_reasons say why; rerun) |

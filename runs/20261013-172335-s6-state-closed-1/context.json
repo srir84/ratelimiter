@@ -1,17 +1,16 @@
 {
-  "run_id": "20261010-153749-s6-state-open-1",
-  "epoch_id": "197f745d95f5273798769648bbf667c6",
+  "run_id": "20261013-172335-s6-state-closed-1",
+  "epoch_id": "a4a03f2544005c0a347660d5d0a249bf",
   "run_kind": "test",
   "run_label": "test-build scenario, not a benchmark",
   "baseline": false,
-  "outcome": "failed",
-  "error": "the report: report/validate.py does not pass the report (see validate.stderr): python3: exit status 1: FAIL evidence_validity.listener_drops: ok false, value {\"sum\": 4, \"stop_lines\": 3, \"pre_kill_lines\": 0, \"pre_kill_unread\": 0, \"segments_without_count\": 0}: want 0 listener drops, every pre_kill read and every process segment counted; FAIL evidence_validity.correctness: ok false, value {\"verdict\": \"invalid\", \"invalid_reasons\": [\"api-1.jsonl: line 24624: release without final event or segment pre_ki…",
-  "start_ns": 1791646669735054000,
-  "end_ns": 1791646825343477000,
+  "outcome": "ok",
+  "start_ns": 1791912215020590000,
+  "end_ns": 1791912335525017000,
   "scenario": {
-    "name": "s6-state-open",
-    "path": "scenarios/s6-state-open.toml",
-    "sha256": "e9a48fbae438ccbe930ee143ead7c18347c6de5346216c498f1f2bd1bcc6d46d"
+    "name": "s6-state-closed",
+    "path": "scenarios/s6-state-closed.toml",
+    "sha256": "cf98d479d23e09efda10a90103ee906a2849826a7017f36b2f7dc6106c3b5ae0"
   },
   "seed": 1,
   "instances": 3,
@@ -32,7 +31,7 @@
     "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
   },
   "store_settings": {
-    "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-153749-s6-state-open-1/store/acl.conf",
+    "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261013-172335-s6-state-closed-1/store/acl.conf",
     "aof-use-rdb-preamble": "yes",
     "appendfsync": "always",
     "appendonly": "yes",
@@ -462,7 +461,7 @@
       "capacity": 20,
       "cleanup_interval_ns": 5000000000,
       "clock_source": "store",
-      "failure_mode": "open",
+      "failure_mode": "closed",
       "max_live_markers": 50000,
       "max_markers_per_key": 1000,
       "max_tracked_buckets": 100000,
@@ -485,8 +484,8 @@
       "at_s": 40,
       "cmd": "faultctl tamper del-k --key u000001",
       "instance": null,
-      "start_ns": 1791646710244331000,
-      "end_ns": 1791646710279415000,
+      "start_ns": 1791912255485228000,
+      "end_ns": 1791912256633203000,
       "outage_start_ns": null,
       "outage_ns": null,
       "targets": []
@@ -495,8 +494,8 @@
       "at_s": 45,
       "cmd": "faultctl tamper corrupt-field --key u000002 --field u --value tampered",
       "instance": null,
-      "start_ns": 1791646715244760000,
-      "end_ns": 1791646715267158000,
+      "start_ns": 1791912260486061000,
+      "end_ns": 1791912260493563000,
       "outage_start_ns": null,
       "outage_ns": null,
       "targets": []
@@ -505,8 +504,8 @@
       "at_s": 50,
       "cmd": "faultctl tamper del-ix --key u000003",
       "instance": null,
-      "start_ns": 1791646720245590000,
-      "end_ns": 1791646720277221000,
+      "start_ns": 1791912265486000000,
+      "end_ns": 1791912265493240000,
       "outage_start_ns": null,
       "outage_ns": null,
       "targets": []
@@ -515,8 +514,8 @@
       "at_s": 70,
       "cmd": "{\"target\":\"store\",\"mode\":\"refuse\",\"match\":\"acquire\",\"duration_ms\":5000}",
       "instance": 2,
-      "start_ns": 1791646740242840000,
-      "end_ns": 1791646740244265000,
+      "start_ns": 1791912285485053000,
+      "end_ns": 1791912285485575000,
       "outage_start_ns": null,
       "outage_ns": null,
       "targets": [
@@ -530,8 +529,8 @@
       "at_s": 110,
       "cmd": "faultctl tamper del-hwm",
       "instance": null,
-      "start_ns": 1791646780243570000,
-      "end_ns": 1791646781411689000,
+      "start_ns": 1791912325484728000,
+      "end_ns": 1791912325490843000,
       "outage_start_ns": null,
       "outage_ns": null,
       "targets": []
@@ -542,7 +541,7 @@
     {
       "name": "hitgen",
       "role": "hitgen",
-      "pid": 60786,
+      "pid": 33201,
       "exit": "exit 0",
       "exited_before_stop": true,
       "grace_ns": 35000000000,
@@ -552,7 +551,7 @@
       "name": "hitapi-1",
       "role": "hitapi",
       "instance": 1,
-      "pid": 60781,
+      "pid": 33197,
       "exit": "exit 0",
       "exited_before_stop": false,
       "grace_ns": 45000000000,
@@ -562,7 +561,7 @@
       "name": "hitapi-2",
       "role": "hitapi",
       "instance": 2,
-      "pid": 60782,
+      "pid": 33198,
       "exit": "exit 0",
       "exited_before_stop": false,
       "grace_ns": 45000000000,
@@ -572,7 +571,7 @@
       "name": "hitapi-3",
       "role": "hitapi",
       "instance": 3,
-      "pid": 60783,
+      "pid": 33199,
       "exit": "exit 0",
       "exited_before_stop": false,
       "grace_ns": 45000000000,
@@ -581,19 +580,10 @@
     {
       "name": "sampler",
       "role": "sampler",
-      "pid": 60785,
+      "pid": 33200,
       "exit": "exit 0",
       "exited_before_stop": false,
       "grace_ns": 10000000000,
-      "killed": false
-    },
-    {
-      "name": "valkey-server",
-      "role": "valkey-server",
-      "pid": 60776,
-      "exit": "exit 0",
-      "exited_before_stop": false,
-      "grace_ns": 30000000000,
       "killed": false
     }
   ]

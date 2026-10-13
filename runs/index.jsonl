@@ -16,12 +16,12 @@
 {"scenario":"s5-retry","baseline":false,"run_id":"20261010-145726-s5-retry-1"}
 {"scenario":"s7-long","baseline":true,"run_id":"20261010-145931-s7-long-1"}
 {"scenario":"s7-long","baseline":false,"run_id":"20261010-150934-s7-long-1"}
-{"scenario":"s6-capacity-closed","baseline":false,"run_id":"20261010-151937-s6-capacity-closed-1"}
-{"scenario":"s6-capacity-open","baseline":false,"run_id":"20261010-152157-s6-capacity-open-1"}
 {"scenario":"s6-down-closed","baseline":false,"run_id":"20261010-152416-s6-down-closed-1"}
 {"scenario":"s6-down-open","baseline":false,"run_id":"20261010-152621-s6-down-open-1"}
 {"scenario":"s6-pause-closed","baseline":false,"run_id":"20261010-152826-s6-pause-closed-1"}
 {"scenario":"s6-pause-open","baseline":false,"run_id":"20261010-153032-s6-pause-open-1"}
-{"scenario":"s6-state-closed","baseline":false,"run_id":"20261010-153236-s6-state-closed-1"}
-{"scenario":"s6-state-open","baseline":false,"run_id":"20261010-154342-s6-state-open-1"}
 {"scenario":"s3-busy-user","baseline":false,"run_id":"20261010-154603-s3-busy-user-1"}
+{"scenario":"s6-capacity-closed","baseline":false,"run_id":"20261013-171857-s6-capacity-closed-1"}
+{"scenario":"s6-capacity-open","baseline":false,"run_id":"20261013-172117-s6-capacity-open-1"}
+{"scenario":"s6-state-closed","baseline":false,"run_id":"20261013-172335-s6-state-closed-1"}
+{"scenario":"s6-state-open","baseline":false,"run_id":"20261013-172537-s6-state-open-1"}

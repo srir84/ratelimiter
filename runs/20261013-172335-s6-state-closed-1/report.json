@@ -1,18 +1,18 @@
 {
-  "run_id": "20261010-153749-s6-state-open-1",
+  "run_id": "20261013-172335-s6-state-closed-1",
   "context": {
-    "run_id": "20261010-153749-s6-state-open-1",
-    "epoch_id": "197f745d95f5273798769648bbf667c6",
+    "run_id": "20261013-172335-s6-state-closed-1",
+    "epoch_id": "a4a03f2544005c0a347660d5d0a249bf",
     "run_kind": "test",
     "run_label": "test-build scenario, not a benchmark",
     "baseline": false,
     "outcome": "ok",
-    "start_ns": 1791646669735054000,
-    "end_ns": 1791646825343477000,
+    "start_ns": 1791912215020590000,
+    "end_ns": 1791912335525017000,
     "scenario": {
-      "name": "s6-state-open",
-      "path": "scenarios/s6-state-open.toml",
-      "sha256": "e9a48fbae438ccbe930ee143ead7c18347c6de5346216c498f1f2bd1bcc6d46d"
+      "name": "s6-state-closed",
+      "path": "scenarios/s6-state-closed.toml",
+      "sha256": "cf98d479d23e09efda10a90103ee906a2849826a7017f36b2f7dc6106c3b5ae0"
     },
     "seed": 1,
     "instances": 3,
@@ -33,7 +33,7 @@
       "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
     },
     "store_settings": {
-      "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-153749-s6-state-open-1/store/acl.conf",
+      "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261013-172335-s6-state-closed-1/store/acl.conf",
       "aof-use-rdb-preamble": "yes",
       "appendfsync": "always",
       "appendonly": "yes",
@@ -463,7 +463,7 @@
         "capacity": 20,
         "cleanup_interval_ns": 5000000000,
         "clock_source": "store",
-        "failure_mode": "open",
+        "failure_mode": "closed",
         "max_live_markers": 50000,
         "max_markers_per_key": 1000,
         "max_tracked_buckets": 100000,
@@ -486,8 +486,8 @@
         "at_s": 40,
         "cmd": "faultctl tamper del-k --key u000001",
         "instance": null,
-        "start_ns": 1791646710244331000,
-        "end_ns": 1791646710279415000,
+        "start_ns": 1791912255485228000,
+        "end_ns": 1791912256633203000,
         "outage_start_ns": null,
         "outage_ns": null,
         "targets": []
@@ -496,8 +496,8 @@
         "at_s": 45,
         "cmd": "faultctl tamper corrupt-field --key u000002 --field u --value tampered",
         "instance": null,
-        "start_ns": 1791646715244760000,
-        "end_ns": 1791646715267158000,
+        "start_ns": 1791912260486061000,
+        "end_ns": 1791912260493563000,
         "outage_start_ns": null,
         "outage_ns": null,
         "targets": []
@@ -506,8 +506,8 @@
         "at_s": 50,
         "cmd": "faultctl tamper del-ix --key u000003",
         "instance": null,
-        "start_ns": 1791646720245590000,
-        "end_ns": 1791646720277221000,
+        "start_ns": 1791912265486000000,
+        "end_ns": 1791912265493240000,
         "outage_start_ns": null,
         "outage_ns": null,
         "targets": []
@@ -516,8 +516,8 @@
         "at_s": 70,
         "cmd": "{\"target\":\"store\",\"mode\":\"refuse\",\"match\":\"acquire\",\"duration_ms\":5000}",
         "instance": 2,
-        "start_ns": 1791646740242840000,
-        "end_ns": 1791646740244265000,
+        "start_ns": 1791912285485053000,
+        "end_ns": 1791912285485575000,
         "outage_start_ns": null,
         "outage_ns": null,
         "targets": [
@@ -531,8 +531,8 @@
         "at_s": 110,
         "cmd": "faultctl tamper del-hwm",
         "instance": null,
-        "start_ns": 1791646780243570000,
-        "end_ns": 1791646781411689000,
+        "start_ns": 1791912325484728000,
+        "end_ns": 1791912325490843000,
         "outage_start_ns": null,
         "outage_ns": null,
         "targets": []
@@ -543,7 +543,7 @@
       {
         "name": "hitgen",
         "role": "hitgen",
-        "pid": 60786,
+        "pid": 33201,
         "exit": "exit 0",
         "exited_before_stop": true,
         "grace_ns": 35000000000,
@@ -553,7 +553,7 @@
         "name": "hitapi-1",
         "role": "hitapi",
         "instance": 1,
-        "pid": 60781,
+        "pid": 33197,
         "exit": "exit 0",
         "exited_before_stop": false,
         "grace_ns": 45000000000,
@@ -563,7 +563,7 @@
         "name": "hitapi-2",
         "role": "hitapi",
         "instance": 2,
-        "pid": 60782,
+        "pid": 33198,
         "exit": "exit 0",
         "exited_before_stop": false,
         "grace_ns": 45000000000,
@@ -573,7 +573,7 @@
         "name": "hitapi-3",
         "role": "hitapi",
         "instance": 3,
-        "pid": 60783,
+        "pid": 33199,
         "exit": "exit 0",
         "exited_before_stop": false,
         "grace_ns": 45000000000,
@@ -582,7 +582,7 @@
       {
         "name": "sampler",
         "role": "sampler",
-        "pid": 60785,
+        "pid": 33200,
         "exit": "exit 0",
         "exited_before_stop": false,
         "grace_ns": 10000000000,
@@ -594,7 +594,7 @@
       "capacity": 20,
       "cleanup_interval_ns": 5000000000,
       "clock_source": "store",
-      "failure_mode": "open",
+      "failure_mode": "closed",
       "max_live_markers": 50000,
       "max_markers_per_key": 1000,
       "max_tracked_buckets": 100000,
@@ -619,7 +619,7 @@
       "plain_fsync_p50_us": 41.6
     },
     "workload": {
-      "scenario_file": "scenarios/s6-state-open.toml",
+      "scenario_file": "scenarios/s6-state-closed.toml",
       "steps": [
         {
           "rate_per_s": 300.0,
@@ -652,20 +652,20 @@
         "sent": 36066,
         "initial": 36066,
         "duplicates": 0,
-        "retries_429": 18699,
+        "retries_429": 18620,
         "unsent": 0,
         "achieved_sent_per_s": 300.55,
         "offered_per_s": 300.55,
         "sched_lag_ns": {
           "count": 36066,
-          "p50": 575508,
-          "p95": 1171458,
-          "p99": 2416789
+          "p50": 526311,
+          "p95": 990562,
+          "p99": 1094554
         },
-        "got_conn_wait_ns_p99": 49542,
+        "got_conn_wait_ns_p99": 8375,
         "generator_limited": false,
-        "status_200": 19989,
-        "status_429": 26563,
+        "status_200": 19313,
+        "status_429": 26445,
         "unknown_acquires": 0,
         "unknown_application_outcomes": 0
       }
@@ -676,15 +676,15 @@
       "sent": 36066,
       "initial": 36066,
       "duplicates": 0,
-      "retries_429": 18699,
+      "retries_429": 18620,
       "unsent": 0,
       "sched_lag_ns": {
         "count": 36066,
-        "p50": 575508,
-        "p95": 1171458,
-        "p99": 2416789
+        "p50": 526311,
+        "p95": 990562,
+        "p99": 1094554
       },
-      "got_conn_wait_ns_p99": 49542
+      "got_conn_wait_ns_p99": 8375
     },
     "stopped_after_step": null,
     "excluded_step": null,
@@ -702,20 +702,20 @@
     "rule": "steps by planned_ns; sent = first attempts written (sent_ns set); unsent = planned \u2212 sent; generator_limited: step p99 of sent_ns \u2212 planned_ns over every planned first attempt, an unwritten one counting above any bound, > 5 ms (\u00a7B9)"
   },
   "results": {
-    "requests": 54765,
+    "requests": 54686,
     "by_err": {
-      "ERR-1": 19443,
+      "ERR-1": 19313,
       "ERR-2": 0,
-      "ERR-3": 546,
-      "ERR-4": 26563,
+      "ERR-3": 0,
+      "ERR-4": 26445,
       "ERR-5": 0,
       "ERR-6": 0,
       "ERR-7": 0,
-      "ERR-8": 0,
+      "ERR-8": 579,
       "ERR-9": 0,
       "ERR-9a": 0,
       "ERR-10": 0,
-      "ERR-11": 7597,
+      "ERR-11": 7754,
       "ERR-12": 0,
       "ERR-12a": 0,
       "ERR-12b": 0,
@@ -723,23 +723,25 @@
       "ERR-12d": 0,
       "ERR-13": 0,
       "ERR-14": 0,
-      "ERR-15": 616,
+      "ERR-15": 595,
       "ERR-16": 0
     },
     "unmatched": {},
     "attempt_outcomes": {
       "initial": {
-        "200": 18210,
-        "429 rate_limited": 9958,
-        "503 limiter_state_integrity_error": 7331,
-        "503 service_aborted_after_acquire": 567
+        "200": 17613,
+        "429 rate_limited": 9900,
+        "503 limiter_state_integrity_error": 7491,
+        "503 limiter_unavailable": 519,
+        "503 service_aborted_after_acquire": 543
       },
       "duplicate": {},
       "retry": {
-        "200": 1779,
-        "429 rate_limited": 16605,
-        "503 limiter_state_integrity_error": 266,
-        "503 service_aborted_after_acquire": 49
+        "200": 1700,
+        "429 rate_limited": 16545,
+        "503 limiter_state_integrity_error": 263,
+        "503 limiter_unavailable": 60,
+        "503 service_aborted_after_acquire": 52
       }
     },
     "transport_errors": {
@@ -747,72 +749,72 @@
       "by_kind": {}
     },
     "decisions": {
-      "allowed": 20041,
-      "degraded": 564
+      "allowed": 19908,
+      "degraded": 0
     },
-    "releases": 616,
+    "releases": 595,
     "refunds": {
-      "applied": 594,
+      "applied": 595,
       "already_applied": 0,
       "receipt_expired": 0,
       "receipt_invalid": 0,
       "unresolved": 0
     },
     "unresolved_reasons": {},
-    "db_rows": 19989,
+    "db_rows": 19313,
     "prf2": {
-      "new_rows": 19989,
+      "new_rows": 19313,
       "duplicate_rows_avoided": 0,
-      "degraded_admissions": 546,
-      "quota_rejections": 26563,
+      "degraded_admissions": 0,
+      "quota_rejections": 26445,
       "capacity_refusals": 0,
-      "integrity_failures": 7597,
-      "unavailable": 0,
+      "integrity_failures": 7754,
+      "unavailable": 579,
       "unknown_acquires": 0,
       "unknown_application_outcomes": 0,
-      "server_failures": 616,
+      "server_failures": 595,
       "transport_errors": 0,
       "expired_refunds": 0,
       "unresolved_refunds": 0,
-      "db_rows": 19989
+      "db_rows": 19313
     },
     "unexpected_errors": {
       "rule": "attempt-1 requests (\u00a7B9): a transport error or timeout (no HTTP response), or a 5xx other than service_aborted_after_acquire whose wall-clock span, from its write to its response, overlaps no fault window [start_ns, end_ns + P]; steps count their observation window: the step minus its first 5 s, by planned_ns",
       "fault_windows": [
         {
-          "start_ns": 1791646710244331000,
-          "end_ns": 1791646715279415000,
+          "start_ns": 1791912255485228000,
+          "end_ns": 1791912261633203000,
           "source": "faultctl tamper del-k --key u000001"
         },
         {
-          "start_ns": 1791646715244760000,
-          "end_ns": 1791646720267158000,
+          "start_ns": 1791912260486061000,
+          "end_ns": 1791912265493563000,
           "source": "faultctl tamper corrupt-field --key u000002 --field u --value tampered"
         },
         {
-          "start_ns": 1791646720245590000,
-          "end_ns": 1791646725277221000,
+          "start_ns": 1791912265486000000,
+          "end_ns": 1791912270493240000,
           "source": "faultctl tamper del-ix --key u000003"
         },
         {
-          "start_ns": 1791646740242840000,
-          "end_ns": 1791646745244265000,
+          "start_ns": 1791912285485053000,
+          "end_ns": 1791912290485575000,
           "source": "{\"target\":\"store\",\"mode\":\"refuse\",\"match\":\"acquire\",\"duration_ms\":5000}"
         },
         {
-          "start_ns": 1791646780243570000,
-          "end_ns": 1791646786411689000,
+          "start_ns": 1791912325484728000,
+          "end_ns": 1791912330490843000,
           "source": "faultctl tamper del-hwm"
         }
       ],
       "total": {
         "attempts": 36066,
-        "unexpected": 4579,
-        "rate": 0.12696168136194755,
+        "unexpected": 4919,
+        "rate": 0.13638884267731383,
         "transport_errors": 0,
-        "server_errors": 7898,
-        "excluded_service_aborted_after_acquire": 567,
-        "excluded_fault_window": 2752
+        "server_errors": 8553,
+        "excluded_service_aborted_after_acquire": 543,
+        "excluded_fault_window": 3091
       },
       "steps": [
         {
@@ -820,76 +822,76 @@
           "window_start_ns": 5000000000,
           "window_end_ns": 120000000000,
           "attempts": 34572,
-          "unexpected": 4579,
-          "rate": 0.13244822399629758,
+          "unexpected": 4919,
+          "rate": 0.14228277218558372,
           "transport_errors": 0,
-          "server_errors": 7869,
-          "excluded_service_aborted_after_acquire": 538,
-          "excluded_fault_window": 2752
+          "server_errors": 8523,
+          "excluded_service_aborted_after_acquire": 513,
+          "excluded_fault_window": 3091
         }
       ]
     },
     "steps": [
       {
         "step": 0,
-        "requests": 54765,
-        "new_rows": 19989,
-        "allowed": 20041,
-        "limited": 26563
+        "requests": 54686,
+        "new_rows": 19313,
+        "allowed": 19908,
+        "limited": 26445
       }
     ]
   },
   "timing": {
     "limiter_ns": {
       "allowed": {
-        "count": 20041,
-        "p50": 10827292,
-        "p95": 411282084,
-        "p99": 518383208
+        "count": 19908,
+        "p50": 8803917,
+        "p95": 423356375,
+        "p99": 516066625
       },
       "limited": {
-        "count": 26563,
-        "p50": 9561542,
-        "p95": 356857334,
-        "p99": 500783667
+        "count": 26445,
+        "p50": 7257292,
+        "p95": 383639417,
+        "p99": 501384542
       },
       "degraded": {
-        "count": 564,
-        "p50": 7333,
-        "p95": 13917,
-        "p99": 20834
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
       },
       "error": {
-        "count": 7597,
-        "p50": 3073708,
-        "p95": 350500167,
-        "p99": 503172375
+        "count": 8333,
+        "p50": 94458,
+        "p95": 327670000,
+        "p99": 490176167
       }
     },
     "db_ns": {
-      "count": 19989,
-      "p50": 670666,
-      "p95": 5476959,
-      "p99": 11227000
+      "count": 19313,
+      "p50": 187292,
+      "p95": 21979125,
+      "p99": 23395417
     },
     "api_total_ns": {
-      "count": 54765,
-      "p50": 10017167,
-      "p95": 371742209,
-      "p99": 511163750
+      "count": 54686,
+      "p50": 7714291,
+      "p95": 399229583,
+      "p99": 514238167
     },
     "refund_ns": {
       "all": {
-        "count": 594,
-        "p50": 13377500,
-        "p95": 538945875,
-        "p99": 552216541
+        "count": 595,
+        "p50": 10999792,
+        "p95": 537023542,
+        "p99": 558788416
       },
       "applied": {
-        "count": 594,
-        "p50": 13377500,
-        "p95": 538945875,
-        "p99": 552216541
+        "count": 595,
+        "p50": 10999792,
+        "p95": 537023542,
+        "p99": 558788416
       },
       "already_applied": {
         "count": 0,
@@ -919,33 +921,33 @@
     "end_to_end_ns": {
       "all": {
         "count": 36066,
-        "p50": 10549333,
-        "p95": 409788542,
-        "p99": 521506875
+        "p50": 7994417,
+        "p95": 419110000,
+        "p99": 520763833
       },
       "success": {
-        "count": 18210,
-        "p50": 11839209,
-        "p95": 423041250,
-        "p99": 525446958
+        "count": 17613,
+        "p50": 9178792,
+        "p95": 439328708,
+        "p99": 528874958
       },
       "limited": {
-        "count": 9958,
-        "p50": 9904667,
-        "p95": 417191250,
-        "p99": 517556708
+        "count": 9900,
+        "p50": 7537584,
+        "p95": 417525583,
+        "p99": 515117334
       },
       "error": {
-        "count": 7898,
-        "p50": 5706209,
-        "p95": 364324167,
-        "p99": 507158417
+        "count": 8553,
+        "p50": 332542,
+        "p95": 348063875,
+        "p99": 501007167
       },
       "retries": {
-        "count": 18699,
-        "p50": 10430667,
-        "p95": 346379708,
-        "p99": 475922750
+        "count": 18620,
+        "p50": 7711250,
+        "p95": 357163250,
+        "p99": 488458750
       }
     },
     "steps": [
@@ -955,9 +957,9 @@
         "window_end_ns": 120000000000,
         "latency_ns": {
           "count": 34572,
-          "p50": 10616042,
-          "p95": 416532083,
-          "p99": 522350792
+          "p50": 7959542,
+          "p95": 423577208,
+          "p99": 521663625
         }
       }
     ],
@@ -979,93 +981,93 @@
       "release release_mono_ns": "hitapi's monotonic clock, ns since the process started",
       "refund release_mono_ns, final_mono_ns": "the limiter's monotonic clock, ns since it was built"
     },
-    "t0_wall_ns": 1791646670241739000,
+    "t0_wall_ns": 1791912215485021000,
     "t0_rule": "hitgen's t0 on the wall clock: the time of its sending log line (hitgen.stderr), written just before it takes t0; it places planned_ns and sent_ns on the wall clock for the fault and rewrite windows and arrival_ns on hitgen's steps"
   },
   "resources": {
-    "samples": 155,
+    "samples": 120,
     "health_reads": 360,
-    "max_in_flight": 78,
+    "max_in_flight": 79,
     "processes": {
       "hitapi-1": {
-        "cpu_pct_mean": 5.93,
-        "cpu_pct_max": 10.38,
-        "rss_bytes_mean": 40563507,
-        "rss_bytes_max": 42680320,
-        "cpu_readings": 155,
-        "rss_readings": 155
+        "cpu_pct_mean": 3.09,
+        "cpu_pct_max": 4.62,
+        "rss_bytes_mean": 38668151,
+        "rss_bytes_max": 40910848,
+        "cpu_readings": 120,
+        "rss_readings": 120
       },
       "hitapi-2": {
-        "cpu_pct_mean": 7.41,
-        "cpu_pct_max": 11.0,
-        "rss_bytes_mean": 38665147,
-        "rss_bytes_max": 41271296,
+        "cpu_pct_mean": 3.0,
+        "cpu_pct_max": 5.36,
+        "rss_bytes_mean": 38756078,
+        "rss_bytes_max": 41107456,
         "cpu_readings": 120,
         "rss_readings": 120
       },
       "hitapi-3": {
-        "cpu_pct_mean": 5.9,
-        "cpu_pct_max": 10.92,
-        "rss_bytes_mean": 39425611,
-        "rss_bytes_max": 41091072,
-        "cpu_readings": 155,
-        "rss_readings": 155
+        "cpu_pct_mean": 3.05,
+        "cpu_pct_max": 4.65,
+        "rss_bytes_mean": 40005495,
+        "rss_bytes_max": 42303488,
+        "cpu_readings": 120,
+        "rss_readings": 120
       },
       "hitgen": {
-        "cpu_pct_mean": 17.23,
-        "cpu_pct_max": 27.01,
-        "rss_bytes_mean": 46509357,
-        "rss_bytes_max": 50135040,
-        "cpu_readings": 119,
-        "rss_readings": 119
+        "cpu_pct_mean": 8.03,
+        "cpu_pct_max": 10.7,
+        "rss_bytes_mean": 46373273,
+        "rss_bytes_max": 49020928,
+        "cpu_readings": 120,
+        "rss_readings": 120
       },
       "postgres": {
-        "cpu_pct_mean": 3.61,
-        "cpu_pct_max": 8.37,
-        "rss_bytes_mean": 749579521,
-        "rss_bytes_max": 971423744,
-        "cpu_readings": 155,
-        "rss_readings": 155
+        "cpu_pct_mean": 1.82,
+        "cpu_pct_max": 12.49,
+        "rss_bytes_mean": 721009049,
+        "rss_bytes_max": 875855872,
+        "cpu_readings": 120,
+        "rss_readings": 120
       },
       "sampler": {
-        "cpu_pct_mean": 8.72,
-        "cpu_pct_max": 11.18,
-        "rss_bytes_mean": 28426979,
-        "rss_bytes_max": 28934144,
-        "cpu_readings": 155,
-        "rss_readings": 155
+        "cpu_pct_mean": 3.8,
+        "cpu_pct_max": 5.76,
+        "rss_bytes_mean": 28148531,
+        "rss_bytes_max": 28950528,
+        "cpu_readings": 120,
+        "rss_readings": 120
       },
       "valkey-server": {
-        "cpu_pct_mean": 8.32,
-        "cpu_pct_max": 16.71,
-        "rss_bytes_mean": 10162942,
-        "rss_bytes_max": 10354688,
-        "cpu_readings": 155,
-        "rss_readings": 155
+        "cpu_pct_mean": 3.77,
+        "cpu_pct_max": 5.04,
+        "rss_bytes_mean": 10110976,
+        "rss_bytes_max": 10305536,
+        "cpu_readings": 120,
+        "rss_readings": 120
       }
     },
     "store_state": {
       "live_markers": {
-        "max": 377,
-        "last": 332,
-        "readings": 145
+        "max": 381,
+        "last": 345,
+        "readings": 108
       },
       "quarantined_keys": {
         "max": 3,
         "last": 3,
-        "readings": 145
+        "readings": 108
       },
       "tracked_buckets": {
         "max": 100,
         "last": 100,
-        "readings": 145
+        "readings": 108
       }
     },
     "instance_series": [
       {
         "instance": 1,
         "series": "in_flight",
-        "max": 78,
+        "max": 69,
         "last": 0,
         "readings": 120
       },
@@ -1086,161 +1088,161 @@
       {
         "instance": 1,
         "series": "rl_cleanup_entries_total{action=\"moved\"}",
-        "max": 61,
-        "last": 61,
-        "readings": 119
+        "max": 39,
+        "last": 39,
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_entries_total{action=\"removed\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_entries_total{action=\"skipped\"}",
-        "max": 0,
-        "last": 0,
-        "readings": 119
+        "max": 10,
+        "last": 10,
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_lag_seconds",
-        "max": 4.319308,
-        "last": 0.256007,
-        "readings": 119
+        "max": 3.565101,
+        "last": 0.498759,
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"complete\"}",
         "max": 22,
         "last": 22,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"config_error\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
         "max": 2,
         "last": 2,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_stops_total{result=\"config_error\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
         "max": 2,
         "last": 2,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_clock_lag_microseconds",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_listener_drops_total",
         "max": 0,
         "last": 0,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_live_markers",
-        "max": 376,
-        "last": 332,
-        "readings": 119
+        "max": 377,
+        "last": 345,
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_pending_refunds",
-        "max": 2,
-        "last": 1,
-        "readings": 119
+        "max": 3,
+        "last": 0,
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_quarantined_keys",
         "max": 3,
         "last": 3,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 1,
         "series": "rl_tracked_buckets",
         "max": 100,
         "last": 100,
-        "readings": 119
+        "readings": 120
       },
       {
         "instance": 2,
         "series": "in_flight",
-        "max": 75,
+        "max": 72,
         "last": 0,
         "readings": 120
       },
@@ -1261,8 +1263,8 @@
       {
         "instance": 2,
         "series": "rl_cleanup_entries_total{action=\"moved\"}",
-        "max": 100,
-        "last": 100,
+        "max": 141,
+        "last": 141,
         "readings": 120
       },
       {
@@ -1282,15 +1284,15 @@
       {
         "instance": 2,
         "series": "rl_cleanup_entries_total{action=\"skipped\"}",
-        "max": 33,
-        "last": 33,
+        "max": 0,
+        "last": 0,
         "readings": 120
       },
       {
         "instance": 2,
         "series": "rl_cleanup_lag_seconds",
-        "max": 4.326036,
-        "last": 3.46037,
+        "max": 4.74447,
+        "last": 3.166462,
         "readings": 120
       },
       {
@@ -1387,14 +1389,14 @@
       {
         "instance": 2,
         "series": "rl_live_markers",
-        "max": 376,
-        "last": 332,
+        "max": 377,
+        "last": 345,
         "readings": 120
       },
       {
         "instance": 2,
         "series": "rl_pending_refunds",
-        "max": 1,
+        "max": 2,
         "last": 0,
         "readings": 120
       },
@@ -1415,7 +1417,7 @@
       {
         "instance": 3,
         "series": "in_flight",
-        "max": 74,
+        "max": 79,
         "last": 0,
         "readings": 120
       },
@@ -1436,8 +1438,8 @@
       {
         "instance": 3,
         "series": "rl_cleanup_entries_total{action=\"moved\"}",
-        "max": 44,
-        "last": 44,
+        "max": 29,
+        "last": 29,
         "readings": 120
       },
       {
@@ -1457,15 +1459,15 @@
       {
         "instance": 3,
         "series": "rl_cleanup_entries_total{action=\"skipped\"}",
-        "max": 16,
-        "last": 16,
+        "max": 0,
+        "last": 0,
         "readings": 120
       },
       {
         "instance": 3,
         "series": "rl_cleanup_lag_seconds",
-        "max": 5.560853,
-        "last": 0.78053,
+        "max": 0.996583,
+        "last": 0.144567,
         "readings": 120
       },
       {
@@ -1562,15 +1564,15 @@
       {
         "instance": 3,
         "series": "rl_live_markers",
-        "max": 376,
-        "last": 332,
+        "max": 377,
+        "last": 345,
         "readings": 120
       },
       {
         "instance": 3,
         "series": "rl_pending_refunds",
         "max": 3,
-        "last": 3,
+        "last": 0,
         "readings": 120
       },
       {
@@ -1591,35 +1593,35 @@
     "pids": [
       {
         "role": "valkey-server",
-        "pid": 60776
+        "pid": 33191
       },
       {
         "role": "hitapi",
         "instance": 1,
-        "pid": 60781
+        "pid": 33197
       },
       {
         "role": "hitapi",
         "instance": 2,
-        "pid": 60782
+        "pid": 33198
       },
       {
         "role": "hitapi",
         "instance": 3,
-        "pid": 60783
+        "pid": 33199
       },
       {
         "role": "sampler",
-        "pid": 60785
+        "pid": 33200
       },
       {
         "role": "hitgen",
-        "pid": 60786
+        "pid": 33201
       }
     ]
   },
   "traffic": {
-    "schedule_path": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-153749-s6-state-open-1/schedule.jsonl",
+    "schedule_path": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261013-172335-s6-state-closed-1/schedule.jsonl",
     "schedule_sha256": "b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45",
     "schedule_sha256_context": "b26b7a5c7c20688710a7354ed3976e7bdb8a16a0ca6fce6d837490fe5f1a6a45",
     "schedule_sha256_matches": true,
@@ -1634,9 +1636,9 @@
       "3": 12022
     },
     "served_per_instance": {
-      "1": 18535,
-      "2": 18040,
-      "3": 18190
+      "1": 18449,
+      "2": 17976,
+      "3": 18261
     },
     "instances_used": 3,
     "users": 100,
@@ -1652,19 +1654,13 @@
   },
   "baseline": null,
   "correctness": {
-    "verdict": "invalid",
-    "known_credits": 594,
+    "verdict": "pass",
+    "known_credits": 595,
     "unknown_credits": 0,
-    "listener_drops": 4,
+    "listener_drops": 0,
     "pre_kill_lines": 0,
     "pre_kill_read_ok_false": 0,
-    "invalid_reasons": [
-      "api-1.jsonl: line 24624: release without final event or segment pre_kill",
-      "api-3.jsonl: line 24459: release without final event or segment pre_kill",
-      "api-3.jsonl: line 24475: release without final event or segment pre_kill",
-      "api-3.jsonl: line 24466: release without final event or segment pre_kill",
-      "listener_drops"
-    ],
+    "invalid_reasons": [],
     "violation": null
   },
   "capacity": null,
@@ -1676,15 +1672,15 @@
         "detail": "log_drops summed over every stop and pre_kill line of every api-N.jsonl"
       },
       "listener_drops": {
-        "ok": false,
+        "ok": true,
         "value": {
-          "sum": 4,
+          "sum": 0,
           "stop_lines": 3,
           "pre_kill_lines": 0,
           "pre_kill_unread": 0,
           "segments_without_count": 0
         },
-        "detail": "HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process ended with one of the two"
+        "detail": "HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process segment holds one of the two, not necessarily as its last line"
       },
       "fixtures_off": {
         "ok": true,
@@ -1708,7 +1704,7 @@
       "outage_segments": {
         "ok": true,
         "value": 1,
-        "detail": "store outage segments armed: faultctl store down or pause, and timed store refusals"
+        "detail": "store outage segments armed: faultctl store down or pause, and store refusals that are timed (a duration_ms above 0) or unbounded (neither count nor duration_ms)"
       },
       "gen_summary": {
         "ok": true,
@@ -1724,29 +1720,14 @@
         "detail": "a scenario with forced_aof_rewrites_s observed at least one AOF rewrite window"
       },
       "correctness": {
-        "ok": false,
+        "ok": true,
         "value": {
-          "verdict": "invalid",
-          "invalid_reasons": [
-            "api-1.jsonl: line 24624: release without final event or segment pre_kill",
-            "api-3.jsonl: line 24459: release without final event or segment pre_kill",
-            "api-3.jsonl: line 24475: release without final event or segment pre_kill",
-            "api-3.jsonl: line 24466: release without final event or segment pre_kill",
-            "listener_drops"
-          ]
+          "verdict": "pass",
+          "invalid_reasons": []
         },
         "detail": "HAR-13: refmodel.check_bud11's BUD-11a verdict (correctness) is pass or violation, not invalid: an invalid verdict means the run's refund evidence is incomplete (invalid_reasons say why; rerun)"
       }
     },
-    "valid": false,
-    "validate": {
-      "passed": false,
-      "failed_checks": [
-        "evidence_validity.listener_drops",
-        "evidence_validity.correctness",
-        "evidence_validity.valid"
-      ],
-      "output": "validate.stderr"
-    }
+    "valid": true
   }
 }

@@ -16,19 +16,23 @@
 #   least every 10 s or so, never reach.
 # - The policy is 1 token per 10 s with a capacity of 1 per user, so the 50 tracked users together
 #   are allowed about 6 req/s (and 50 at the start) and the refusals after acquire give about 0.2
-#   refunds/s (20-30 a run): the H6 runs peaked at 16 and 17 live markers (of max_live_markers =
-#   20) with no refund capacity_error, and the seed-1 simulation gives at most 2 of a key (of
-#   max_markers_per_key = 5). So the marker limits never bind, and they cannot bind in a run whose
-#   refunds must meet plan step 4: a refund blocked at a marker limit (API-18, retried) waits for a
-#   marker to expire, 60 s after its acquire (receipt_lifetime), past refund_deadline (30 s) + the
-#   outage, and refunds still pending when Close's drain ends emit their unresolved (closed) events
-#   after the listener's deadline, the drain's, which drops and counts them
-#   (internal/core/close.go), so listener_drops > 0 makes the run invalid (HAR-13). A first version
-#   of this file with harness.toml's policy (10 tokens/s, capacity 20) showed both: of 405
-#   releases 62 were applied, 261 ended unresolved (retention) and 82 final events were dropped at
+#   refunds/s (20-30 a run). In seed-1 runs with this policy on 2026-10-10, live markers peaked at
+#   14-17 (of max_live_markers = 20) and no refund got capacity_error, so the marker limits did not
+#   bind; in one of those runs one key held 4 markers at once (of max_markers_per_key = 5).
+#   Binding can fail plan step 4: a refund blocked at a marker limit (API-18, retried) is applied
+#   only after a cleanup pass removes an expired marker that the limit counts (each marker expires
+#   receipt_lifetime, 60 s, after its own acquire), which can come after the blocked refund's
+#   refund_deadline (30 s) + the outage. It can then be confirmed late, or end receipt_expired,
+#   unresolved (retention), or unresolved (closed) when Close's drain ends first (Close gives the
+#   listener time to deliver those events, internal/core/close.go). For a release within P,
+#   report/completion.py counts each of these as a refund-completion failure, unless the drain cut
+#   the refund within that bound. A first version of this file, with
+#   harness.toml's policy (10 tokens/s, capacity 20), showed this: of 405 releases, 62 were applied,
+#   261 ended unresolved (retention) and the other 82 were still pending at
 #   the drain's end. Marker exhaustion stays covered at L3: T-REF-4 (a lost refund reply when the
 #   marker pool is full) and T-FLT-5 (FLT-8's limits, the per-key marker limit included). A seed or
-#   policy change needs the live-marker peak rechecked against 20.
+#   policy change needs both marker peaks rechecked: live markers against 20 and markers per key
+#   against 5.
 # - failure_mode = "open": the open twin of s6-capacity-closed.toml, with the same limits and fault.
 # - FLT-1b, the plan's outage segment for this file: 5 s (the plan's duration_ms 5000) on instance 1
 #   at 60 s, mid-run; it refuses acquires only (match "acquire", DESIGN §B6), so refunds are left
