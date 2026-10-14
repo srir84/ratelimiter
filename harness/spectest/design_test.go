@@ -431,8 +431,8 @@ func TestDesign_CleanupAfterStoreRestart(t *testing.T) {
 	d := fastDriver(t, 1, nil)
 	const n = 500
 	t0 := d.Clock().NowNs()
-	for k := range n {
-		d.Done(allowed(t, d, 0, fmt.Sprintf("restart-%03d", k)))
+	for k := range n { // setup: a reply an AOF stall the store records delays past D is retried
+		d.Done(allowedThroughAOFStall(t, d, 0, fmt.Sprintf("restart-%03d", k)))
 	}
 	setClock(t, d, t0+d.Policy().ReceiptLifetimeNs)
 	mark := len(d.Sent(0))
@@ -766,17 +766,17 @@ func TestDesign_RollbackHold(t *testing.T) {
 func TestDesign_ReclaimOldEpoch(t *testing.T) {
 	d := fastDriver(t, 2, nil)
 	idA := d.ReadEpoch().ID
-	for k := range 5000 {
-		d.Done(allowed(t, d, k%2, fmt.Sprintf("reclaim-a-%04d", k)))
+	for k := range 5000 { // setup: a reply an AOF stall the store records delays past D is retried
+		d.Done(allowedThroughAOFStall(t, d, k%2, fmt.Sprintf("reclaim-a-%04d", k)))
 	}
 	aKeys := len(d.StoreKeys("rl:e:" + idA + ":*"))
 	start := time.Now()
 	idB := d.ReplaceEpoch()
 	waitAllJoined(t, d, idB, start.Add(joinTolerance(d)))
 	var want []string
-	for k := range 100 {
+	for k := range 100 { // setup, as for epoch A
 		key := fmt.Sprintf("reclaim-b-%03d", k)
-		d.Done(allowed(t, d, k%2, key))
+		d.Done(allowedThroughAOFStall(t, d, k%2, key))
 		want = append(want, keys.BucketKey(idB, b64(key)))
 	}
 	slices.Sort(want)

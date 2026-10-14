@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/big"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -268,6 +269,66 @@ func allowedSettled(t *testing.T, d *driver.Driver, i int, key string) driver.Op
 		t.Fatalf("acquire of %q on instance %d: %v (%+v), want allowed", key, i, op.Kind, op.Diag)
 	}
 	return op
+}
+
+// eventLoop is the store's own record of its event loop, from INFO debug, in µs since it
+// started: eventloop_duration_max, its longest cycle, and eventloop_duration_aof_sum, its time
+// writing the AOF (Valkey writes it before it replies, on the fast profile too).
+type eventLoop struct{ maxUs, aofUs int64 }
+
+// readEventLoop reads d's store's eventLoop from INFO debug as rl_ops (Driver.Info), failing
+// the test on a missing or malformed value.
+func readEventLoop(t *testing.T, d *driver.Driver) eventLoop {
+	t.Helper()
+	info := d.Info("debug")
+	field := func(name string) int64 {
+		n, err := strconv.ParseInt(info[name], 10, 64)
+		if err != nil || n < 0 {
+			t.Fatalf("INFO debug as rl_ops: %s is %q, want a count of µs", name, info[name])
+		}
+		return n
+	}
+	return eventLoop{maxUs: field("eventloop_duration_max"), aofUs: field("eventloop_duration_aof_sum")}
+}
+
+// allowedThroughAOFStall is allowed, but acquires the same key again after a transport failure
+// (unavailable or outcome_unknown with an empty Diag: the reply missed D, §A5.4) when the store's
+// own record shows an AOF stall of at least D around the acquire: in INFO debug, read as rl_ops
+// just before the acquire and just after it, eventloop_duration_max (one cycle) is at least D
+// and eventloop_duration_aof_sum grew by at least D in between. A host F_FULLFSYNC stall blocks
+// the store's AOF write(2) that way, beyond D (plan F6 R03). Each retry logs the values; without
+// that record, or waitMax after the first try, the test fails as allowed does. Only for setup
+// loops on the fast profile whose results the test does not check, and never where the op log
+// is replayed (CheckRefModel): the first try may have run, and the reference model takes an
+// outcome_unknown to change nothing. A retry of the same key keeps its one bucket and its one ix
+// member (acquire.lua); a first try that ran leaves fewer allows, never more (check_bud11
+// counts it as no charge).
+func allowedThroughAOFStall(t *testing.T, d *driver.Driver, i int, key string) driver.Op {
+	t.Helper()
+	dUs := d.Instance().DependencyDeadlineNs / 1000
+	deadline := time.Now().Add(waitMax)
+	for {
+		before := readEventLoop(t, d)
+		op := d.Acquire(i, key)
+		if op.Kind == limiter.Allowed && op.Permit != nil {
+			return op
+		}
+		if (op.Kind != limiter.Unavailable && op.Kind != limiter.OutcomeUnknown) || op.Diag != (limiter.Diag{}) {
+			t.Fatalf("acquire of %q on instance %d: %v (%+v), want allowed", key, i, op.Kind, op.Diag)
+		}
+		after := readEventLoop(t, d)
+		values := fmt.Sprintf("INFO debug: eventloop_duration_max %d µs, eventloop_duration_aof_sum %d → %d µs (+%d); D %d µs",
+			after.maxUs, before.aofUs, after.aofUs, after.aofUs-before.aofUs, dUs)
+		switch {
+		case after.maxUs < dUs || after.aofUs-before.aofUs < dUs:
+			t.Fatalf("acquire of %q on instance %d: %v (%+v), want allowed; the store shows no AOF stall of at least D around it (%s)",
+				key, i, op.Kind, op.Diag, values)
+		case !time.Now().Before(deadline):
+			t.Fatalf("acquire of %q on instance %d: %v (%+v), want allowed; still failing %v after its first try, in an AOF stall (%s)",
+				key, i, op.Kind, op.Diag, waitMax, values)
+		}
+		t.Logf("acquire of %q on instance %d: %v with an empty Diag in an AOF stall (%s); acquiring it again", key, i, op.Kind, values)
+	}
 }
 
 // releaseConfirmed releases op's permit and fails the test unless its final event confirms the

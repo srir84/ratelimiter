@@ -90,15 +90,16 @@ func releaseExpired(t *testing.T, d *driver.Driver, op driver.Op) limiter.Refund
 	return ev
 }
 
-// cln1Keys sets up T-CLN-1's 200 keys on d at its frozen start t0: each gets 3 allowed
-// acquires, 2 of them finished with done() and 1 released and applied (its marker expires
-// with the receipts, at t0 + 6 s).
-func cln1Keys(t *testing.T, d *driver.Driver) []string {
+// cln1Keys sets up T-CLN-1's 200 keys on d at its frozen start t0: each gets 3 acquires through
+// allow, which fails the test unless one is allowed (allowed, or allowedThroughAOFStall where
+// the op log is not replayed), 2 of them finished with done() and 1 released and applied (its
+// marker expires with the receipts, at t0 + 6 s).
+func cln1Keys(t *testing.T, d *driver.Driver, allow func(*testing.T, *driver.Driver, int, string) driver.Op) []string {
 	t.Helper()
 	ks := make([]string, 200)
 	for k := range ks {
 		ks[k] = fmt.Sprintf("cln1-%03d", k)
-		ops := []driver.Op{allowed(t, d, k%d.Instances(), ks[k]), allowed(t, d, k%d.Instances(), ks[k]), allowed(t, d, k%d.Instances(), ks[k])}
+		ops := []driver.Op{allow(t, d, k%d.Instances(), ks[k]), allow(t, d, k%d.Instances(), ks[k]), allow(t, d, k%d.Instances(), ks[k])}
 		d.Done(ops[0])
 		d.Done(ops[1])
 		releaseApplied(t, d, ops[2])
@@ -120,7 +121,7 @@ func TestT_CLN_1(t *testing.T) {
 	d := fastDriver(t, 2, nil)
 	t0 := d.Clock().NowNs()
 	expiry := t0 + d.Policy().ReceiptLifetimeNs
-	ks := cln1Keys(t, d)
+	ks := cln1Keys(t, d, allowed) // its op log is replayed (CheckRefModel)
 	waitMetric(t, d, 0, "rl_tracked_buckets", "", epochReads(d), "before cleanup", func(v float64) bool { return v == 200 })
 	waitMetric(t, d, 0, "rl_live_markers", "", epochReads(d), "before cleanup", func(v float64) bool { return v == 200 })
 
@@ -154,7 +155,7 @@ func TestT_CLN_1(t *testing.T) {
 
 	// Timed passes only.
 	timed := fastDriver(t, 2, func(p *limiter.Policy, _ *limiter.Instance) { p.CleanupIntervalNs = second })
-	cln1Keys(t, timed)
+	cln1Keys(t, timed, allowedThroughAOFStall) // setup: a reply an AOF stall the store records delays past D is retried
 	if n := len(nsKeys(t, timed)); n != 2*len(ks)+1 {
 		t.Fatalf("timed deployment before E: %d keys under rl:e:<id>:, want %d", n, 2*len(ks)+1)
 	}
@@ -470,8 +471,8 @@ func TestT_CLN_7(t *testing.T) {
 	d := fastDriver(t, 2, nil)
 	const n = 2000
 	t0 := d.Clock().NowNs()
-	for k := range n {
-		d.Done(allowed(t, d, k%2, fmt.Sprintf("cln7-%04d", k)))
+	for k := range n { // setup: a reply an AOF stall the store records delays past D is retried
+		d.Done(allowedThroughAOFStall(t, d, k%2, fmt.Sprintf("cln7-%04d", k)))
 	}
 	setClock(t, d, t0+d.Policy().ReceiptLifetimeNs)
 	d.LoadScripts() // neither pass meets a NOSCRIPT round the other did not

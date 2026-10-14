@@ -317,8 +317,8 @@ func TestT_CFG_5(t *testing.T) {
 	keyOf := func(k int) string { return fmt.Sprintf("cfg5-%04d", k) }
 	idA := d.ReadEpoch().ID
 	var open []driver.Op
-	for k := range 990 {
-		op := allowed(t, d, k%3, keyOf(k))
+	for k := range 990 { // setup: a reply an AOF stall the store records delays past D is retried
+		op := allowedThroughAOFStall(t, d, k%3, keyOf(k))
 		if k < 3 {
 			open = append(open, op)
 		} else {

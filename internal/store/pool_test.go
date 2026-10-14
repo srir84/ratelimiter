@@ -254,6 +254,11 @@ func TestUnavailableWhenRefused(t *testing.T) {
 	}
 }
 
+// TestConnectHangs (plan S3 Tests (a)): the store accepts TCP and never answers AUTH, so no
+// connection becomes ready and the call sends nothing. With a 5 s ctx it is unavailable at
+// start + D: its own deadline, or the AUTH timeout of a dial that began after start. With a
+// 100 ms ctx it is cancelled at its host deadline, while the dial it waits for still hangs: a
+// call waits for a connection at most until its own deadline (DESIGN §A5.4; plan S3 step 5).
 func TestConnectHangs(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -262,15 +267,22 @@ func TestConnectHangs(t *testing.T) {
 		lo, hi  time.Duration
 	}{
 		{"5 s ctx", 5 * time.Second, Unavailable, 300 * time.Millisecond, 450 * time.Millisecond},
-		{"100 ms ctx", 100 * time.Millisecond, Cancelled, 100 * time.Millisecond, 300 * time.Millisecond},
+		// hi is well below 300 ms: no dial times out before start + D, so a call that waited for
+		// one to end would return after hi.
+		{"100 ms ctx", 100 * time.Millisecond, Cancelled, 100 * time.Millisecond, 200 * time.Millisecond},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
 			e.srv.HangAuth()
 			sc := e.script("acquire", echoAcquire)
-			e.start()
-			start := time.Now() // before the ctx's deadline is set, so it is start + timeout
+			gate := make(chan struct{})
+			e.start(func(o *Options) { o.Start = gate })
+			// The slots dial only once gate closes, after start: every dial's AUTH timeout, which
+			// wakes the call to fail fast (DESIGN §A5.4), comes D after start or later, and the
+			// window times the call alone. The ctx's deadline is start + timeout.
+			start := time.Now()
+			close(gate)
 			ctx, cancel := context.WithDeadline(t.Context(), start.Add(tc.timeout))
 			defer cancel()
 			r := e.a.Call(ctx, acquireReq(sc, 1))
@@ -361,6 +373,78 @@ func TestCloseDuringHandshake(t *testing.T) {
 		// Returning ends t.Context(), the adapter's lifetime, so a Close that never returns
 		// fails here by assertion instead of hanging the test.
 		t.Fatal("Close still waiting 1 s after the handshakes went on: it waits out their deadline (D = 5 s)")
+	}
+}
+
+// TestDeadlineEndsWaitDuringHandshake: a call waiting for a connection ends at its own
+// deadline, min(host deadline, start + D), while the dial it joined is still in its handshake,
+// instead of waiting for that dial to end (DESIGN §A5.4: the deadline covers waiting for a
+// connection; plan S3 step 5: at most until the deadline). Every slot's handshake is held
+// (gateConn) from before the call starts until after it ends, so a dial is in progress for the
+// whole call, and no dial fails or connects to wake it. With no host deadline the call is
+// unavailable at start + D; with a 100 ms one it is cancelled at start + 100 ms (plan S3 step
+// 8). Either way nothing is sent.
+func TestDeadlineEndsWaitDuringHandshake(t *testing.T) {
+	cases := []struct {
+		name    string
+		timeout time.Duration // the host's deadline after start; 0 for none
+		want    Outcome
+		lo, hi  time.Duration
+	}{
+		{"start + D", 0, Unavailable, testD, testD + 150*time.Millisecond},
+		{"host deadline", 100 * time.Millisecond, Cancelled, 100 * time.Millisecond, 250 * time.Millisecond},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			sc := e.script("acquire", echoAcquire)
+			entered := make(chan struct{}, 3)
+			gate := make(chan struct{})
+			e.start(withConns(1, 1), func(o *Options) {
+				o.Dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					c, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+					return &gateConn{Conn: c, testCtx: t.Context(), entered: entered, gate: gate}, nil
+				}
+			})
+			for range 3 { // each slot's connection is registered; its handshake is held
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("waited 5 s for 3 handshakes to start")
+				}
+			}
+			ctx := t.Context()
+			start := time.Now() // before the host's deadline is set, so it is start + timeout
+			if tc.timeout > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(ctx, start.Add(tc.timeout))
+				defer cancel()
+			}
+			var r Response
+			var el time.Duration
+			done := goDone(func() {
+				r = e.a.Call(ctx, acquireReq(sc, 1))
+				el = time.Since(start)
+			})
+			ended := waitDone(t, "a call waiting while every handshake is held", 2*time.Second, done)
+			close(gate) // the handshakes go on
+			if !ended { // it waits for a dial to end: let it, so it ends before the test does
+				waitDone(t, "the call after the handshakes went on", 2*time.Second, done)
+				return
+			}
+			if r.Outcome != tc.want || r.Sent || r.SentCommands != 0 {
+				t.Errorf("Call = %v, Sent %v, SentCommands %d; want %v, false, 0", r.Outcome, r.Sent, r.SentCommands, tc.want)
+			}
+			if el < tc.lo || el > tc.hi {
+				t.Errorf("Call ended after %v, want %v–%v", el, tc.lo, tc.hi)
+			}
+			if n := e.srv.Count("EVALSHA"); n != 0 {
+				t.Errorf("the server received %d EVALSHA, want 0", n)
+			}
+		})
 	}
 }
 

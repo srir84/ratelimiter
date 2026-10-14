@@ -368,11 +368,13 @@ func TestEntriesReturnAndCloseEnds(t *testing.T) {
 	cancelled, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	hang := fakeresp.Start(t, "rl_lib", pw)
-	hang.HangAuth() // no connection ever becomes ready
+	idle := fakeresp.Start(t, "rl_lib", pw)
 	n := startBounded(t, Options{
-		Addr: hang.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
+		Addr: idle.Addr(), User: "rl_lib", Password: pw, StoreConns: 1, RefundConns: 1,
 		DependencyDeadline: testD, Limits: testLimits(),
+		// Never closed: no slot ever dials, so no connection becomes ready and no failed dial
+		// wakes a waiting call to fail fast (DESIGN §A5.4) before its own start + D.
+		Start: make(chan struct{}),
 	})
 	start := time.Now()
 	mustWithin(t, "a call with no connection ready and the host's ctx cancelled", 2*time.Second, func() {
@@ -808,9 +810,10 @@ func startEachEntry(t *testing.T, e *env, sc scripts.Script, start time.Time) (w
 // TestHostCancelAfterDependencyDeadline: a call that start + D ended while it picked a
 // connection sent nothing and is unavailable, also when the host cancels right after
 // start + D, before the call is classified (SPEC API-1; plan S3 step 8: cancelled only if
-// the host's ctx ended first). So picking returns the call ctx's cause. The store accepts
-// TCP and never answers AUTH, so no connection becomes ready. In one case the calls start
-// now and wait for a connection until start + D; in the other they reach the pick with
+// the host's ctx ended first). So picking returns the call ctx's cause. No slot ever dials
+// (Options.Start is never closed), so no connection becomes ready and no failed dial wakes
+// the calls to fail fast (DESIGN §A5.4): only start + D ends them. In one case the calls
+// start now and wait for a connection until start + D; in the other they reach the pick with
 // start + D already passed (they start D + 1 ms in the past).
 func TestHostCancelAfterDependencyDeadline(t *testing.T) {
 	cases := []struct {
@@ -823,9 +826,8 @@ func TestHostCancelAfterDependencyDeadline(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newEnv(t)
-			e.srv.HangAuth() // no connection ever becomes ready
 			sc := e.script("acquire", echoAcquire)
-			e.start()
+			e.start(func(o *Options) { o.Start = make(chan struct{}) }) // no slot ever dials
 			startEachEntry(t, e, sc, time.Now().Add(-tc.ago))()
 			if n := e.srv.Count("EVALSHA") + e.srv.Count("PING"); n != 0 {
 				t.Errorf("the server received %d commands, want none", n)

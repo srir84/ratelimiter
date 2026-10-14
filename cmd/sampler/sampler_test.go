@@ -665,6 +665,12 @@ func TestSampler_ReadErrors(t *testing.T) {
 	}
 	textRladmin := filepath.Join(t.TempDir(), "rladmin")
 	writeFile(t, textRladmin, "#!/bin/sh\necho 'epoch 5f0c9a3e1b7d4c2a8e6f0b1d3c5a7e9f (text output)'\n", 0o700)
+	// Run once before the timed tick, its only exec: the first exec of a new file can wait in
+	// macOS's machine-wide scan queue, for seconds under a parallel go test. The real
+	// orchestrator runs rladmin before it starts the sampler too.
+	if err := exec.CommandContext(t.Context(), textRladmin, "status", "--json").Run(); err != nil {
+		t.Fatalf("running the text-output rladmin once before the tick: %v", err)
+	}
 	const timeout = 2 * time.Second
 	second := newTestSampler(t, setup{runDir: fifoRun, store: droppingStore(t), rladmin: textRladmin, pgData: fifoPG, timeout: timeout})
 	tickBounded(t, second, timeout+second.cfg.waitDelay+2*time.Second, fifos...)

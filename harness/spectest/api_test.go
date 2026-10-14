@@ -30,7 +30,8 @@ import (
 //   - (c) A 1 h host deadline, later than D: allowed (capped, not rejected).
 //   - (d) Hang() on instance 1's proxy once its 8 call connections are up; when
 //     rl_store_connections{kind="call"} is 0, an acquire with a 10 s host deadline ends at D as
-//     unavailable (closed) or degraded (open), with nothing sent, returning in [1.9 s, 2.3 s].
+//     unavailable (closed) or degraded (open), with nothing sent, returning [1.9 s, 2.3 s] after
+//     the hang began.
 func TestT_API_1(t *testing.T) {
 	p := driver.DefaultPolicy()
 	slow := driver.DefaultInstance(p)
@@ -114,9 +115,11 @@ func TestT_API_1(t *testing.T) {
 		// (d)
 		waitMetric(t, d, 1, "rl_store_connections", "call", waitMax, "(d) instance 1's call connections", func(v float64) bool { return v == 8 })
 		mark = len(d.Sent(1))
+		// Before the hang, so every call slot redials after start: a redial's AUTH timeout, which
+		// wakes the waiting acquire to fail fast (DESIGN §A5.4), comes D after start or later.
+		start := time.Now()
 		d.Proxy(1).Hang()
 		waitMetric(t, d, 1, "rl_store_connections", "call", time.Second, "(d) after Hang", func(v float64) bool { return v == 0 })
-		start := time.Now()
 		ctx, cancel = context.WithTimeout(t.Context(), 10*time.Second)
 		op = d.AcquireContext(ctx, 1, key)
 		took := time.Since(start)
@@ -126,7 +129,7 @@ func TestT_API_1(t *testing.T) {
 			t.Errorf("(d) connect hangs, 10 s deadline: %v %+v (SentCommands %d), want %s with nothing sent", op.Kind, op.Diag, op.SentCommands, refusalName(mode))
 		}
 		if took < 1900*time.Millisecond || took > 2300*time.Millisecond {
-			t.Errorf("(d) the acquire returned after %v, want within [1.9 s, 2.3 s] (D = 2 s)", took)
+			t.Errorf("(d) the acquire returned %v after the hang began, want within [1.9 s, 2.3 s] (D = 2 s)", took)
 		}
 		if n := driver.Count(d.Sent(1)[mark:], "acquire"); n != 0 {
 			t.Errorf("(d) %d acquire commands written, want none", n)
