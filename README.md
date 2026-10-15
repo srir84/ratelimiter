@@ -49,7 +49,7 @@ flowchart LR
 
 ## Layout
 
-The repository is one Go module, `ratelimiter` (DESIGN §A1). `docs/` holds the two guides.
+The repository is one Go module, `ratelimiter` (DESIGN §A1). `docs/` holds the two guides and the code map.
 
 ```
 ratelimiter/
@@ -70,7 +70,7 @@ ratelimiter/
   report/         HARNESS report builder (Python)
   scenarios/      HARNESS scenario files
   deploy/         valkey-durable.conf, valkey-fast.conf, acl.conf.tmpl, pg-schema.sql
-  docs/           host integration guide, operator guide
+  docs/           host integration guide, operator guide, code map
   tools/trace/    repository checks: test IDs, import boundary, ACL lists, script lint, API, …
   tools/mutate/   mutation testing
   Makefile  harness.toml  AGENTS.md  SPEC.md  ARCHITECTURE.md  DESIGN.md  HARNESS.md
@@ -199,3 +199,4 @@ make run SCENARIO=scenarios/smoke-ramp.toml              # the limiter run: runs
 | [AGENTS.md](AGENTS.md) | Coding rules for anyone changing the code |
 | [docs/host-integration.md](docs/host-integration.md) | How a service embeds the library |
 | [docs/operator-guide.md](docs/operator-guide.md) | How to run the store and `rladmin`, size them and respond to alerts |
+| [docs/code-map.html](docs/code-map.html) | Which code does each job and how one `Acquire` moves through it, checked against the source (built from `docs/code-map.toml`) |
