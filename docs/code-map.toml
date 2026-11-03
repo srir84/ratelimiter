@@ -2,62 +2,51 @@
 # The unit of work is one Acquire call: a host asks the library for budget, one Lua script in
 # Valkey decides atomically, and the host gets a Result. Each card and journey names its source.
 
-# src: README.md (opening paragraph); epoch: SPEC.md §0 glossary "Epoch", ARCHITECTURE.md §4.4 ("Only the admin tool creates an epoch. Instances only join")
+# src: README.md (opening paragraph: "a Go library that every instance of a host service imports", "one budget per key, kept in a dedicated Valkey store", "An allowed call returns a permit"); SPEC.md §0 glossary "Instance", "Token", "Permit", CMP-1, CMP-2; ARCHITECTURE.md §1.1 (the library inside each app instance, the store holding all shared state); internal/core/permit.go Permit.Release ("it returns at once, and the refund runs in the background"; it queues the refund job, whose outcome the listener event reports, so Release asks for the token back and does not promise it)
 title = "Distributed token-bucket rate limiter"
-summary = "A Go library that every host instance imports: each decision runs as one atomic Lua script in a dedicated Valkey store, and an allowed call returns a permit with a signed receipt, so a confirmed failure gets its token back. An epoch is one lifetime of the shared state, with one fixed policy: only rladmin starts one, and instances only join it. A test harness plays a host and measures it."
-
-# src: ARCHITECTURE.md §4.1 (allowed call; the script's "refill, deduct 1" in "a single atomic step", API-1a), §4.2 (confirmed failure and refund); DESIGN.md §A5.4 (the adapter sends the script); ARCHITECTURE.md AD-2 (one atomic step per call), AD-10 ("Each instance generates its own signing key in memory"); internal/receipt/signer.go HMACSigner.Sign ("MAC = HMAC-SHA256(key, MACInput(r))"), as journey 1 step 14 says ("under the instance's own key") (R40); internal/core/acquire.go Limiter.allowed (signs, then newPermit returns the OPEN permit); internal/core/permit.go Permit.Done (OPEN → DONE "keeps the charge"), Permit.Release (queues the refund job; "the refund runs in the background"). Stops 1–7 match the map's numbered steps 1–7, so stop 5 holds both Valkey's atomic run and the script's refill and take (R34), stop 6 names only the signing, on the blocks card, where step 6 lands, and leaves the permit to stop 7 (R40), and stop 7 sits on the permits card, where step 7 lands: it opens the core level, the only level that draws step 7 (R36).
-[[story]]
-label = "A host calls Acquire for one key"
-card = "host"
-
-[[story]]
-label = "The public API is the only door"
-card = "api"
-
-[[story]]
-label = "Local checks pass; both slots are reserved"
-card = "core"
-
-[[story]]
-label = "The adapter sends one acquire script"
-card = "store"
-
-[[story]]
-label = "Valkey runs it atomically: refill, take one token"
-card = "scripts"
-
-[[story]]
-label = "The receipt is signed with the instance's key"
-card = "blocks"
-
-[[story]]
-label = "Permit issued; Done keeps the charge, Release refunds"
-card = "core.permits"
+summary = "A shared rate limiter: each copy of an app imports this Go library, and one Valkey server holds every key's tokens. An allowed call gets a permit; if the work fails, Release asks for the token back in the background."
+# src: the main request's path, journey "acquire" (host → api → core → store → Valkey → scripts); each neighbour pair shares a drawn wire: host -> api, api -> core.acquire, core.acquire -> store, store -> valkey, valkey -> scripts
+spine = ["host", "api", "core", "store", "valkey", "scripts"]
 
 # =============================================================================== top level
+# Each card's job (≤8 words, the line under its role on every box) condenses that card's own role and purpose, so the
+# card's src line backs it too; a job that draws on more names that source there.
 
 # src: ARCHITECTURE.md §1.2 "What the app writes"; docs/host-integration.md HOST-1…HOST-8; SPEC.md HOST-1 ("do the work only on allowed or degraded")
 [[card]]
 id = "host"
 role = "The host service"
+job = "asks the limiter before protected work"
 kind = "actor"
-purpose = "Imports the library: calls Acquire before protected work, which runs only on allowed or degraded; finishes each permit with Done or Release; gets refund events; calls Close on shutdown."
+purpose = "Your app. Before protected work it asks the limiter, and goes ahead only on a yes. Afterwards it calls Release if the work surely failed, Done otherwise."
 
 # src: ARCHITECTURE.md §1.1 "The operator provides two things", §1.2 "Who owns and runs what"; docs/operator-guide.md
 [[card]]
 id = "operator"
 role = "The operator"
+job = "runs Valkey and starts epochs with rladmin"
 kind = "actor"
-purpose = "Starts the dedicated store server once, empty, gives every instance the same settings, and runs rladmin to start epochs and repair keys."
+purpose = "The person who runs the system. Starts one empty Valkey server, gives every app instance the same settings, then uses rladmin to start an epoch and repair damaged keys."
+
+# src: ARCHITECTURE.md §1.1 (the three parts: "Limiter library | Inside each app instance (imported)", CMP-1), §2 (its blocks: slots, refund worker, receipt signer, policy and epoch watch, cleanup runner, store adapter that "sends exactly one script per call"); AGENTS.md §1 Dependencies ("Library ... standard library only"); a frame on the overview, so its four parts show beside the store and the host
+[[card]]
+id = "library"
+role = "The Go library"
+job = "runs inside each app instance"
+kind = "core"
+frame = true
+purpose = "The limiter itself: Go packages each app instance imports. It checks calls locally, sends one script per call to Valkey, signs receipts and retries refunds in the background."
+tech = "Go, standard library only"
 
 # src: limiter/doc.go; limitertest/doc.go; limiter/limiter.go (the public types block); DESIGN.md §A5.2 (the listing, "Where things are declared"), §A5.12; ARCHITECTURE.md §1.1 (CMP-1)
 [[card]]
 id = "api"
+in = "library"
 role = "The public API"
+job = "the only part an app touches"
 kind = "entry"
-purpose = "The only door for hosts: New, Acquire, Done or Release on the permit, Close, Health, Metrics and the refund listener; limitertest adds fixture hooks in rltest builds."
-why = "Every type lives in internal/core and is aliased here, avoiding an import cycle with core.NewWithHooks; limitertest exists only in rltest builds, so production cannot reach fixtures (CMP-9)."
+purpose = "The only part of the library an app touches: create a limiter, ask it for permits, check its health, and close it. Test-only builds add fault hooks."
+why = "Types live in the core and are re-exported here, which avoids an import cycle. The test hooks exist only in test builds, so production cannot reach them."
 tech = "Go library"
 row = 1
 files = ["limiter/", "limitertest/"]
@@ -76,10 +65,12 @@ files = ["limiter/", "limitertest/"]
 # src: internal/core/doc.go; DESIGN.md §A5.1; ARCHITECTURE.md §2, AD-12
 [[card]]
 id = "core"
+in = "library"
 role = "The limiter core"
+job = "runs Acquire and the background jobs"
 kind = "core"
-purpose = "One limiter instance: local checks and one atomic store script per acquire, permits and slots, background refund retries, the epoch watch, cleanup, health and metrics."
-why = "The library owns receipts and refund retries, so the host keeps no limiter state and any service can reuse it (AD-12)."
+purpose = "The engine in each instance. Acquire runs local checks and one store script, and returns a permit if allowed. Background jobs retry refunds, watch the epoch and clean up."
+why = "The library keeps the receipts and retries the refunds itself, so the app stores no limiter state and any service can use it."
 files = ["internal/core/"]
 symbols = [
   "internal/core/types.go:Result",
@@ -93,10 +84,12 @@ symbols = [
 # src: internal/store/doc.go, internal/store/resp/doc.go; DESIGN.md §A5.4; ARCHITECTURE.md §2 (Store adapter), §5
 [[card]]
 id = "store"
+in = "library"
 role = "The store adapter"
+job = "the library's only path to Valkey"
 kind = "core"
-purpose = "The library's only path to Valkey: runs each script by EVALSHA on pipelined connections, proves whether a command was sent, classifies every failure and checks every reply."
-why = "It alone decides 'definitely not applied' versus 'unknown'; everything else trusts its label, and production construction cannot swap it out (API-22, CMP-9)."
+purpose = "The only library code that talks to Valkey. It sends script calls, tracks whether each one actually went out, and turns every reply or failure into a clear result."
+why = "Only it can tell 'surely did not happen' from 'might have happened', so the rest of the library trusts its label. Production builds cannot swap it out."
 files = ["internal/store/"]
 
 [card.groups]
@@ -114,9 +107,10 @@ files = ["internal/store/"]
 [[card]]
 id = "valkey"
 role = "The limiter store (Valkey)"
+job = "holds every key's tokens, runs the scripts"
 kind = "store"
-purpose = "One dedicated Valkey server the operator starts once, empty: holds every budget, refund marker, cleanup index entry, quarantine flag and the epoch record, and runs scripts one at a time."
-why = "A store dedicated to the limiter owns its namespace, and app load and limiter load stay independent (AD-8)."
+purpose = "A Valkey server just for the limiter. It holds all shared state, like each key's tokens, and runs one script at a time, so updates never collide."
+why = "With its own store, the limiter owns every key in it, and app load and limiter load stay independent."
 tech = "Valkey 9.1, Lua 5.1"
 runs = "one dedicated server, durable profile"
 row = 1
@@ -127,9 +121,10 @@ symbols = ["deploy/valkey-durable.conf", "deploy/valkey-fast.conf"]
 [[card]]
 id = "scripts"
 role = "The Lua script bundle"
+job = "small Lua programs run inside Valkey"
 kind = "core"
-purpose = "Twelve Lua scripts that run atomically inside Valkey, every check before the first write, replies in fixed layouts; the Go loader prepends the shared prelude and names each by SHA-1."
-why = "One atomic step per call: one round trip, no lock held across the network, and the clock read inside the step (AD-2)."
+purpose = "Twelve small Lua programs that run inside Valkey, each as one uninterrupted step. Each does every check before its first write, because Valkey cannot undo a half-done script."
+why = "Each call is one atomic step: one network round trip, no lock held across the network, and the time read inside the step."
 tech = "Lua 5.1, embedded in Go"
 files = ["internal/scripts/"]
 
@@ -149,10 +144,12 @@ files = ["internal/scripts/"]
 # src: package docs of internal/receipt, keys, settings, fingerprint, metrics; DESIGN.md §A5.9–§A5.11; ARCHITECTURE.md §2, AD-10, AD-11
 [[card]]
 id = "blocks"
+in = "library"
 role = "Receipts, keys, settings, metrics"
+job = "signs receipts, names keys, checks settings"
 kind = "support"
-purpose = "Leaf packages the library builds on: receipts and their HMAC signer, budget-key encoding and store key names, settings with validation and the policy fingerprint, and the fixed metric registry."
-why = "Each instance generates its own signing key and receipts never leave it, so no key distribution or rotation (AD-10); keys are opaque host strings, encoded so none collide (AD-11)."
+purpose = "Small building blocks the library uses: signing receipts, turning app keys into safe store key names, checking settings, and the fixed list of metrics."
+why = "Each instance makes its own signing key and keeps its receipts, so the key never needs sharing or rotating. Different app keys never share a store key."
 files = ["internal/receipt/", "internal/keys/", "internal/settings/", "internal/fingerprint/", "internal/metrics/"]
 
 [card.groups]
@@ -165,9 +162,10 @@ files = ["internal/receipt/", "internal/keys/", "internal/settings/", "internal/
 [[card]]
 id = "rladmin"
 role = "The admin tool (rladmin)"
+job = "starts epochs and repairs damaged keys"
 kind = "entry"
-purpose = "The operator's CLI, connected as rl_admin: starts and replaces epochs, restores and clears quarantined keys, shows status and a key's state, reports and rewrites the store's persistence."
-why = "Only the admin tool creates an epoch, so instances cannot recreate state after a wipe or change policy by accident (AD-7)."
+purpose = "The operator's command-line tool. It starts or replaces the epoch, repairs keys the limiter locked as damaged, shows status and key state, and compacts the store's disk log."
+why = "Only this tool can start an epoch, so an instance can never rebuild state after a wipe or change the policy by accident."
 runs = "CLI from bin/bench or bin/test"
 row = 2
 files = ["cmd/rladmin/"]
@@ -182,20 +180,24 @@ symbols = [
   "cmd/rladmin/commands.go:verdict",
 ]
 
-# src: README.md Part table (Harness); HARNESS.md intro "Two roles, kept apart", boundary rule, §9; why: DESIGN.md §B5 "Construction" (bin/test hitapi through limitertest.New, bin/bench hitapi limiter.New), SPEC.md CMP-9 (store-adapter wrapper, signer wrapper and controlled clock driver "wired only through a separate test-only entry point"), ARCHITECTURE.md §6 ("No hooks or test flags in production construction"); cmd/hitapi/construct_rltest.go (store and signer wrappers, send observer and controlled clock are limitertest options; the database wrapper, fixtures.NewDBWrap, is not), harness/driver/doc.go and driver.go (instances through limitertest.New; the clock and Tamper write the store as rl_fixture) (R30)
+# src: README.md Part table (Harness), opening paragraph (job: "A test harness plays a host service and measures the limiter"); HARNESS.md intro "Two roles, kept apart", boundary rule, §9; why: DESIGN.md §B5 "Construction" (bin/test hitapi through limitertest.New, bin/bench hitapi limiter.New), SPEC.md CMP-9 (store-adapter wrapper, signer wrapper and controlled clock driver "wired only through a separate test-only entry point"), ARCHITECTURE.md §6 ("No hooks or test flags in production construction"); cmd/hitapi/construct_rltest.go (store and signer wrappers, send observer and controlled clock are limitertest options; the database wrapper, fixtures.NewDBWrap, is not), harness/driver/doc.go and driver.go (instances through limitertest.New; the clock and Tamper write the store as rl_fixture) (R30)
 [[card]]
 id = "harness"
 role = "The test harness"
+job = "plays an app and measures the limiter"
 kind = "entry"
-purpose = "One host service plus the verification rig: hitapi embeds the library over PostgreSQL, hitgen sends seeded traffic, the orchestrator runs each scenario, fixtures and faultctl inject faults."
-why = "The harness never adds limiter requirements: bin/bench hitapi uses limiter.New as any host would; bin/test hitapi and the driver hook into the library only through limitertest (CMP-9)."
+band = "tools"
+purpose = "A sample app and the rig that tests it. hitapi uses the library like any app, hitgen sends it traffic, and the orchestrator runs each scenario, faults included."
+why = "The harness adds no requirements to the limiter. The benchmark build uses the library as any app would. Only test builds reach its hooks, through limitertest."
 
 # src: HARNESS.md §1 HAR-8, HAR-9; DESIGN.md §C6, §B8, §C5; DESIGN.md §0 (language row); the window bound: SPEC.md BUD-11 ("burst plus refill"), BUD-11a (plus refunds applied in that interval)
 [[card]]
 id = "judge"
 role = "Reference model and report builder"
+job = "checks budgets and builds run reports"
 kind = "worker"
-purpose = "Replays op logs against an independent model, checks no key's allows in any window exceed burst plus refill plus applied refunds, and builds validated reports from saved evidence (HAR-8, HAR-9)."
+band = "tools"
+purpose = "Python checkers. They replay test logs on an independent model, check that no key ever got more than its budget, and build each run's report from saved logs."
 tech = "Python 3.13, standard library"
 files = ["refmodel/", "report/"]
 
@@ -203,9 +205,10 @@ files = ["refmodel/", "report/"]
 [[card]]
 id = "checks"
 role = "Repository checks and test helpers"
+job = "custom checks, planted bugs, throwaway test stores"
 kind = "support"
-band = "support"
-purpose = "Project-specific gates and test plumbing: tools/trace and tools/mutate run behind make check and slice-check; internal/testutil gives tests throwaway stores, script runs, audits and fakes."
+band = "tools"
+purpose = "The project's own rule checks and test helpers: trace runs in make check, mutate in slice-check, and testutil gives tests throwaway stores, a fake store and audits."
 
 # =============================================================================== inside the core
 
@@ -213,10 +216,11 @@ purpose = "Project-specific gates and test plumbing: tools/trace and tools/mutat
 [[card]]
 id = "core.instance"
 in = "core"
-role = "Construction and graceful stop"
+role = "Start-up and shutdown"
+job = "builds, starts and stops an instance"
 kind = "core"
-purpose = "New validates settings, generates the signing key and fingerprints the policy, then starts the store adapter, listener, refund workers, epoch watch and cleanup. Close drains; test-only Kill stops at once."
-why = "The drain defaults to refund_deadline + outage_tolerance (35 s), so a graceful stop keeps the refund guarantee (ARCHITECTURE §4.5)."
+purpose = "New checks the settings, makes a signing key, and starts the store connections and background workers. Close first gives pending refunds time to finish. Test-only Kill stops at once."
+why = "The wait (35 s by default) covers the refund deadline plus a tolerated store outage, so a clean stop still keeps the refund promise."
 files = ["internal/core/limiter*.go", "internal/core/close*.go", "internal/core/hooks*.go"]
 symbols = [
   "internal/core/limiter.go:Limiter",
@@ -234,9 +238,10 @@ symbols = [
 id = "core.acquire"
 in = "core"
 role = "The acquire path"
+job = "runs local checks and one script"
 kind = "core"
-purpose = "Local checks, one acquire script, a signed receipt if allowed. Store unreachable: unavailable, or degraded in open mode, with no receipt or slots; other results ignore the failure mode."
-why = "Nothing retries an acquire: an outcome_unknown may already have deducted, so the host decides; the only resend follows NOSCRIPT, when the script provably never ran (API-12, API-22, API-24)."
+purpose = "Runs local checks, one acquire script, and signs a receipt if allowed. If Valkey can't be reached, it answers unavailable, or degraded when the policy says to fail open."
+why = "It never retries: an unknown outcome may already have taken a token, so the app decides. The one resend follows NOSCRIPT, proof nothing ran."
 files = ["internal/core/acquire*.go", "internal/core/budget*.go"]
 symbols = [
   "internal/core/acquire.go:Limiter.Acquire",
@@ -254,9 +259,10 @@ symbols = [
 id = "core.permits"
 in = "core"
 role = "Permits, slots, retention"
+job = "tracks each permit and its two slots"
 kind = "core"
-purpose = "An allowed permit holds its signed receipt, a receipt slot and a refund slot until a transition frees them; both slots are reserved together, without waiting, so full means busy."
-why = "The queue's capacity equals the refund slots, so Release's enqueue cannot fail; the compare-and-swap frees slots once and emits at most one event (DESIGN §A5.5)."
+purpose = "What an allowed call gets back: the signed receipt, plus two reserved slots that cap how many receipts and refunds one instance holds. Full slots mean busy."
+why = "The refund queue holds one job per refund slot, so Release never fails to queue. A permit finishes once: slots freed once, at most one event."
 files = ["internal/core/permit*.go", "internal/core/slots*.go"]
 symbols = [
   "internal/core/permit.go:Permit",
@@ -274,9 +280,10 @@ symbols = [
 id = "core.refunds"
 in = "core"
 role = "The refund workers"
+job = "sends and retries each refund"
 kind = "worker"
-purpose = "A ready queue ordered by release time feeds 128 refund workers by default: MAC check, one refund script; final results end jobs, others back off and retry."
-why = "Release hands the receipt to the library's worker, so the caller's latency is unaffected and a failed reply cannot lose the handover; markers make retries idempotent (AD-6, API-14)."
+purpose = "Gives the token back after a Release. Workers (128 by default) take jobs oldest first, check the receipt, send one refund script, and retry until the result is final."
+why = "Release returns at once and the library does the refund, so the caller never waits. A marker makes each refund count once, so retrying is safe."
 files = ["internal/core/refund*.go"]
 symbols = [
   "internal/core/refund.go:refunds",
@@ -293,10 +300,11 @@ symbols = [
 [[card]]
 id = "core.listener"
 in = "core"
-role = "The listener dispatcher"
+role = "The refund-event listener"
+job = "tells the app how each refund ended"
 kind = "worker"
-purpose = "Hands each released permit's one final refund event to the host's callback through a bounded queue and one goroutine; recovers panics; a full queue drops and counts the event."
-why = "Host code may panic or block, and listener errors must never affect accounting, retries or slots (DESIGN §A5.11, API-1d)."
+purpose = "Tells the app how each refund ended, one callback per released permit. It catches app panics, and a full queue drops the event and counts it."
+why = "App code may panic or hang, and that must never affect token counts, retries or slots."
 files = ["internal/core/listener*.go"]
 symbols = [
   "internal/core/listener.go:WithRefundListener",
@@ -314,9 +322,10 @@ symbols = [
 id = "core.watch"
 in = "core"
 role = "The epoch watch"
+job = "reads the epoch and joins a match"
 kind = "worker"
-purpose = "Reads the epoch record every second, and early after epoch-wide refusals; joins any matching epoch, refuses on a mismatch or loss, and holds the epoch on a seen rollback."
-why = "Instances re-join any matching replacement epoch instead of a fleet restart; safety comes from per-command epoch fencing and IDs that never repeat (AD-14)."
+purpose = "Reads the epoch record every second and joins it if its policy matches. A missing or mismatched record means refusing calls. A rollback puts the epoch on hold."
+why = "When a matching replacement epoch appears, instances switch to it without a restart. Every script checks the epoch ID, and IDs never repeat, so this is safe."
 column = 3
 row = 2
 files = ["internal/core/epoch*.go"]
@@ -337,9 +346,10 @@ symbols = [
 id = "core.cleanup"
 in = "core"
 role = "Cleanup runner and reclaimer"
+job = "deletes idle keys and old epochs' keys"
 kind = "worker"
-purpose = "Every 5 s or on demand, removes idle full buckets and expired refund markers, bounding the store by active keys and recent refunds (RCP-7); a complete pass reclaims old-epoch keys."
-why = "An index-driven pass on budget time follows the high-water mark, detects orphaned data and works with the controlled clock, unlike store-native expiry (AD-5)."
+purpose = "Every 5 s, deletes idle buckets that have refilled and expired refund markers, so the store grows only with active keys and recent refunds. Full passes also remove old-epoch keys."
+why = "It uses its own index and the store's budget time instead of Valkey's built-in expiry, so it can spot orphaned data and works with the controlled test clock."
 column = 4
 row = 2
 files = ["internal/core/cleanup*.go", "internal/core/reclaim*.go"]
@@ -360,8 +370,9 @@ symbols = [
 id = "core.health"
 in = "core"
 role = "Readiness, health and metrics"
+job = "says if this instance is ready"
 kind = "support"
-purpose = "One readiness look maps invalid settings, closing and the epoch watch's state to ready or a local refusal; Health reports it and Metrics snapshots the registry."
+purpose = "Decides if this instance is ready: settings valid, not closing, and the epoch joined. If not, calls are refused locally. Health reports this, and Metrics returns the counters."
 column = 2
 files = ["internal/core/health*.go", "internal/core/metrics*.go", "internal/core/observe*.go"]
 symbols = [
@@ -377,9 +388,10 @@ symbols = [
 id = "harness.orchestrator"
 in = "harness"
 role = "The run orchestrator"
+job = "runs one whole scenario, start to report"
 kind = "entry"
-purpose = "One command runs a whole run: preflight, runs/<id> with merged config and ACL, then store, PostgreSQL, epoch, hitapi, sampler, hitgen, scheduled faults, teardown and the report."
-why = "Benchmarks run with production construction only: it refuses one whose hitapi build lists rltest, whose /health shows fixtures or the controlled clock, or whose scenario has faults (HAR-24)."
+purpose = "One command does a whole run: start Valkey, PostgreSQL, the epoch and the apps, start the traffic, fire scheduled faults, then stop the apps, build the report and stop Valkey."
+why = "Benchmarks use only the production build, so it refuses one that shows a test build, fixtures, the test clock or faults."
 runs = "make run, from bin/test"
 files = ["cmd/orchestrator/"]
 symbols = [
@@ -398,9 +410,10 @@ symbols = [
 id = "harness.hitgen"
 in = "harness"
 role = "The traffic generator (hitgen)"
+job = "sends the planned traffic on schedule"
 kind = "worker"
-purpose = "Builds a scenario's seeded schedule, writes schedule.jsonl before sending, sends it open loop as GET /hit, retries only after a 429, and records every attempt in gen.jsonl."
-why = "Open arrivals: initial arrivals follow the schedule, not response completion; retries are extra traffic, counted separately (TRF-3)."
+purpose = "Sends the traffic. It plans every request ahead from a seed, sends each on schedule even if earlier ones are unanswered, and retries only after a 429 (limited)."
+why = "Requests go out on the schedule, not when replies come back. Retries are extra traffic, counted separately."
 files = ["cmd/hitgen/"]
 symbols = [
   "cmd/hitgen/main.go:run",
@@ -418,9 +431,10 @@ symbols = [
 id = "harness.hitapi"
 in = "harness"
 role = "The API process (hitapi)"
+job = "the sample app that uses the limiter"
 kind = "entry"
-purpose = "The harness's host service: serves GET /hit (acquire, database row, Done or Release), /health and /metrics; bin/test builds put its store adapter, signer and database client behind fault fixtures."
-why = "It follows the host contract like any other service (HOST-1…HOST-8); the limiter, permits and database are small interfaces, so the handler's tests use fakes."
+purpose = "The sample app. For each GET /hit it asks the limiter, saves the hit in PostgreSQL if allowed or degraded, then calls Done or Release. Test builds can inject faults."
+why = "It follows the same rules as any real app. The limiter, permit and database sit behind small interfaces, so its tests can use fakes."
 runs = "1 or 3 processes on 8081–8083"
 files = ["cmd/hitapi/", "harness/httpapi/"]
 symbols = [
@@ -439,9 +453,10 @@ symbols = [
 id = "harness.dbclient"
 in = "harness"
 role = "The database client"
+job = "saves each hit in PostgreSQL"
 kind = "support"
-purpose = "hitapi's insert-or-read of one operation's row, classified by what is known about the row afterwards; also empties and counts the hits table for the orchestrator."
-why = "The only package that imports pgx or holds SQL, and it never retries: hitapi maps each class to done() or release() (AGENTS.md §1, §6)."
+purpose = "Saves each hit as one PostgreSQL row, or reads it back if it exists, and reports what is known about the row, which picks Done or Release."
+why = "All SQL lives here. It never retries an insert: hitapi turns each answer into Done or Release."
 files = ["harness/dbclient/"]
 symbols = [
   "harness/dbclient/dbclient.go:Client.Hit",
@@ -457,9 +472,10 @@ symbols = [
 id = "harness.runlog"
 in = "harness"
 role = "The run-log writer"
+job = "writes the run's log lines"
 kind = "support"
-purpose = "Writes the run logs through a fixed-capacity channel, one write(2) per line on an O_APPEND file; also defines pids.json and the store's command line."
-why = "A line handed to the kernel survives SIGKILL; Enqueue never blocks, a full channel counts a drop, and any drop invalidates the run (DESIGN §B8)."
+purpose = "Writes the run's log files through a fixed-size queue, each line in one system call. It also defines pids.json and the store's command line."
+why = "A line handed to the kernel survives a SIGKILL. Logging never blocks: a full queue counts a drop, and any drop makes the run invalid."
 files = ["harness/runlog/"]
 symbols = [
   "harness/runlog/runlog.go:Writer",
@@ -477,9 +493,10 @@ symbols = [
 id = "harness.config"
 in = "harness"
 role = "The shared config loader"
+job = "reads the shared config and scenarios"
 kind = "support"
-purpose = "Loads the shared config file, [policy] and [instance] onto the library's defaults plus [store] and [api]; merges a scenario's overrides; reads scenario files for hitgen and the orchestrator."
-why = "Every hitapi reads one shared file at startup (HAR-12); absent keys keep the library's defaults and unknown keys are an error."
+purpose = "Reads the one config file every hitapi shares, filling gaps with the library's defaults. Also applies a scenario's overrides and reads scenario files."
+why = "Every hitapi reads the same file at startup. Missing settings keep the library's defaults, and unknown ones are an error."
 files = ["harness/config/"]
 symbols = [
   "harness/config/config.go:Load",
@@ -497,9 +514,10 @@ symbols = [
 id = "harness.sampler"
 in = "harness"
 role = "The resource sampler"
+job = "records CPU, memory and health each second"
 kind = "worker"
-purpose = "Every second records CPU and RSS of the run's processes and PostgreSQL, each API's /health and /metrics, rladmin status --json and the store's INFO: one samples.jsonl line."
-why = "Every read of a tick ends by one deadline, 4/5 of the interval, so a tick never runs into the next; a failed read records its error."
+purpose = "Once a second, records CPU and memory of every process in the run, plus each app's health and metrics and the store's stats, as one line in samples.jsonl."
+why = "All reads in a tick share one deadline, 4/5 of the interval, so a tick never runs into the next. A failed read records its error."
 files = ["cmd/sampler/"]
 symbols = [
   "cmd/sampler/main.go:run",
@@ -517,9 +535,10 @@ symbols = [
 id = "harness.faultctl"
 in = "harness"
 role = "The fault tool (faultctl)"
+job = "breaks things by hand in test builds"
 kind = "entry"
-purpose = "Arms store and process faults on a stack without an orchestrator: store down or pause, api kill, tamper, controlled clock; a thin layer over harness/fixtures, real only in bin/test."
-why = "It refuses every command while a run's orchestrator is live, because that run's evidence would not show the change; scenarios arm faults as [[faults]] instead."
+purpose = "A command-line tool for breaking things by hand: stop or pause the store, kill an app, damage stored data, or move the test clock. Works only in test builds."
+why = "It refuses to act during an orchestrated run, because that run's records would not show the change. Scenarios schedule their faults in the scenario file instead."
 files = ["cmd/faultctl/"]
 symbols = [
   "cmd/faultctl/main_rltest.go:run",
@@ -535,10 +554,11 @@ symbols = [
 [[card]]
 id = "harness.fixtures"
 in = "harness"
-role = "The verification fixtures"
+role = "The fault fixtures"
+job = "test-only tools that inject faults"
 kind = "support"
-purpose = "Test-build fault tools: store-adapter, signer and database wrappers (refuse, drop reply, delay, barriers), store down and pause, api kill, the state tamper tool and the controlled clock driver."
-why = "Every file carries //go:build rltest, so no benchmark or production build can reach them (HAR-24)."
+purpose = "Test-only fault tools. Wrappers make the store adapter, signer or database refuse, stall or drop replies. Others stop the store, kill apps, damage data or move the clock."
+why = "Every file is compiled only into test builds, so no benchmark or production build can contain them."
 files = ["harness/fixtures/"]
 symbols = [
   "harness/fixtures/storewrap.go:StoreWrapper",
@@ -555,10 +575,11 @@ symbols = [
 [[card]]
 id = "harness.driver"
 in = "harness"
-role = "The direct library driver"
+role = "The library test driver"
+job = "drives limiter instances directly in tests"
 kind = "support"
-purpose = "Test-only: builds N limiter instances against one real store through limitertest, with wrappers, controlled clock and an op log, then audits commands, the store and budget windows at teardown (BUD-11)."
-why = "It makes calls the HTTP host cannot: arbitrary UTF-8 keys, unfinished or repeated permit finishes, blocking listeners, cancellation, chosen-instance cleanup (HARNESS §9.4)."
+purpose = "Drives the library directly in tests: several limiter instances on one real Valkey, with fault wrappers and the test clock. Afterwards it checks the store and every key's budget."
+why = "It can do what the HTTP app cannot: any UTF-8 key, a permit finished twice or never, a stuck listener, cancellation, or cleanup on a chosen instance."
 files = ["harness/driver/"]
 symbols = [
   "harness/driver/driver.go:New",
@@ -576,8 +597,9 @@ symbols = [
 id = "postgres"
 in = "harness"
 role = "The harness database (PostgreSQL)"
+job = "stores the sample app's hits"
 kind = "store"
-purpose = "The harness's protected work: one arrival timestamp per (user_id, request_id) in the hits table; no API outcomes or limiter data, separate from the limiter store; pgtest starts it for tests."
+purpose = "The sample app's real work: each hit that goes ahead saves one row, keyed by user and request ID. It holds no limiter data and is separate from Valkey."
 tech = "PostgreSQL 14+"
 runs = ".data/pg on 127.0.0.1:5433"
 files = ["deploy/pg-schema.sql", "harness/pgtest/"]
@@ -590,9 +612,10 @@ symbols = ["deploy/pg-schema.sql:hits", "harness/pgtest/pgtest.go:Start"]
 id = "judge.model"
 in = "judge"
 role = "The reference model"
+job = "replays test logs on a second model"
 kind = "core"
-purpose = "Re-derives every budget decision from SPEC and replays a driver op log, exiting 1 at the first mismatch; eight rule mutants prove the model-versus-limiter test exercises each rule (T-COR-1)."
-why = "A second language with exact big integers keeps the model independent of the Go code (BUD-13); it shares no code or tables with it (§C6)."
+purpose = "A second, independent version of the budget rules, written in Python straight from the spec. It replays a test's log of calls and stops at the first answer that differs."
+why = "A different language with exact whole-number math keeps it independent of the Go code. The two share no code or tables."
 files = ["refmodel/model.py", "refmodel/replay.py", "refmodel/mutants.py", "refmodel/__init__.py"]
 
 [card.groups]
@@ -610,8 +633,9 @@ files = ["refmodel/model.py", "refmodel/replay.py", "refmodel/mutants.py", "refm
 id = "judge.bud11"
 in = "judge"
 role = "The per-window budget check"
+job = "checks no key exceeded its budget"
 kind = "core"
-purpose = "Checks per key that allows in any window stay within burst plus refill plus credits, unknown-time credits counted as possible, on an op log or run logs; drops invalidate (BUD-11a)."
+purpose = "Checks that for every key, in any time window, allowed calls never exceed the burst plus what refilled plus refunds. Works on test logs or run logs."
 files = ["refmodel/check_bud11.py"]
 symbols = [
   "refmodel/check_bud11.py",
@@ -626,9 +650,10 @@ symbols = [
 id = "judge.builder"
 in = "judge"
 role = "The report builder"
+job = "turns run logs into a report"
 kind = "worker"
-purpose = "Streams a run directory's saved evidence line by line into report.json and report.md: load, results, timing, resources, baseline, capacity, correctness by the window check, and evidence validity (DESIGN §B8)."
-why = "Reports are built from saved evidence only (HAR-9), streamed one line at a time so a 12-million-line run builds within 300 s and 2 GB (IMPLEMENTATION_PLAN H5 step 10)."
+purpose = "Turns a run's saved logs into a report (JSON and Markdown) covering load, speed, capacity, correctness and whether the evidence is valid."
+why = "Reports use only the saved logs. Reading one line at a time lets a 12-million-line run build within 300 s and 2 GB."
 files = ["report/__main__.py", "report/__init__.py", "report/build.py", "report/markdown.py", "report/stats.py", "report/runfiles.py"]
 symbols = [
   "report/build.py:build",
@@ -646,9 +671,10 @@ symbols = [
 id = "judge.validate"
 in = "judge"
 role = "The report validator"
+job = "re-checks a finished report"
 kind = "core"
-purpose = "Re-checks a finished report against context.json, the pinned scenario and frozen thresholds: every required field, each evidence rule judged again, and the capacity verdicts recomputed independently (T-RPT-1, T-RPT-2)."
-why = "It imports nothing from the report package, so its recomputation of the capacity verdicts stays independent of the builder's code."
+purpose = "Double-checks a finished report against the run's context and frozen thresholds: required fields present, evidence rules hold, and capacity verdicts match its own math."
+why = "It imports nothing from the report builder, so its math stays independent."
 files = ["report/validate.py"]
 symbols = [
   "report/validate.py:check",
@@ -665,9 +691,10 @@ symbols = [
 id = "judge.thresholds"
 in = "judge"
 role = "The threshold freezer"
+job = "freezes a baseline's limits, once"
 kind = "worker"
-purpose = "From a valid baseline, writes runs/thresholds/<scenario>-<seed>.json once: per step the window p99 + 50 ms and max(0.1 %, 2 × error rate), generator-limited steps marked."
-why = "Thresholds are never relaxed or edited (PRF-7), so the file is created once, mode 0444, and never overwritten."
+purpose = "From a valid baseline run, writes the limits later runs must meet, once: per step, p99 latency plus 50 ms, and twice the error rate (at least 0.1 %)."
+why = "Thresholds are never loosened or edited, so the file is written once, read-only, and never overwritten."
 files = ["report/thresholds.py"]
 symbols = [
   "report/thresholds.py:freeze",
@@ -681,8 +708,9 @@ symbols = [
 id = "judge.completion"
 in = "judge"
 role = "The completion check"
+job = "checks the saved runs 'done' needs"
 kind = "entry"
-purpose = "Checks the listed scenario runs' saved evidence: valid reports, matched baselines, correctness passed, both failure modes (closed, open), timely refunds; slice-check runs the SPEC and HARNESS tests (HARNESS §8)."
+purpose = "Checks the saved runs that 'done' requires: valid reports, matching baselines, correctness passed, both failure modes run, and refunds on time."
 files = ["report/completion.py"]
 symbols = [
   "report/completion.py:check_manifest",
@@ -697,9 +725,10 @@ symbols = [
 [[card]]
 id = "judge.budget"
 in = "judge"
-role = "Synthetic runs and the budget"
+role = "Synthetic runs and build limits"
+job = "makes fake runs, checks build limits"
 kind = "support"
-purpose = "Writes synthetic run directories in the harness's file shapes for the report tests, and times the builder on a 12-million-line run: at most 300 s and 2 GB."
+purpose = "Makes fake run folders in the harness's file formats for the report tests, and checks the builder handles a 12-million-line run within 300 s and 2 GB."
 files = ["report/synthetic.py", "report/budget.py"]
 symbols = [
   "report/budget.py",
@@ -714,9 +743,10 @@ symbols = [
 id = "checks.trace"
 in = "checks"
 role = "Repository checks (bin/trace)"
+job = "the project's own rule checks"
 kind = "support"
-purpose = "Test-ID and plan-named-test traceability, the import boundary, ACL lists, script lint, suppressions, build tags, test globals, oracle use, the public API, leftover children, and the go test wrapper."
-why = "go test -run X exits 0 when nothing matches X, so Verify commands alone miss a skipped or renamed test; slices checks each named test passed (DESIGN §C7)."
+purpose = "Project rule checks. In make check: imports point one way, scripts follow the Lua rules, no lint is silenced, and more. slice-check also confirms every required test ran and passed."
+why = "go test -run X passes when no test matches X, so a renamed test would go unnoticed. trace checks each named test ran and passed."
 runs = "bin/trace, from make check"
 files = ["tools/trace/"]
 symbols = [
@@ -735,9 +765,10 @@ symbols = [
 id = "checks.mutate"
 in = "checks"
 role = "The mutation tester (bin/mutate)"
+job = "plants bugs to test the tests"
 kind = "support"
-purpose = "Plants 18 curated one-line bugs (DESIGN §C9), or sweeps mutation operators over files, through go test -overlay or a patched Python copy; only an assertion in a named test kills."
-why = "slice-check runs every curated bug whose file exists, so a later slice that weakens an earlier test fails (DESIGN §C9)."
+purpose = "Tests the tests. It plants deliberate bugs, 18 hand-picked ones or automatic sweeps, one at a time, and checks that a test catches each with a failed assertion."
+why = "slice-check replays every hand-picked bug whose file exists, so weakening an old test later makes the gate fail."
 runs = "bin/mutate, from slice-check"
 files = ["tools/mutate/"]
 symbols = [
@@ -756,8 +787,9 @@ symbols = [
 id = "checks.storeproc"
 in = "checks"
 role = "The throwaway store starter"
+job = "starts a private Valkey for each test"
 kind = "support"
-purpose = "Finds the store binary, renders the ACL with fresh passwords, spawns a store on a free loopback port from a deploy/ profile, records its PID, and offers a RESP2 client."
+purpose = "Starts a private Valkey server for one test, on a free local port with fresh passwords, and gives the test a simple client to talk to it."
 files = ["internal/testutil/storeproc/"]
 symbols = [
   "internal/testutil/storeproc/store.go:Start",
@@ -775,9 +807,10 @@ symbols = [
 id = "checks.scriptrun"
 in = "checks"
 role = "The script test runner"
+job = "runs the Lua script tests"
 kind = "support"
-purpose = "Gives each script test an audited fast-profile store and calls scripts through the store adapter, instrumented for the script discipline run when RL_SCRIPT_AUDIT=1, recording each decoded reply (L2)."
-why = "Lua writes are not rolled back when a script fails halfway, so the discipline run fails any read after the first write (AGENTS.md §3)."
+purpose = "Runs the Lua script tests, each on its own Valkey, calling scripts the way the library does. An audit mode also flags any read after a script's first write."
+why = "Valkey does not undo a script that fails halfway, so the audit mode fails any read after the first write."
 files = ["internal/testutil/scriptrun/"]
 symbols = [
   "internal/testutil/scriptrun/scriptrun.go:Store",
@@ -793,8 +826,9 @@ symbols = [
 id = "checks.storestate"
 in = "checks"
 role = "The store auditor"
+job = "audits the store after each test"
 kind = "support"
-purpose = "Snapshots every rl:* key as rl_lib and audits it against the key grammar, check_key, counters, policy limits and canaries; a test declares the keys it damages on purpose."
+purpose = "After a test, reads every limiter key in Valkey and checks it is well-formed and consistent. A test that damages keys on purpose must list them."
 files = ["internal/testutil/storestate/"]
 symbols = [
   "internal/testutil/storestate/storestate.go:Snapshot",
@@ -808,8 +842,9 @@ symbols = [
 id = "checks.fakeresp"
 in = "checks"
 role = "The fake RESP store"
+job = "a pretend Valkey for unit tests"
 kind = "support"
-purpose = "A TCP server on 127.0.0.1 answering AUTH, PING, SCRIPT LOAD and EVALSHA for Go unit tests, with knobs that delay, fail, stall, hold or drop replies, and counters (L1)."
+purpose = "A pretend Valkey for Go unit tests. It answers AUTH, PING, SCRIPT LOAD and EVALSHA, and can be told to delay, fail, stall or drop replies."
 files = ["internal/testutil/fakeresp/"]
 symbols = [
   "internal/testutil/fakeresp/server.go:Start",
@@ -825,9 +860,10 @@ symbols = [
 id = "checks.golden"
 in = "checks"
 role = "The golden-line matcher"
+job = "checks log lines against hand-written examples"
 kind = "support"
-purpose = "Checks written run-log lines against hand-written golden lines: paired lines need the same keys at every level and the same JSON types; other values may differ."
-why = "The Python readers are tested on the same golden files, so a Go writer and its reader cannot drift apart (DESIGN §C5)."
+purpose = "Compares the log lines the code writes with hand-written example lines. Every field and its type must match, though values may differ."
+why = "The Python readers are tested on the same example lines, so the Go writer and the Python reader cannot drift apart."
 files = ["internal/testutil/golden/"]
 symbols = ["internal/testutil/golden/golden.go:Match"]
 
@@ -836,9 +872,10 @@ symbols = ["internal/testutil/golden/golden.go:Match"]
 id = "checks.conformance"
 in = "checks"
 role = "The store conformance suite"
+job = "confirms this Valkey behaves as designed"
 kind = "support"
-purpose = "Re-checks on the pinned Valkey the store behavior the design relies on, like exact integers and no rollback after a script error; measures durable-write costs into .data/conformance.json (L0)."
-why = "It must pass on the pinned Valkey before any slice that runs scripts against the store (DESIGN §C2)."
+purpose = "Confirms this exact Valkey version behaves as the design assumes, for example exact integers and no rollback after a script error. Also measures what durable writes cost."
+why = "It must pass on the pinned Valkey before any slice that runs scripts against the store."
 files = ["internal/testutil/conformance/"]
 symbols = [
   "internal/testutil/conformance/doc.go",
@@ -854,9 +891,10 @@ symbols = [
 id = "checks.testutil"
 in = "checks"
 role = "Leak check and child runs"
+job = "leak check and child-process test runs"
 kind = "support"
-purpose = "VerifyNoLeaks fails a package whose core or store goroutines outlive its tests; InChild reruns a test in a child binary, so a child's crash stays a crash; RLAdminBin finds rladmin."
-why = "goleak is not used: product code takes only the standard library, so the leak check is a few lines here (AGENTS.md §7)."
+purpose = "Small test helpers. One fails a package if limiter goroutines outlive its tests. Another reruns a test in a child process so a crash shows up as a crash."
+why = "The library uses only the standard library, so the leak check is a few lines here instead of the goleak package."
 files = ["internal/testutil/doc.go", "internal/testutil/leak.go", "internal/testutil/child.go", "internal/testutil/rladmin.go"]
 symbols = [
   "internal/testutil/leak.go:VerifyNoLeaks",
@@ -871,7 +909,6 @@ from = "host"
 to = "api"
 label = "Acquire, then Done or Release"
 kind = "call"
-step = 1
 
 [[wire]]
 from = "operator"
@@ -884,7 +921,6 @@ from = "api"
 to = "core.acquire"
 label = "Acquire runs in the core"
 kind = "call"
-step = 2
 
 [[wire]]
 from = "api"
@@ -897,7 +933,7 @@ via = "limiter/limiter.go:New"
 [[wire]]
 from = "api"
 to = "core.permits"
-label = "Done or Release finishes the permit"
+label = "exposes the core's Permit type"
 kind = "call"
 via = "limiter/limiter.go:Permit"
 
@@ -913,14 +949,12 @@ from = "core.acquire"
 to = "store"
 label = "send one acquire script, never run twice"
 kind = "call"
-step = 3
 
 [[wire]]
 from = "store"
 to = "valkey"
 label = "send the script by its hash"
 kind = "call"
-step = 4
 via = "internal/store/pipe.go:pipeConn.write"
 
 [[wire]]
@@ -928,23 +962,20 @@ from = "valkey"
 to = "scripts"
 label = "run it atomically on the store clock"
 kind = "call"
-step = 5
 
 # The store -> scripts import (the loader) is left to the Code links overlay; the NOSCRIPT repair wire tells the loading story (R25).
-# Step 6 keeps one word so its number sits on its own wire at the top level, where "(+1)" is added; story stop 6 and journey 1 step 14 carry the full wording (R25). src: internal/core/acquire.go:168 (Sign after the reply)
+# src: internal/core/acquire.go:168 (Limiter.allowed signs the receipt after the reply)
 [[wire]]
 from = "core.acquire"
 to = "blocks"
-label = "sign"
+label = "sign the receipt"
 kind = "call"
-step = 6
 
 [[wire]]
 from = "core.acquire"
 to = "core.permits"
 label = "issue the permit holding both slots"
 kind = "call"
-step = 7
 via = "internal/core/acquire.go:Limiter.allowed"
 
 # ---- refunds, the watch, cleanup, construction
@@ -959,7 +990,7 @@ via = "internal/core/permit.go:Permit.apply"
 [[wire]]
 from = "core.refunds"
 to = "blocks"
-label = "verify the receipt MAC first"
+label = "check the receipt signature first"
 kind = "call"
 
 [[wire]]
@@ -991,14 +1022,14 @@ kind = "call"
 [[wire]]
 from = "core.watch"
 to = "core.health"
-label = "publish the epoch snapshot"
+label = "share the latest epoch state"
 kind = "write"
 via = "internal/core/epochwatch.go:epochWatch.read"
 
 [[wire]]
 from = "core.cleanup"
 to = "store"
-label = "page due entries, clean, reclaim"
+label = "delete idle keys, reclaim old epochs"
 kind = "call"
 
 [[wire]]
@@ -1011,7 +1042,7 @@ via = "internal/core/close.go:Limiter.Close"
 [[wire]]
 from = "rladmin"
 to = "valkey"
-label = "admin scripts and INFO as rl_admin"
+label = "run admin scripts, read store stats"
 kind = "call"
 via = "cmd/rladmin/store.go:conn.do"
 
@@ -1152,7 +1183,7 @@ kind = "call"
 [[wire]]
 from = "harness.dbclient"
 to = "postgres"
-label = "INSERT ON CONFLICT, then SELECT"
+label = "insert the row, or read it back"
 kind = "write"
 via = "harness/dbclient/dbclient.go:Client.Hit"
 
@@ -1391,7 +1422,7 @@ kind = "call"
 [[wire]]
 from = "checks.trace"
 to = "scripts"
-label = "lint scripts, check ACL lists"
+label = "lint the scripts"
 kind = "read"
 via = "tools/trace/lua.go:checkLua"
 
@@ -1404,73 +1435,173 @@ via = "tools/mutate/curated.go:curatedEntries"
 
 # =============================================================================== journeys
 
-# src: ARCHITECTURE.md §4.1; SPEC.md §0 glossary "Dependency deadline" ("Maximum time the library waits for one store call … default 2 s", CFG-8), API-1 (a later deadline is capped); internal/core/acquire.go decide (1 allowed, 2 limited with RetryAfterNs, 20 config, 21 clock, 22 and 23 integrity, 24 capacity; 20 and 22 trigger the watch); DESIGN.md §A5.3, §A5.4 (one deadline per call, "min(host deadline, start + D) with D = dependency deadline", the connection with the fewest commands in flight, "Sent", NOSCRIPT), §A5.7 ("Rollback check": the floors), §A3.3 (shared_key_malformed), §A4.2, §A4.3, §A4.9, §A5.9; SPEC.md API-22; internal/scripts/acquire.lua lines 12–17 (quarantine flag, check_key, quarantine or hold), 19 (tracked-bucket cap), 29–30 (refill, limited); doc-comments of each step's code
+# src: ARCHITECTURE.md §4.1; SPEC.md §0 glossary "Dependency deadline" ("Maximum time the library waits for one store call … default 2 s", CFG-8), API-1 (a later deadline is capped), API-12a (receipt_error: no permit, the charge stays), API-22; DESIGN.md §A5.3, §A5.4 (one deadline per call, "min(host deadline, start + D) with D = dependency deadline", the connection with the fewest commands in flight, "Sent", NOSCRIPT), §A5.7 ("Rollback check": the floors), §A3.3 (shared_key_malformed), §A4.2, §A4.3, §A4.9, §A5.9; step 1: limiter/limiter.go (Limiter = core.Limiter, a type alias in the public types block); internal/core/health.go readiness (settings_invalid, closing and no_epoch: not_ready; mismatch: config_error; lost and held: state_integrity_error; joined: ready); internal/core/slots.go tryAcquire (false at once when either kind is full: busy, nothing sent); internal/core/acquire.go acquire (validation_error before anything else), send (store.Unavailable: degraded under FailureMode Open, else unavailable), decide (1 allowed, 2 limited with RetryAfterNs, 20 config, 21 clock, 22 and 23 integrity, 24 capacity; 20 and 22 trigger the watch), allowed (a signing error is receipt_error, with no permit); internal/store/adapter.go call (one SCRIPT LOAD and one resend after NOSCRIPT, within the same deadline), pool.go connSet.pick (the ready connection with the lowest load); internal/scripts/prelude.lua enter (lines 271–282: the epoch record, its ID and fingerprint, the per-key KEYS, the floors, the clock; refusals 20, 21, 22, 25, and the store_rollback hold); internal/scripts/acquire.lua lines 12–17 (quarantine flag, check_key, quarantine or hold: step 10), 18–27 (a new key: the tracked-bucket cap at line 19, then a full bucket less one token at line 23), 29–30 (refill, limited with nothing written: step 11), 32–38 (the deduction, the saved bucket, index score and high-water mark, the reply: step 12); internal/store/reply.go Decode (the §A4.9 layout and range checks; a failure leaves outcome_unknown); doc-comments of each step's code; next: SPEC.md §0 glossary "Permit" (done(), or release() for a confirmed failure), internal/core/permit.go Permit.Done (OPEN → DONE keeps the charge)
 [[journey]]
-title = "One allowed Acquire, end to end"
-proves = "One token is deducted atomically in the store, and the host gets a permit holding a signed receipt."
-steps = [
-  ["internal/core/acquire.go:Limiter.Acquire", "The host calls Acquire(ctx, key) on its limiter; ctx's deadline is the host's own, and every result is counted in rl_acquire_results_total."],
-  ["internal/keys/keys.go:Encode", "The key must be 1–256 bytes of UTF-8, else the result is validation_error before anything else; it is encoded base64url for the store's key names."],
-  ["internal/core/health.go:Limiter.readiness", "After the ctx check, one readiness look: invalid settings, closing or no epoch is not_ready, a fingerprint mismatch config_error, a lost or held epoch state_integrity_error."],
-  ["internal/core/slots.go:slots.tryAcquire", "After the signer check, one receipt slot and one refund slot are reserved together without waiting; either full returns busy, and nothing is sent."],
-  ["internal/core/acquire.go:Limiter.send", "The retention clock starts; one acquire call goes to the adapter with the joined epoch's keys, fingerprint and rollback floors: the highest high-water mark and generation the watch read."],
-  ["internal/store/adapter.go:StoreAdapter.Call", "The adapter sends the script on the least-loaded connection, within the host deadline capped at D (dependency deadline, default 2 s); only NOSCRIPT, proof it never ran, gets one resend."],
-  ["internal/store/pipe.go:pipeConn.write", "The command is written at once, pipelined; the writer tracks each command's byte range, so the bytes that left prove whether it was sent."],
-  ["internal/scripts/prelude.lua:enter", "Inside Valkey the prelude loads the epoch record, matches the epoch ID and fingerprint, asserts the key names, checks the rollback floors, then reads the clock once."],
-  ["internal/scripts/acquire.lua:12", "acquire.lua refuses a quarantined key, then check_key reads the bucket and its markers before any write; an inconsistent key is quarantined; a malformed shared key sets the epoch-wide hold."],
-  ["internal/scripts/acquire.lua:19", "A new key needs a free tracked-bucket slot; a known key refills exactly up to the budget time, and under one token the script replies limited, writing nothing."],
-  ["internal/scripts/acquire.lua:32", "Allowed: one token is taken; the bucket, its index due time and the high-water mark are written, and the reply carries generation, sequence and receipt expiry."],
-  ["internal/store/reply.go:Decode", "The connection's reader matches the reply to its FIFO slot; it must fit the acquire layout and every range check, else the call is outcome_unknown."],
-  ["internal/core/acquire.go:Limiter.decide", "The result follows the reply: allowed; limited, with an exact RetryAfterNs; or a config, clock, integrity or capacity refusal; epoch-wide config and integrity refusals ask the watch to read early."],
-  ["internal/receipt/signer.go:HMACSigner.Sign", "The receipt (epoch, key, generation, sequence, issue and expiry times) is signed with HMAC-SHA256 under the instance's own key; a signing error is receipt_error."],
-  ["internal/core/permit.go:newPermit", "Acquire returns Allowed with DecisionNs and an OPEN permit holding the receipt and both slots; its retention timer fires receipt_lifetime after the send."],
-  ["internal/core/permit.go:Permit.Done", "The work succeeds and the host calls Done: OPEN → DONE keeps the charge and frees both slots."],
+id = "acquire"
+title = "One allowed Acquire"
+proves = "Valkey takes exactly one token in one atomic step, and the app gets a permit with a signed receipt."
+main = true
+chapters = [
+  [1, "The app calls Acquire for a key"],
+  [4, "Local checks pass and room is reserved"],
+  [6, "One script call goes to Valkey"],
+  [9, "Valkey refills and takes one token"],
+  [13, "The reply comes back and is checked"],
+  [15, "The library signs a receipt"],
+  [16, "The app gets a permit"],
 ]
+steps = [
+  ["limiter/limiter.go:Limiter", "The app holds a limiter.Limiter, the public type: it is the core's Limiter under another name, so Acquire runs in the core."],
+  ["internal/core/acquire.go:Limiter.Acquire", "The app calls Acquire(ctx, key). The app's own deadline in ctx limits how long it waits, and every result is counted in a metric."],
+  ["internal/keys/keys.go:Encode", "The key must be 1–256 bytes of valid UTF-8. It is then encoded into a safe store key name.",
+   "Any other key fails at once with validation_error, and nothing is sent."],
+  ["internal/core/health.go:Limiter.readiness", "Is this instance ready? It needs valid settings, no shutdown under way, and a joined epoch whose settings match its own.",
+   "Bad settings, shutting down or no epoch: not_ready. Settings unlike the epoch's: config_error. A lost or held epoch: state_integrity_error."],
+  ["internal/core/slots.go:slots.tryAcquire", "It reserves one receipt slot and one refund slot together, without waiting.",
+   "Either kind full: busy, and nothing goes to Valkey."],
+  ["internal/core/acquire.go:Limiter.send", "The receipt-lifetime clock starts. An acquire call goes to the adapter with the epoch's keys, the policy fingerprint, and the highest store time and generation seen, to catch rollbacks.",
+   "Store unreachable: unavailable, or degraded (no charge) if the policy fails open."],
+  ["internal/store/adapter.go:StoreAdapter.Call", "The adapter sends it on the least busy connection, within the app's deadline and the store-call limit (2 s default).",
+   "NOSCRIPT, proof it never ran, gets one reload and resend; nothing else is resent."],
+  ["internal/store/pipe.go:pipeConn.write", "The command is written right away, without waiting for earlier replies. The writer tracks which bytes left, so it knows for sure whether this command was sent."],
+  ["internal/scripts/prelude.lua:enter", "Inside Valkey, the script starts with the prelude's shared checks: load the epoch record, match its ID and fingerprint, check key names and rollbacks, then read the clock once.",
+   "A failed check refuses (config, clock or integrity error); a rollback also puts the epoch on hold."],
+  ["internal/scripts/acquire.lua:12", "The script checks the key is not quarantined (locked), then checks its stored bucket before any write.",
+   "A quarantined key is refused. Damage quarantines the key, or holds the whole epoch if a shared key is damaged."],
+  ["internal/scripts/acquire.lua:29", "A known key is refilled for the time passed; a key seen for the first time starts full and takes its token at once (line 23).",
+   "Under one token: limited, nothing written. A new key past the tracked-key cap: capacity_error."],
+  ["internal/scripts/acquire.lua:32", "For a known key, one token is taken here. The script saves the bucket, its cleanup time and the latest store time, and replies with the generation, sequence and expiry."],
+  ["internal/store/reply.go:Decode", "Back in Go, the reply is decoded: it must have the expected shape for its code, with every value in range.",
+   "Any other reply makes the result outcome_unknown."],
+  ["internal/core/acquire.go:Limiter.decide", "The reply becomes the result. On this path it is allowed, so the receipt is built next.",
+   "Limited gets an exact retry-after time; epoch-wide refusals make the epoch watch re-read early."],
+  ["internal/receipt/signer.go:HMACSigner.Sign", "The receipt says which token was taken and when it expires. It is signed with this instance's secret key (HMAC-SHA256).",
+   "Signing fails: receipt_error, no permit, and the token stays spent."],
+  ["internal/core/permit.go:newPermit", "Acquire returns allowed with an OPEN permit holding the receipt and both slots. If still open when the receipt's lifetime ends, a timer expires it."],
+]
+next = [["Work done: call Done, the token stays spent", ""], ["Work surely failed: call Release", "refund"]]
 
-# src: ARCHITECTURE.md §4.2; DESIGN.md §A5.5, §A5.6 (a backoff timer "re-enqueues the job and never holds a worker"), §A5.7 (the floors), §A4.4, §A5.11; SPEC.md §0 glossary "Dependency deadline" ("Maximum time the library waits for one store call", default 2 s: step 6, refundAttempt's "within D") (R38), API-1d (one final event emitted; a full queue drops it); internal/core/refund.go classifyRefund (final: applied, already_applied, receipt_invalid, receipt_expired; retried: 20 config, 21 clock, 22 and 23 integrity, 24 capacity, 25 a library defect reported as outcome_unknown, plus unavailable, cancelled, outcome_unknown and capacity_error); doc-comments of each step's code
+# src: ARCHITECTURE.md §4.2; DESIGN.md §A5.5, §A5.6 (a backoff timer "re-enqueues the job and never holds a worker"), §A5.7 (the floors), §A4.4, §A5.11; SPEC.md §0 glossary "Dependency deadline" ("Maximum time the library waits for one store call", default 2 s) (R38), API-1d (one final event emitted; a full queue drops it), API-1h; internal/core/permit.go Release (after Close began, OPEN → FINAL unresolved closed; on an EXPIRED permit, unresolved expired; nothing sent), transitions, expire (RELEASED → FINAL unresolved retention; an attempt in flight is cancelled); internal/core/refund.go refundAttempt (Verify first: a bad MAC is final receipt_invalid with no store call; then one Adapter.Call under the epoch the watch joined last, with its floors), refundRequest (Kind: store.Refund), classifyRefund (final: applied, already_applied, receipt_invalid, receipt_expired; retried: 20 config, 21 clock, 22 and 23 integrity, 24 capacity, 25 a library defect reported as outcome_unknown, plus unavailable, cancelled, outcome_unknown and capacity_error), retry and backoffDelay (min(max, initial × 2^n) × U[0.5, 1.0]; 50 ms and 1 s by default in internal/settings/settings.go DefaultInstance, as are the 128 workers and the 2 refund connections); internal/store/adapter.go Call (the Refund connection set, used only by refund workers; deadline start + D); internal/scripts/refund.lua lines 15–16 (another epoch: receipt_invalid; expired: receipt_expired), 17–26 (quarantine, check_key, generation and sequence), 27–29 (the marker: already_applied with the original credit time), 30–31 (marker caps: capacity_error, which classifyRefund retries), 33–35 (refill, a credit of one token capped at capacity, and the marker with the credit time); internal/core/listener.go emit (a full queue drops the event and counts it), deliver (recover); doc-comments of each step's code
 [[journey]]
+id = "refund"
 title = "Refund after a confirmed failure"
-proves = "A confirmed failure is credited at most once, even after a lost reply, and one final event is emitted."
-steps = [
-  ["internal/core/permit.go:Permit.Release", "The host's work failed for sure, so it calls Release, which returns at once; the host can reply to its caller while the refund runs in the background."],
-  ["internal/core/permit.go:lifecycle.fire", "A compare-and-swap moves the permit OPEN → RELEASED; only the caller whose swap won performs the effects, so a permit finishes once."],
-  ["internal/core/refund.go:refunds.enqueue", "The permit becomes pending and joins the ready queue, earliest release first; the queue cannot fill, since its capacity is the refund slot count."],
-  ["internal/core/refund.go:refunds.next", "One of the refund workers (128 by default) takes the earliest job and starts its attempt on a context the retention timer can cancel."],
-  ["internal/receipt/signer.go:HMACSigner.Verify", "The worker checks the receipt's MAC first, in constant time; a mismatch is final receipt_invalid, and nothing goes to the store."],
-  ["internal/core/refund.go:Limiter.refundAttempt", "One refund script goes out on the refund connections within the dependency deadline, under the watch's last joined epoch and its rollback floors: the highest high-water mark and generation read."],
-  ["internal/scripts/refund.lua:15", "In the store, after the prelude, a receipt from another epoch is receipt_invalid and one at or past its expiry receipt_expired; then come the quarantine flag and check_key."],
-  ["internal/scripts/refund.lua:29", "A marker already written for this receipt's generation and sequence replies already_applied with the original credit time, so resending after a lost reply is safe."],
-  ["internal/scripts/refund.lua:35", "Otherwise, within the per-key and live marker caps, it refills, credits up to one token, and writes the marker holding the credit's budget time, indexed and counted."],
-  ["internal/core/refund.go:classifyRefund", "applied, already_applied, receipt_invalid and receipt_expired are final; config, clock, integrity and capacity refusals, unavailable, cancelled and outcome_unknown are retried."],
-  ["internal/core/refund.go:refunds.retry", "A lost reply is outcome_unknown: a backoff timer, 50 ms doubling to 1 s with jitter, puts the job back in the queue with its original release time."],
-  ["internal/core/permit.go:Permit.finish", "A final result moves RELEASED → FINAL: the refund leaves the pending set, both slots are freed, and then exactly one event is emitted."],
-  ["internal/core/refund.go:refunds.emit", "The RefundEvent carries the deduction ID, the result, the refund commands sent and the credit time; it is counted in rl_refund_results_total and queued for the listener."],
-  ["internal/core/listener.go:listener.deliver", "One dispatcher goroutine calls the host's listener inside recover(); an event that finds the queue full is dropped and counted in Health.ListenerDrops."],
-  ["internal/core/permit.go:Permit.expire", "If receipt_lifetime passes first, the retention timer ends the refund as unresolved (retention) and cancels any attempt in flight."],
+proves = "Failed work's token returns at most once, even after a lost reply; the app hears at most one final event."
+chapters = [
+  [1, "The app releases the permit"],
+  [4, "A worker checks the receipt"],
+  [7, "The refund script runs in Valkey"],
+  [11, "Final, or retry later"],
+  [13, "The app may hear how it ended", "core.listener"],
 ]
-loop = [11, 4, "retry until a final result"]
-
-# src: DESIGN.md §B5, §B3 (the flowchart's DB step, "ctx = remaining P", and "the same context bounds the DB work": step 12) (R42), §B4, §B7, §B8, §C5, §A6, §A4.6; HARNESS.md §0 glossary "P" ("The harness's value for the limiter setting max_release_delay": step 11) and HAR-11 ("a per-instance deadline measured from just before acquire, enforced by cancellation") (R39), HTTP-13 ("If P passes during database work, the API cancels it"; "A slow acquire reply therefore shortens the time left for database work": step 12) (R43), §4 (step 1 "Empty the harness DB", step 4 "Start the resource sampler and the generator"), TRF-5, TRF-7 ("isolated data"); cmd/orchestrator/run.go (runner.run: startPostgres then prepareDB; runner.instancesStep: startAPIs then waitReady; startSampler, then startHitgen, with no --interval); cmd/sampler/doc.go, main.go (interval 1 s by default), sampler.go (tick: processes' CPU and RSS, each API's /health and /metrics, rladmin status --json, the store's INFO; one samples.jsonl line) (R26); cmd/hitgen/sender.go (sender.send schedules the retries); harness/httpapi/hit.go Server.serveHit (P is "never cancelled with the request"; s.lim.Acquire(ctx, userID)) and httpapi.go Server.p ("max_release_delay: the deadline from just before acquire") (R39), and P "bounds the DB work too": s.db.Hit runs on the same ctx; harness/dbclient/dbclient.go Client.Hit ("ctx bounds the whole call (hitapi passes its P deadline)") (R42); doc-comments of each step's code
-[[journey]]
-title = "One scenario run through the harness"
-proves = "One scenario's seeded traffic runs through real processes, and its report is built and checked from saved evidence alone."
 steps = [
-  ["cmd/orchestrator/main.go:orchestrate", "make run starts bin/test/orchestrator: preflight checks, the pid file, then runs/<id>/ with the merged config.toml and an ACL file rendered with fresh passwords."],
-  ["cmd/orchestrator/run.go:runner.startStore", "Child process: valkey-server with the durable profile, its data in runs/<id>/store; the orchestrator waits until it answers PING as rl_ops."],
-  ["cmd/orchestrator/run.go:runner.run", "Then PostgreSQL: started with pg_ctl unless it already runs, and the hits table emptied, so each run's data is isolated (HARNESS §4 step 1, TRF-7)."],
-  ["cmd/orchestrator/run.go:runner.startEpoch", "Child process: rladmin start-epoch --policy runs/<id>/config.toml --json as rl_admin; the epoch ID it prints goes into context.json."],
-  ["cmd/rladmin/commands.go:startEpoch", "rladmin draws a new 128-bit epoch ID from crypto/rand and sends admin_start_epoch with the policy's fingerprint, schema 1 and the clock source."],
-  ["internal/scripts/admin_start_epoch.lua:20", "Without --replace the script refuses a readable record; then it writes the new epoch record: ID, fingerprint, schema, clock, empty hold, high-water mark and zero counters."],
-  ["cmd/orchestrator/run.go:runner.instancesStep", "Child processes: hitapi N on 127.0.0.1:8080+N with the run's config and its api-N.jsonl log; the orchestrator polls GET /health until every instance is ready."],
-  ["cmd/sampler/sampler.go:sampler.tick", "Child process: the sampler, started before hitgen, writes one samples.jsonl line every second: each process's CPU and RSS, each API's /health and /metrics, rladmin status and the store's INFO."],
-  ["cmd/hitgen/main.go:run", "Child process: hitgen builds the seeded schedule, writes schedule.jsonl before anything is sent, opens gen.jsonl and logs 'sending', which marks t0."],
-  ["cmd/hitgen/sender.go:sender.send", "Each due entry becomes one GET /hit with X-User-ID and X-Request-ID; a 429 schedules at most two retries with the same IDs, after the hint plus jitter."],
-  ["harness/httpapi/hit.go:Server.serveHit", "After the arrival time, header checks and an in-flight slot, hitapi calls Acquire in-process, keyed by user ID, under P (max_release_delay), a deadline the client cannot cancel."],
-  ["harness/dbclient/dbclient.go:Client.Hit", "Allowed: in the time left in P, SQL INSERT … ON CONFLICT DO NOTHING RETURNING arrival_ns, then SELECT when nothing returned; the outcome class picks done() or release()."],
-  ["harness/runlog/runlog.go:Writer.Enqueue", "The decision, request, release and refund records go to api-N.jsonl, one write(2) per line; a full channel counts a drop, and any drop invalidates the run."],
-  ["cmd/orchestrator/run.go:runner.finishRun", "After hitgen exits: SIGTERM to each hitapi, which drains its refunds; the row count goes to db_rows.json, the sampler stops and context.json is written."],
-  ["report/build.py:build", "Child process python3 -m report: the builder streams the saved run logs line by line into report.json and report.md, with check_bud11's verdict run in-process."],
-  ["report/validate.py:check", "Then report/validate.py re-checks the report against context.json and the pinned scenario; a failure marks it invalid and make run exits 1; a valid baseline then freezes its thresholds."],
+  ["internal/core/permit.go:Permit.Release", "The app's work surely failed, so it calls Release. Release returns at once, and the refund runs in the background while the app answers its caller.",
+   "After Close began, or once the permit expired, nothing is sent and the event says unresolved."],
+  ["internal/core/permit.go:lifecycle.fire", "An atomic compare-and-swap moves the permit OPEN → RELEASED. Only the call that wins the swap acts, so a permit can finish only once."],
+  ["internal/core/refund.go:refunds.enqueue", "The refund job joins a queue, earliest release first. The queue has room for every refund slot, so it never overflows."],
+  ["internal/core/refund.go:refunds.next", "A free worker (of 128 by default) takes the earliest job and starts an attempt. The receipt-lifetime timer can still cancel it."],
+  ["internal/receipt/signer.go:HMACSigner.Verify", "The worker first checks the receipt's signature.",
+   "A bad signature ends the job as receipt_invalid, and nothing is sent to Valkey."],
+  ["internal/core/refund.go:Limiter.refundAttempt", "The worker builds one refund call under the epoch the instance last joined, with the same rollback guards as acquire."],
+  ["internal/store/adapter.go:StoreAdapter.Call", "The refund call goes out on the separate refund connections, within the store-call limit."],
+  ["internal/scripts/refund.lua:15", "In Valkey, after the prelude, the receipt must be from this epoch and not expired. Then come the quarantine, bucket and generation checks.",
+   "Another epoch's receipt: receipt_invalid. An expired one: receipt_expired."],
+  ["internal/scripts/refund.lua:29", "It looks for this receipt's marker, so a refund never counts twice.",
+   "Marker found: already_applied, so a resend is safe."],
+  ["internal/scripts/refund.lua:35", "The token is credited here: the bucket is refilled, one token goes back (capped at capacity), and a marker records when.",
+   "Marker limits reached: capacity_error, retried later."],
+  ["internal/core/refund.go:classifyRefund", "Applied, already applied, invalid and expired are final answers. Everything else, such as refusals, an unreachable store or an unknown outcome, is retried."],
+  ["internal/core/refund.go:refunds.retry", "If the result is not final: a backoff timer (50 ms, doubling up to 1 s, with jitter) puts the job back in the queue at its original place."],
+  ["internal/core/permit.go:Permit.finish", "Once a result is final: the permit moves RELEASED → FINAL, both slots are freed, and exactly one event follows.",
+   "If the receipt's lifetime runs out first, Permit.expire ends it as unresolved."],
+  ["internal/core/refund.go:refunds.emit", "The RefundEvent says which deduction it was, how the refund ended, how many commands were sent and when the credit happened. It is counted and queued for the listener."],
+  ["internal/core/listener.go:listener.deliver", "One goroutine calls the app's listener, catching any panic.",
+   "If the queue is full, the event is dropped and counted in Health.ListenerDrops."],
+]
+loop = [12, 4, "retry until a final result"]
+
+# src: ARCHITECTURE.md §4.4 ("Only the admin tool creates an epoch. Instances only join"; "a replacement epoch with a matching fingerprint is joined automatically"); SPEC.md ADM-1, CFG-6; DESIGN.md §A4.6, §A5.7, §A6; cmd/rladmin/main.go parse (lines 174–178: start-epoch takes --policy, required, and --replace with --expect-epoch), run (the policy is loaded before dial; an invalid one fails with exitRefused); cmd/rladmin/commands.go exitRefused = 2, newEpochID (16 bytes from crypto/rand, in hex), startEpoch (admin_start_epoch with the new ID and the policy's fingerprint); cmd/rladmin/policy.go decodePolicy (the [policy] table decoded onto limiter.DefaultPolicy(), a key not exactly a §B2 name refused, settings.ValidatePolicy, then fingerprint.Of); internal/fingerprint/fingerprint.go Of (SHA-256 of the sorted setting lines); internal/scripts/admin_start_epoch.lua lines 8–16 (a readable record refused without the replace flag; with it, the expected epoch's record needed), 20–46 (the new record written); internal/core/epochwatch.go run (a read at once, then every EpochRereadIntervalNs, 1 s by default in internal/settings/settings.go DefaultInstance), next (the integrity rows first; a different fingerprint gives mismatch, line 168; a matching record is joined, lines 171–183); internal/core/health.go readiness (wsJoined: ready; wsNoEpoch: not_ready, no_epoch; wsMismatch: config_error); next: the acquire journey's step 4
+[[journey]]
+id = "start-epoch"
+title = "Start an epoch"
+proves = "Only the admin tool starts an epoch; each instance joins it on its own once its settings match."
+chapters = [
+  [1, "The operator starts an epoch"],
+  [5, "Each instance joins it"],
+]
+steps = [
+  ["cmd/rladmin/main.go:174", "The operator runs rladmin start-epoch with a policy file."],
+  ["cmd/rladmin/policy.go:decodePolicy", "rladmin reads the file's [policy] table over the defaults, refuses unknown keys, validates the values, and hashes the settings into the policy's fingerprint.",
+   "An invalid policy stops rladmin (exit 2) before it connects."],
+  ["cmd/rladmin/commands.go:startEpoch", "It draws a random 128-bit epoch ID and sends the start-epoch script with the policy's fingerprint."],
+  ["internal/scripts/admin_start_epoch.lua:20", "Without --replace, the script refuses if a readable epoch record exists; otherwise it writes the new record."],
+  ["internal/core/epochwatch.go:epochWatch.run", "Each app instance's epoch watch reads the record every second, on its own."],
+  ["internal/core/epochwatch.go:epochWatch.next", "A record whose fingerprint matches the instance's settings is joined.",
+   "A different fingerprint: mismatch, and calls get config_error."],
+  ["internal/core/health.go:Limiter.readiness", "With the epoch joined, the instance is ready, and Acquire stops answering not_ready."],
+]
+next = [["Instances are ready: follow one Acquire", "acquire"]]
+
+# src: ARCHITECTURE.md §4.3, §3 (the store "grows with active keys and recent refunds"); SPEC.md STA-3, STA-4, STA-5 (every cleanup interval, default 5 s), STA-10, API-1f, ADM-1 (reclamation); DESIGN.md §A4.5, §A4.7, §A5.8; internal/core/cleanup.go runCleanup (a pass every cleanup_interval × U[0.9, 1.0]; 5 s by default in internal/settings/settings.go DefaultPolicy), runPass (readiness looked at before the pass lock: a not-ready instance returns at once, nothing sent; passes of one instance run one at a time), pass (due_entries with cutoff 0, its T0 kept as the cutoff; the next page only after the page completes, until a page is empty; reclaim after a complete pass, and only then; epochWideStop), duePage, steps (30 removed, 31 moved, 32 quarantined, 33 skipped; the first response that is no confirmed step stops the pass); internal/scripts/due_entries.lua line 16 (the ix members scored up to min(T0, cutoff), at most limit, in score order); internal/store/maint.go CleanupEntries (one cleanup_entry per member, in pipelines of at most 100) and the file's header (every command on the maintenance connection, so acquires never queue behind them); internal/scripts/cleanup_entry.lua lines 52–53 (entry gone or not yet due: skipped, nothing written), 58–61 (a quarantined key's entry moved past the pass), 64–68 (a damaged key quarantined, its entry moved), 71–77 (a bucket refilled to full, with x ≤ t and no unexpired marker: deleted with its markers and its entry), 79–89 (the expired markers removed, the entry re-scored later); internal/core/reclaim.go reclaim (after every completed pass, and only then: at most 10 SCAN calls, the keys outside the joined epoch's namespace sent to reclaim.lua); internal/scripts/reclaim.lua (unlinks only keys whose rl:e:<id>: prefix is not the current epoch's). Chapter 3 names the scripts box: the box rule's tie would give the store adapter, which only sends the steps
+[[journey]]
+id = "cleanup"
+title = "One cleanup pass"
+proves = "Idle full buckets and expired markers leave the store, and old epochs' keys are reclaimed after complete passes."
+chapters = [
+  [1, "A timer starts a pass"],
+  [3, "Find what is due"],
+  [5, "Clean each entry", "scripts"],
+  [8, "Reclaim old-epoch keys"],
+]
+steps = [
+  ["internal/core/cleanup.go:Limiter.runCleanup", "Every cleanup interval (5 s by default, with jitter), a timer starts one pass."],
+  ["internal/core/cleanup.go:Limiter.runPass", "A pass runs only on a ready instance, one at a time.",
+   "Not ready: it stops at once and sends nothing."],
+  ["internal/core/cleanup.go:Limiter.duePage", "It reads one page of due index entries; the first page's time becomes the pass's cutoff."],
+  ["internal/scripts/due_entries.lua:16", "In Valkey, the script returns the keys whose cleanup time has come."],
+  ["internal/store/maint.go:CleanupEntries", "The adapter sends the cleanup script for every entry on the page, pipelined on its maintenance connection."],
+  ["internal/scripts/cleanup_entry.lua:71", "It deletes a bucket refilled to full whose receipts and markers have all expired, else just its expired markers; an entry not yet due is skipped.",
+   "A quarantined key's entry only moves past this pass; a damaged key is quarantined and its entry moved."],
+  ["internal/core/cleanup.go:Limiter.steps", "Back in Go, each reply is counted: removed, moved, quarantined or skipped.",
+   "A failed call stops the pass; an epoch-wide refusal asks the watch to read early."],
+  ["internal/core/reclaim.go:Limiter.reclaim", "After a complete pass, and only then, keys left over from older epochs are removed."],
+]
+loop = [7, 3, "next page, until a page comes back empty"]
+
+# src: DESIGN.md §B5, §B3 (the flowchart's DB step, "ctx = remaining P", and "the same context bounds the DB work": step 12) (R42), §B4, §B7, §B8, §C5, §A6, §A4.6; HARNESS.md §0 glossary "P" ("The harness's value for the limiter setting max_release_delay": step 11) and HAR-11 ("a per-instance deadline measured from just before acquire, enforced by cancellation") (R39), HTTP-13 ("If P passes during database work, the API cancels it"; "A slow acquire reply therefore shortens the time left for database work": step 12) (R43), §4 (step 1 "Empty the harness DB", step 4 "Start the resource sampler and the generator"), TRF-5, TRF-7 ("isolated data"), HAR-13 (a drop invalidates the run); cmd/orchestrator/main.go orchestrate (preflight refusals return exitRefused, 2, before the pid file and the run directory); cmd/orchestrator/run.go (runner.run: startPostgres then prepareDB; runner.instancesStep: startAPIs then waitReady; startSampler, then startHitgen, with no --interval; report: a report validate.py does not pass is marked invalid and the run fails, exitFailure, 1); internal/scripts/admin_start_epoch.lua lines 14–15 (epoch_exists without the replace flag), 20–46 (the record written); cmd/sampler/doc.go, main.go (interval 1 s by default), sampler.go (tick: processes' CPU and RSS, each API's /health and /metrics, rladmin status --json, the store's INFO; one samples.jsonl line) (R26); cmd/hitgen/sender.go (sender.send schedules the retries after a 429, at most retries.MaxExtra, which harness/config/scenario.go caps at 2, with the same IDs, after the hint plus the seeded jitter); harness/httpapi/hit.go Server.serveHit (P is "never cancelled with the request"; s.lim.Acquire(ctx, userID); limited is answered by writeLimited, 429 with Retry-After and retry_after_ms, and every other refusal by writeError, all before the database step) and httpapi.go Server.p ("max_release_delay: the deadline from just before acquire") (R39), and P "bounds the DB work too": s.db.Hit runs on the same ctx; harness/dbclient/dbclient.go Client.Hit ("ctx bounds the whole call (hitapi passes its P deadline)") (R42); harness/runlog/runlog.go Writer.Enqueue (a full channel drops the line and counts it); doc-comments of each step's code. Chapter 2 names the rladmin box: the box rule's three-way tie would give the orchestrator, which only runs rladmin
+[[journey]]
+id = "scenario"
+title = "One scenario run through the harness"
+proves = "A scenario's repeatable traffic runs through real processes, and its report is built and checked from saved logs only."
+chapters = [
+  [1, "Set up the run"],
+  [4, "Start the epoch", "rladmin"],
+  [7, "Start the apps and sampler"],
+  [9, "Send the traffic"],
+  [14, "Stop and build the report"],
+]
+steps = [
+  ["cmd/orchestrator/main.go:orchestrate", "make run starts the orchestrator. After preflight checks it creates runs/<id>/, holding the merged config and an access-control file with fresh passwords.",
+   "A failed preflight check refuses the run (exit 2) before anything starts."],
+  ["cmd/orchestrator/run.go:runner.startStore", "It starts a fresh Valkey server, set up to save every write to disk, with its data in the run folder, and waits until it answers."],
+  ["cmd/orchestrator/run.go:runner.run", "Then PostgreSQL: started unless already running, and its hits table emptied, so each run starts clean."],
+  ["cmd/orchestrator/run.go:runner.startEpoch", "It runs rladmin start-epoch with the run's policy. The new epoch ID that rladmin prints is saved in context.json."],
+  ["cmd/rladmin/commands.go:startEpoch", "rladmin picks a random 128-bit epoch ID and sends the start-epoch script with the policy's fingerprint, the data layout version and the clock source."],
+  ["internal/scripts/admin_start_epoch.lua:20", "The script writes the new epoch record: ID, fingerprint, layout, clock, no hold, a starting time and zero counters.",
+   "Without --replace, the script refuses if a readable epoch record exists."],
+  ["cmd/orchestrator/run.go:runner.instancesStep", "It starts the hitapi apps, number N on port 8080+N, each with its own log and the run's config (or a per-app override), and polls /health until all are ready."],
+  ["cmd/sampler/sampler.go:sampler.tick", "It starts the sampler before the traffic. Every second the sampler logs each process's CPU and memory, each app's health and metrics, and the store's stats."],
+  ["cmd/hitgen/main.go:run", "Then hitgen: it plans the whole schedule from a seed and saves it before sending anything. Its 'sending' log line marks time zero."],
+  ["cmd/hitgen/sender.go:sender.send", "Each planned request becomes a GET /hit with a user ID and request ID.",
+   "A 429 gets at most two retries, same IDs, after the suggested wait plus jitter."],
+  ["harness/httpapi/hit.go:Server.hit", "hitapi notes the arrival time, checks headers and takes an in-flight slot, then calls Acquire keyed by user ID, under a deadline the client cannot cancel.",
+   "Limited answers 429 with a retry hint; any other refusal gets an error, and no row is written."],
+  ["harness/dbclient/dbclient.go:Client.Hit", "If allowed, it inserts the row within the time left, reading the existing one if the insert added nothing. What it learns about the row picks Done or Release."],
+  ["harness/runlog/runlog.go:Writer.Enqueue", "Its decision, request, release and refund records go to api-N.jsonl, one system call per line.",
+   "A full queue counts a drop, and any drop invalidates the run."],
+  ["cmd/orchestrator/run.go:runner.finishRun", "When hitgen finishes, each hitapi is told to stop (SIGTERM) and drains its refunds. The row count is saved, the sampler stops, and context.json is written."],
+  ["report/build.py:build", "The Python report builder reads the saved logs line by line into report.json and report.md, including the per-window budget check's verdict."],
+  ["report/validate.py:check", "Then the validator re-checks the report against the run's context and scenario. A valid baseline then freezes its thresholds.",
+   "A failure marks the report invalid, and make run exits 1."],
 ]
 
 # =============================================================================== lifecycles
@@ -1490,6 +1621,11 @@ transitions = [
   ["EXPIRED", "DONE", "done(), silent", "internal/core/permit.go:Permit.Done"],
   ["EXPIRED", "FINAL", "release(): unresolved expired, nothing sent", "internal/core/permit.go:Permit.Release"],
   ["DEGRADED", "DEGRADED", "done() or release() does nothing", "internal/core/permit.go:Permit"],
+]
+# src: internal/core/permit.go newPermit ("returns an OPEN permit"), newDegradedPermit ("a DEGRADED permit: no receipt, no slots"); internal/core/acquire.go:92 (store unreachable under the fail-open policy: Degraded with newDegradedPermit)
+start = [
+  ["OPEN", "Acquire allowed", "internal/core/permit.go:newPermit"],
+  ["DEGRADED", "store down, policy fails open", "internal/core/permit.go:newDegradedPermit"],
 ]
 
 # src: internal/core/epochwatch.go (watchState, epochWatch.next: before a join only a missing record keeps no_epoch; a held record gives held; from any state, a record missing after joining, a malformed record and a missing or malformed high-water mark give lost, lines 147–160 (R28); from any state, once the rollback checks pass (lines 162–167), a well-formed record whose fingerprint differs gives mismatch, line 168, so only a matching epoch is joined, lines 171–183 (R37)); DESIGN.md §A5.7 (each row is keyed by the read and what the instance remembers (whether it ever joined, its floors, the epochs it left), not by the state before (R41); integrity rows before the fingerprint row; the lost row: "missing after joining, epoch_record_malformed, hwm_missing, hwm_malformed"; "state 0, fingerprint differs": mismatch); ARCHITECTURE.md §4.4 ("a replacement epoch with a matching fingerprint is joined automatically"; "a restarted instance reports … state_lost for a malformed record, integrity_hold under a hold") and operator procedures ("Change the policy": new-settings instances wait in fingerprint_mismatch)
@@ -1513,3 +1649,55 @@ transitions = [
   ["lost", "joined", "operator starts a matching new epoch", "internal/core/epochwatch.go:epochWatch.next"],
   ["held", "joined", "operator replaces it with a matching epoch", "internal/core/epochwatch.go:epochWatch.next"],
 ]
+# src: internal/core/epochwatch.go watchState (wsNoEpoch is the zero value: "nothing read yet")
+start = [["no_epoch", "instance starts"]]
+
+# =============================================================================== words to know
+
+# src: SPEC.md BUD-2 (token bucket with continuous refill), BUD-3 (10 tokens per 1 s by default), BUD-4 (capacity 20), BUD-5 (1 token per normal allow); internal/settings/settings.go DefaultPolicy; the refill and the take live in the scripts (prelude.lua refill, acquire.lua)
+[[term]]
+name = "token bucket"
+meaning = "Each key's budget: up to 20 tokens by default, refilled at 10 per second. Each allowed call takes one."
+card = "scripts"
+
+# src: SPEC.md §0 glossary "Permit" ("What acquire returns on an allow. The host finishes it with release() (confirmed failure) or done() (anything else)")
+[[term]]
+name = "permit"
+meaning = "What an allowed Acquire returns. The app ends it with Done, or with Release if the work surely failed."
+card = "core.permits"
+
+# src: internal/core/slots.go tryAcquire ("reserves one receipt slot and one refund slot, or neither ... when either kind is full (busy)"), newSlots (maxReceipts, maxRefunds)
+[[term]]
+name = "slot"
+meaning = "An allowed permit reserves one receipt slot and one refund slot from its instance's fixed supply; none free means busy."
+card = "core.permits"
+
+# src: SPEC.md §0 glossary "Receipt" ("A signed, expiring proof of one deduction. Held and verified only by the issuing library instance (inside a permit)"); internal/receipt/signer.go HMACSigner
+[[term]]
+name = "receipt"
+meaning = "A signed, expiring proof of one token taken, held in its permit. Only the signing instance can verify it."
+card = "blocks"
+
+# src: ARCHITECTURE.md §2 (the refund worker "retries until final"); SPEC.md §0 glossary "Refund marker" ("this deduction was refunded"); internal/core/refund.go (the workers send the refund script and retry until a final result); internal/scripts/refund.lua lines 27–29 (a marker found: already_applied)
+[[term]]
+name = "refund"
+meaning = "After Release, workers ask Valkey to give the token back, retrying until a final answer. A marker stops double counting."
+card = "core.refunds"
+
+# src: SPEC.md §0 glossary "Epoch" ("One lifetime of the limiter's shared state, with one fixed policy"), ADM-1; ARCHITECTURE.md §4.4 ("Only the admin tool creates an epoch. Instances only join"); internal/core/epochwatch.go next (a record whose fingerprint matches is joined)
+[[term]]
+name = "epoch"
+meaning = "One lifetime of the shared state under one policy. Only rladmin starts one; instances with matching settings join it."
+card = "core.watch"
+
+# src: internal/fingerprint/fingerprint.go Of (the policy settings' hash); internal/core/epochwatch.go epochWatch.next (a record whose fingerprint differs gives mismatch, so only a matching epoch is joined)
+[[term]]
+name = "fingerprint"
+meaning = "A hash of the policy settings. An instance joins an epoch only when its own fingerprint matches the epoch's."
+card = "core.watch"
+
+# src: SPEC.md §0 glossary "Quarantine", STA-10 (a flag written when per-key state loss is found; the key resumes only after an operator's restore and clear, ADM-2 and ADM-3, or a new epoch); internal/scripts/acquire.lua line 14 (a quarantined key is refused); cmd/rladmin/commands.go restoreKey, clearKey
+[[term]]
+name = "quarantine"
+meaning = "A flag locking a key whose stored data looks damaged. Calls on it are refused until the operator repairs it."
+card = "rladmin"
