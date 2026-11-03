@@ -427,6 +427,77 @@ const (
 	rewriteCannotExcerpt = "Can't execute an AOF background rewriting"
 )
 
+// TestRun_StoreProfiles (SPEC STA-16, STA-16a; docs/operator-guide.md "Store profiles"): the
+// default and --store-profile durable start valkey-server from PATH with
+// deploy/valkey-durable.conf; everysec and buffered start it with their own profile files; barrier
+// starts the patched program at .data/valkey-barrier/valkey-server with
+// deploy/valkey-barrier.conf, and a site without that program fails prepare, naming the build
+// script. context.json records the profile.
+func TestRun_StoreProfiles(t *testing.T) {
+	for _, c := range []struct{ flag, want, conf string }{
+		{"", "durable", "deploy/valkey-durable.conf"},
+		{"durable", "durable", "deploy/valkey-durable.conf"},
+		{"everysec", "everysec", "deploy/valkey-everysec.conf"},
+		{"buffered", "buffered", "deploy/valkey-buffered.conf"},
+	} {
+		r, _ := testRunner(t, scenario("test", "", ""), flags{storeProfile: c.flag})
+		conf, err := filepath.Abs(r.s.path(c.conf))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := r.storeArgs()[0]; got != conf {
+			t.Errorf("--store-profile %q: the store's config file %s, want %s", c.flag, got, conf)
+		}
+		if r.rec.StoreProfile != c.want {
+			t.Errorf("--store-profile %q: context store_profile %q, want %q", c.flag, r.rec.StoreProfile, c.want)
+		}
+		if filepath.Base(r.rec.Versions.ValkeyPath) != "valkey-server" || strings.Contains(r.rec.Versions.ValkeyPath, ".data") {
+			t.Errorf("--store-profile %q: store program %s, want valkey-server from PATH", c.flag, r.rec.Versions.ValkeyPath)
+		}
+	}
+
+	s := runTestSite(t)
+	fl := flags{storeProfile: "barrier", scenario: filepath.Join(t.TempDir(), "scenario.toml")}
+	writeFile(t, fl.scenario, scenario("test", "", ""), 0o600)
+	in, refs := preflight(t.Context(), s, fl)
+	if len(refs) > 0 {
+		t.Fatalf("preflight refused the run: %+v", refs)
+	}
+	rd, err := createRunDir(s, in, testNow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	envs, err := rd.pw.envs([]string{"PATH=/usr/bin:/bin"}, in.settings.Store.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	missing := newRunner(slog.New(slog.DiscardHandler), s, in, rd, envs, newHTTPClient(), time.Now)
+	if err := missing.prepare(); err == nil || !strings.Contains(err.Error(), "deploy/build-valkey-barrier.sh") {
+		t.Errorf("barrier profile without the patched program: prepare error %v, want one naming deploy/build-valkey-barrier.sh", err)
+	}
+
+	s = runTestSite(t) // a fresh site: one run directory per site and test clock
+	writeFile(t, s.path(".data/valkey-barrier/valkey-server"), "#!/bin/sh\n", 0o700)
+	r, _ := testRunnerIn(t, s, scenario("test", "", ""), flags{storeProfile: "barrier"})
+	prog, err := filepath.Abs(s.path(".data/valkey-barrier/valkey-server"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conf, err := filepath.Abs(s.path("deploy/valkey-barrier.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.rec.Versions.ValkeyPath != prog || r.storeSpec().path != prog {
+		t.Errorf("barrier profile: store program %s (child %s), want %s", r.rec.Versions.ValkeyPath, r.storeSpec().path, prog)
+	}
+	if got := r.storeArgs()[0]; got != conf {
+		t.Errorf("barrier profile: the store's config file %s, want %s", got, conf)
+	}
+	if r.rec.StoreProfile != "barrier" {
+		t.Errorf("barrier profile: context store_profile %q, want barrier", r.rec.StoreProfile)
+	}
+}
+
 // TestRun_StoreArgs (plan H3 step 3; DESIGN §A2, §B5 "Forced rewrites"): without
 // forced_aof_rewrites_s the store starts with the durable profile, the run's port, store
 // directory and ACL file, and --auto-aof-rewrite-percentage 0, and no rewrite is scheduled;

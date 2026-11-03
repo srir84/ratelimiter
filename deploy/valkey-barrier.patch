@@ -1,0 +1,18 @@
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -1368,7 +1368,15 @@
+         /* Let's try to get this data on the disk. To guarantee data safe when
+          * the AOF fsync policy is 'always', we should exit if failed to fsync
+          * AOF (see comment next to the exit(1) after write error above). */
++#ifdef __APPLE__
++        /* ratelimiter barrier profile: F_BARRIERFSYNC orders this write before every later
++         * one on the drive without waiting for the drive cache to empty (F_FULLFSYNC). A
++         * process or OS crash loses nothing; a power cut can lose the last few writes, never
++         * reorder them. Every other sync (AOF rewrite, RDB, ACL file) keeps F_FULLFSYNC. */
++        if (fcntl(server.aof_fd, F_BARRIERFSYNC) == -1) {
++#else
+         if (valkey_fsync(server.aof_fd) == -1) {
++#endif
+             serverLog(LL_WARNING,
+                       "Can't persist AOF for fsync error when the "
+                       "AOF fsync policy is 'always': %s. Exiting...",

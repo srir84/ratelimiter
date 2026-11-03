@@ -114,6 +114,7 @@ type inputs struct {
 	binDir          string         // hitapi and rladmin
 	testBinDir      string         // hitgen and the sampler: always bin/test (§B1)
 	instanceConfigs map[int]string // --instance-config: instance number → its config file (test runs)
+	storeProfile    string         // --store-profile; "" is durable (storeProfileFiles)
 	thresholds      string         // the frozen thresholds file the run copies; "" when it copies none
 	storePort       int            // the store's port
 	apiPorts        []int          // instance n listens on apiPorts[n-1]
@@ -136,6 +137,7 @@ func preflight(ctx context.Context, s site, fl flags) (inputs, []refusal) {
 		binDir:          fl.binDir,
 		testBinDir:      s.path(binDirName + "/" + config.RunTest),
 		instanceConfigs: fl.instanceConfigs,
+		storeProfile:    fl.storeProfile,
 		storePort:       s.storePort,
 	}
 	if in.binDir == "" {

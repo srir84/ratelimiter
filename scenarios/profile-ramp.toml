@@ -1,0 +1,51 @@
+# profile-ramp (docs/operator-guide.md "Store profiles"; README "Store profiles"): the s1-ramp steps
+# with no early stop, used to compare the store profiles (orchestrator --store-profile). Three
+# instances, 10,000 users drawn by Zipf 1.1, 100 req/s doubling every 30 s up to 6,400, then 10,000.
+# Plan choices, each with its reason:
+# - run_kind test, verdict none: the comparison measures latency and throughput per profile and
+#   judges nothing, so it needs no frozen thresholds or baseline; every profile runs the same
+#   bin/test build, so the profiles differ only in the store's flush.
+# - stop_early off: every step runs, so each profile is measured up to 10,000 req/s.
+# - The policy is harness.toml's (10 tokens/s, capacity 20 per user). No [[faults]] and no forced
+#   rewrites (auto-aof-rewrite-percentage 0, runlog.StoreArgs).
+name = "profile-ramp"
+seed = 1
+run_kind = "test"
+instances = 3
+verdict = "none"
+stop_early = false
+[[steps]]
+rate_per_s = 100
+duration_s = 30
+
+[[steps]]
+rate_per_s = 200
+duration_s = 30
+
+[[steps]]
+rate_per_s = 400
+duration_s = 30
+
+[[steps]]
+rate_per_s = 800
+duration_s = 30
+
+[[steps]]
+rate_per_s = 1600
+duration_s = 30
+
+[[steps]]
+rate_per_s = 3200
+duration_s = 30
+
+[[steps]]
+rate_per_s = 6400
+duration_s = 30
+
+[[steps]]
+rate_per_s = 10000
+duration_s = 30
+
+[users]
+count = 10000
+zipf_s = 1.1

@@ -3,12 +3,14 @@
 // pid file (pidfile.go), creates the run directory with the merged config and the rendered ACL
 // file (rundir.go), then runs the §B5 sequence (run.go).
 //
-//	orchestrator --scenario FILE [--baseline] [--instance-config N=FILE]… [--bin-dir DIR]
+//	orchestrator --scenario FILE [--baseline] [--instance-config N=FILE]… [--bin-dir DIR] [--store-profile NAME]
 //
 // --baseline runs with the limiter off ([api] limiter_enabled = false, HAR-17).
 // --instance-config gives instance N its own config file in place of the run's config.toml
 // (test runs only, T-HAR-1). --bin-dir is the directory hitapi and rladmin run from (default
-// bin/<run_kind>); hitgen and the sampler always run from bin/test (§B1). It runs in the
+// bin/<run_kind>); hitgen and the sampler always run from bin/test (§B1). --store-profile picks
+// the store profile: durable (default), everysec, barrier or buffered (SPEC STA-16, STA-16a;
+// DESIGN §D2 decision 1); context.json records it as store_profile. It runs in the
 // repository root, where it finds harness.toml, bin/, deploy/, runs/ and .data/.
 //
 // Exit codes (plan choice): 0 after a finished run; 1 a failure once the run has begun, or a

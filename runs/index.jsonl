@@ -25,3 +25,11 @@
 {"scenario":"s6-capacity-open","baseline":false,"run_id":"20261013-172117-s6-capacity-open-1"}
 {"scenario":"s6-state-closed","baseline":false,"run_id":"20261013-172335-s6-state-closed-1"}
 {"scenario":"s6-state-open","baseline":false,"run_id":"20261013-172537-s6-state-open-1"}
+{"scenario":"profile-s2-users-1000","baseline":false,"run_id":"20261103-222009-profile-s2-users-1000-1"}
+{"scenario":"profile-ramp","baseline":false,"run_id":"20261103-222345-profile-ramp-1"}
+{"scenario":"profile-s2-users-1000","baseline":false,"run_id":"20261103-222822-profile-s2-users-1000-1"}
+{"scenario":"profile-ramp","baseline":false,"run_id":"20261103-223157-profile-ramp-1"}
+{"scenario":"profile-s2-users-1000","baseline":false,"run_id":"20261103-223635-profile-s2-users-1000-1"}
+{"scenario":"profile-ramp","baseline":false,"run_id":"20261103-224010-profile-ramp-1"}
+{"scenario":"profile-s2-users-1000","baseline":false,"run_id":"20261103-224448-profile-s2-users-1000-1"}
+{"scenario":"profile-ramp","baseline":false,"run_id":"20261103-224824-profile-ramp-1"}

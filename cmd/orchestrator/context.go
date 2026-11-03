@@ -72,6 +72,7 @@ type runContext struct {
 	Hardware          *hardwareInfo      `json:"hardware"`
 	OS                map[string]string  `json:"os"`
 	Versions          versionsInfo       `json:"versions"`
+	StoreProfile      string             `json:"store_profile"`
 	StoreSettings     map[string]string  `json:"store_settings"`
 	PostgresSettings  map[string]string  `json:"postgres_settings"`
 	Conformance       json.RawMessage    `json:"conformance"`

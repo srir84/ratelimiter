@@ -1,0 +1,2101 @@
+{
+  "run_id": "20261103-223157-profile-ramp-1",
+  "context": {
+    "run_id": "20261103-223157-profile-ramp-1",
+    "epoch_id": "c7faf868970d081f77d306586781b420",
+    "run_kind": "test",
+    "run_label": "test-build scenario, not a benchmark",
+    "baseline": false,
+    "outcome": "ok",
+    "start_ns": 1793745117663280000,
+    "end_ns": 1793745360411036000,
+    "scenario": {
+      "name": "profile-ramp",
+      "path": "scenarios/profile-ramp.toml",
+      "sha256": "00e97f352c832db5120d0e4684d6ae50be3545852c387caa83d5dab354452297"
+    },
+    "seed": 1,
+    "instances": 3,
+    "hardware": {
+      "model": "Mac15,9",
+      "ncpu": 16,
+      "memsize_bytes": 137438953472
+    },
+    "os": {
+      "BuildVersion": "26A434",
+      "ProductName": "macOS",
+      "ProductVersion": "27.0.1"
+    },
+    "versions": {
+      "go": "go1.27.1",
+      "valkey": "Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=1af85cd1d1bb3237",
+      "valkey_path": "/opt/homebrew/bin/valkey-server",
+      "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
+    },
+    "store_profile": "everysec",
+    "store_settings": {
+      "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261103-223157-profile-ramp-1/store/acl.conf",
+      "aof-use-rdb-preamble": "yes",
+      "appendfsync": "everysec",
+      "appendonly": "yes",
+      "auto-aof-rewrite-min-size": "1073741824",
+      "auto-aof-rewrite-percentage": "0",
+      "bind": "127.0.0.1",
+      "maxclients": "4096",
+      "maxmemory": "536870912",
+      "maxmemory-policy": "noeviction",
+      "no-appendfsync-on-rewrite": "no",
+      "port": "6390",
+      "protected-mode": "yes",
+      "save": ""
+    },
+    "postgres_settings": {
+      "fsync": "on",
+      "max_connections": "300",
+      "statement_timeout": "2500ms",
+      "synchronous_commit": "on"
+    },
+    "conformance": {
+      "crash": [
+        {
+          "acked": 4716,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 17
+        },
+        {
+          "acked": 4982,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 14
+        },
+        {
+          "acked": 3279,
+          "lost": 0,
+          "in_flight": 32,
+          "kept_unacked": 11
+        }
+      ],
+      "eligible": true,
+      "fsync": {
+        "durable_script_p50_us": 6460.5,
+        "f_fullfsync_floor_p50_us": 5667.9,
+        "plain_fsync_p50_us": 41.6
+      },
+      "generated_at": "2026-10-05T16:54:35Z",
+      "go": "go1.27.1",
+      "os": "darwin/arm64",
+      "passed": true,
+      "product": "Valkey",
+      "recommended_store_conns": 16,
+      "reload_ms_a7": 468.7,
+      "row13": [
+        {
+          "conns": 2,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 161.7,
+          "p50_us": 12789.1,
+          "p99_us": 16013.8,
+          "ops": 485
+        },
+        {
+          "conns": 2,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 2549.3,
+          "p50_us": 12866,
+          "p99_us": 17634.8,
+          "ops": 7648
+        },
+        {
+          "conns": 2,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 9514.7,
+          "p50_us": 13786.9,
+          "p99_us": 17045.8,
+          "ops": 28544
+        },
+        {
+          "conns": 4,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 323.7,
+          "p50_us": 12232.2,
+          "p99_us": 16004.5,
+          "ops": 971
+        },
+        {
+          "conns": 4,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 1898.7,
+          "p50_us": 12942.5,
+          "p99_us": 463328.4,
+          "ops": 5696
+        },
+        {
+          "conns": 4,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 18453.3,
+          "p50_us": 13980.8,
+          "p99_us": 17923.8,
+          "ops": 55360
+        },
+        {
+          "conns": 8,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 640,
+          "p50_us": 12750.1,
+          "p99_us": 16603.6,
+          "ops": 1920
+        },
+        {
+          "conns": 8,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 9386.7,
+          "p50_us": 13821.9,
+          "p99_us": 17747.1,
+          "ops": 28160
+        },
+        {
+          "conns": 8,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 32448,
+          "p50_us": 15927.6,
+          "p99_us": 19109.6,
+          "ops": 97344
+        },
+        {
+          "conns": 16,
+          "depth": 1,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 1281.7,
+          "p50_us": 12758.2,
+          "p99_us": 16881.6,
+          "ops": 3845
+        },
+        {
+          "conns": 16,
+          "depth": 16,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 517.3,
+          "p50_us": 508771.4,
+          "p99_us": 530600.4,
+          "ops": 1552
+        },
+        {
+          "conns": 16,
+          "depth": 64,
+          "size": "small",
+          "cmd_bytes": 103,
+          "ops_per_s": 31445.3,
+          "p50_us": 31420,
+          "p99_us": 61230.8,
+          "ops": 94336
+        },
+        {
+          "conns": 2,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 93,
+          "p50_us": 22394,
+          "p99_us": 54675.4,
+          "ops": 279
+        },
+        {
+          "conns": 2,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1664,
+          "p50_us": 19317.3,
+          "p99_us": 23440.8,
+          "ops": 4992
+        },
+        {
+          "conns": 2,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 3242.7,
+          "p50_us": 39107.3,
+          "p99_us": 44113.4,
+          "ops": 9728,
+          "samples": [
+            {
+              "ops_per_s": 3242.7,
+              "p50_us": 39107.3,
+              "p99_us": 44113.4,
+              "ops": 9728
+            },
+            {
+              "ops_per_s": 3242.7,
+              "p50_us": 39034.8,
+              "p99_us": 44834.3,
+              "ops": 9728
+            },
+            {
+              "ops_per_s": 3157.3,
+              "p50_us": 40180.7,
+              "p99_us": 47179.4,
+              "ops": 9472
+            }
+          ]
+        },
+        {
+          "conns": 4,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 315.7,
+          "p50_us": 12842.8,
+          "p99_us": 23946.7,
+          "ops": 947
+        },
+        {
+          "conns": 4,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1685.3,
+          "p50_us": 20234.8,
+          "p99_us": 768276,
+          "ops": 5056
+        },
+        {
+          "conns": 4,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 6144,
+          "p50_us": 42006.3,
+          "p99_us": 47831.8,
+          "ops": 18432,
+          "samples": [
+            {
+              "ops_per_s": 6400,
+              "p50_us": 40046.3,
+              "p99_us": 46061.8,
+              "ops": 19200
+            },
+            {
+              "ops_per_s": 6144,
+              "p50_us": 42006.3,
+              "p99_us": 47831.8,
+              "ops": 18432
+            },
+            {
+              "ops_per_s": 192,
+              "p50_us": 1383685.6,
+              "p99_us": 1432940.2,
+              "ops": 576
+            }
+          ]
+        },
+        {
+          "conns": 8,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 649,
+          "p50_us": 12106.3,
+          "p99_us": 17120.1,
+          "ops": 1947
+        },
+        {
+          "conns": 8,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 6314.7,
+          "p50_us": 20396.8,
+          "p99_us": 25607.4,
+          "ops": 18944
+        },
+        {
+          "conns": 8,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 11434.7,
+          "p50_us": 45407.2,
+          "p99_us": 51959.4,
+          "ops": 34304,
+          "samples": [
+            {
+              "ops_per_s": 11093.3,
+              "p50_us": 46036,
+              "p99_us": 52877,
+              "ops": 33280
+            },
+            {
+              "ops_per_s": 11434.7,
+              "p50_us": 45407.2,
+              "p99_us": 51959.4,
+              "ops": 34304
+            },
+            {
+              "ops_per_s": 11434.7,
+              "p50_us": 45746.6,
+              "p99_us": 51687.3,
+              "ops": 34304
+            }
+          ]
+        },
+        {
+          "conns": 16,
+          "depth": 1,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1254.3,
+          "p50_us": 12946.9,
+          "p99_us": 16894.7,
+          "ops": 3763
+        },
+        {
+          "conns": 16,
+          "depth": 16,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 1984,
+          "p50_us": 21427.9,
+          "p99_us": 765305.3,
+          "ops": 5952
+        },
+        {
+          "conns": 16,
+          "depth": 64,
+          "size": "max",
+          "cmd_bytes": 1505,
+          "ops_per_s": 20138.7,
+          "p50_us": 50788.9,
+          "p99_us": 56848.5,
+          "ops": 60416,
+          "samples": [
+            {
+              "ops_per_s": 20821.3,
+              "p50_us": 49100.7,
+              "p99_us": 66090,
+              "ops": 62464
+            },
+            {
+              "ops_per_s": 20138.7,
+              "p50_us": 50788.9,
+              "p99_us": 56848.5,
+              "ops": 60416
+            },
+            {
+              "ops_per_s": 19797.3,
+              "p50_us": 51887.7,
+              "p99_us": 58964.4,
+              "ops": 59392
+            }
+          ]
+        }
+      ],
+      "row14": {
+        "idle_p50_us": 49.4,
+        "loaded_p50_us": 12994,
+        "writers": 16
+      },
+      "row9": [
+        {
+          "clients": 50,
+          "appendfsync": "always",
+          "ops_per_s": 3641.7,
+          "p50_us": 13927.9,
+          "p99_us": 20129.8,
+          "ops": 10925
+        },
+        {
+          "clients": 600,
+          "appendfsync": "always",
+          "ops_per_s": 36418.7,
+          "p50_us": 17220.8,
+          "p99_us": 22973.2,
+          "ops": 109256
+        },
+        {
+          "clients": 50,
+          "appendfsync": "everysec",
+          "ops_per_s": 96507.3,
+          "p50_us": 512.8,
+          "p99_us": 823.7,
+          "ops": 289522
+        }
+      ],
+      "scan_calls_200k": 200,
+      "store_bin": "/opt/homebrew/bin/valkey-server",
+      "store_version": "9.1.2"
+    },
+    "settings": {
+      "api": {
+        "db_dsn": "postgres://rl@127.0.0.1:5433/hits?statement_timeout=2500&pool_max_conns=64",
+        "limiter_enabled": true,
+        "max_in_flight": 512,
+        "refuse_after_acquire_bp": 0
+      },
+      "instance": {
+        "margin_ns": 1000000000,
+        "max_held_receipts": 1152,
+        "max_pending_refunds": 1152,
+        "max_release_delay_ns": 5000000000,
+        "refund_workers": 128
+      },
+      "policy": {
+        "capacity": 20,
+        "cleanup_interval_ns": 5000000000,
+        "clock_source": "store",
+        "failure_mode": "closed",
+        "max_live_markers": 50000,
+        "max_markers_per_key": 1000,
+        "max_tracked_buckets": 100000,
+        "outage_tolerance_ns": 5000000000,
+        "rate_period_ns": 1000000000,
+        "rate_tokens": 10,
+        "receipt_lifetime_ns": 60000000000,
+        "refund_deadline_ns": 30000000000
+      },
+      "store": {
+        "addr": "127.0.0.1:6390"
+      }
+    },
+    "instance_configs": null,
+    "controlled_clock_ns": null,
+    "schedule_sha256": "4e1d9cb0a7271c4fef421897538971d34830235c9c4f21b70f5879beb357e569",
+    "thresholds_sha256": null,
+    "faults": [],
+    "rewrites": [],
+    "children": [
+      {
+        "name": "hitgen",
+        "role": "hitgen",
+        "pid": 38744,
+        "exit": "exit 0",
+        "exited_before_stop": true,
+        "grace_ns": 35000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-1",
+        "role": "hitapi",
+        "instance": 1,
+        "pid": 38740,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-2",
+        "role": "hitapi",
+        "instance": 2,
+        "pid": 38741,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "hitapi-3",
+        "role": "hitapi",
+        "instance": 3,
+        "pid": 38742,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 45000000000,
+        "killed": false
+      },
+      {
+        "name": "sampler",
+        "role": "sampler",
+        "pid": 38743,
+        "exit": "exit 0",
+        "exited_before_stop": false,
+        "grace_ns": 10000000000,
+        "killed": false
+      }
+    ],
+    "label": "test-build scenario, not a benchmark",
+    "policy": {
+      "capacity": 20,
+      "cleanup_interval_ns": 5000000000,
+      "clock_source": "store",
+      "failure_mode": "closed",
+      "max_live_markers": 50000,
+      "max_markers_per_key": 1000,
+      "max_tracked_buckets": 100000,
+      "outage_tolerance_ns": 5000000000,
+      "rate_period_ns": 1000000000,
+      "rate_tokens": 10,
+      "receipt_lifetime_ns": 60000000000,
+      "refund_deadline_ns": 30000000000
+    },
+    "instance_settings": {
+      "margin_ns": 1000000000,
+      "max_held_receipts": 1152,
+      "max_pending_refunds": 1152,
+      "max_release_delay_ns": 5000000000,
+      "refund_workers": 128
+    },
+    "p_ns": 5000000000,
+    "limiter_enabled": true,
+    "conformance_floor": {
+      "durable_script_p50_us": 6460.5,
+      "f_fullfsync_floor_p50_us": 5667.9,
+      "plain_fsync_p50_us": 41.6
+    },
+    "workload": {
+      "scenario_file": "scenarios/profile-ramp.toml",
+      "steps": [
+        {
+          "rate_per_s": 100.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 200.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 400.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 800.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 1600.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 3200.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 6400.0,
+          "duration_s": 30.0
+        },
+        {
+          "rate_per_s": 10000.0,
+          "duration_s": 30.0
+        }
+      ],
+      "step_bounds_ns": [
+        0,
+        30000000000,
+        60000000000,
+        90000000000,
+        120000000000,
+        150000000000,
+        180000000000,
+        210000000000,
+        240000000000
+      ],
+      "users": 10000,
+      "instances": 3,
+      "verdict": "none",
+      "spike_step": null,
+      "forced_aof_rewrites_s": [],
+      "stop_early": false
+    }
+  },
+  "load": {
+    "steps": [
+      {
+        "step": 0,
+        "rate_per_s": 100.0,
+        "duration_s": 30.0,
+        "start_ns": 0,
+        "end_ns": 30000000000,
+        "ran": "full",
+        "scheduled": 3006,
+        "planned": 3006,
+        "sent": 3006,
+        "initial": 3006,
+        "duplicates": 0,
+        "retries_429": 388,
+        "unsent": 0,
+        "achieved_sent_per_s": 100.2,
+        "offered_per_s": 100.2,
+        "sched_lag_ns": {
+          "count": 3006,
+          "p50": 571886,
+          "p95": 1093248,
+          "p99": 1436255
+        },
+        "got_conn_wait_ns_p99": 52417,
+        "generator_limited": false,
+        "status_200": 2889,
+        "status_429": 505,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 1,
+        "rate_per_s": 200.0,
+        "duration_s": 30.0,
+        "start_ns": 30000000000,
+        "end_ns": 60000000000,
+        "ran": "full",
+        "scheduled": 5960,
+        "planned": 5960,
+        "sent": 5960,
+        "initial": 5960,
+        "duplicates": 0,
+        "retries_429": 1889,
+        "unsent": 0,
+        "achieved_sent_per_s": 198.66666666666666,
+        "offered_per_s": 198.66666666666666,
+        "sched_lag_ns": {
+          "count": 5960,
+          "p50": 567007,
+          "p95": 1082073,
+          "p99": 1332754
+        },
+        "got_conn_wait_ns_p99": 47792,
+        "generator_limited": false,
+        "status_200": 5269,
+        "status_429": 2580,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 2,
+        "rate_per_s": 400.0,
+        "duration_s": 30.0,
+        "start_ns": 60000000000,
+        "end_ns": 90000000000,
+        "ran": "full",
+        "scheduled": 11994,
+        "planned": 11994,
+        "sent": 11994,
+        "initial": 11994,
+        "duplicates": 0,
+        "retries_429": 5688,
+        "unsent": 0,
+        "achieved_sent_per_s": 399.8,
+        "offered_per_s": 399.8,
+        "sched_lag_ns": {
+          "count": 11994,
+          "p50": 542029,
+          "p95": 1069970,
+          "p99": 1244664
+        },
+        "got_conn_wait_ns_p99": 17625,
+        "generator_limited": false,
+        "status_200": 9658,
+        "status_429": 8024,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 3,
+        "rate_per_s": 800.0,
+        "duration_s": 30.0,
+        "start_ns": 90000000000,
+        "end_ns": 120000000000,
+        "ran": "full",
+        "scheduled": 24053,
+        "planned": 24053,
+        "sent": 24053,
+        "initial": 24053,
+        "duplicates": 0,
+        "retries_429": 15435,
+        "unsent": 0,
+        "achieved_sent_per_s": 801.7666666666667,
+        "offered_per_s": 801.7666666666667,
+        "sched_lag_ns": {
+          "count": 24053,
+          "p50": 539213,
+          "p95": 1060238,
+          "p99": 1229616
+        },
+        "got_conn_wait_ns_p99": 17625,
+        "generator_limited": false,
+        "status_200": 17277,
+        "status_429": 22211,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 4,
+        "rate_per_s": 1600.0,
+        "duration_s": 30.0,
+        "start_ns": 120000000000,
+        "end_ns": 150000000000,
+        "ran": "full",
+        "scheduled": 47949,
+        "planned": 47949,
+        "sent": 47949,
+        "initial": 47949,
+        "duplicates": 0,
+        "retries_429": 37920,
+        "unsent": 0,
+        "achieved_sent_per_s": 1598.3,
+        "offered_per_s": 1598.3,
+        "sched_lag_ns": {
+          "count": 47949,
+          "p50": 526344,
+          "p95": 1019214,
+          "p99": 1144679
+        },
+        "got_conn_wait_ns_p99": 4750,
+        "generator_limited": false,
+        "status_200": 30818,
+        "status_429": 55051,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 5,
+        "rate_per_s": 3200.0,
+        "duration_s": 30.0,
+        "start_ns": 150000000000,
+        "end_ns": 180000000000,
+        "ran": "full",
+        "scheduled": 95593,
+        "planned": 95593,
+        "sent": 95593,
+        "initial": 95593,
+        "duplicates": 0,
+        "retries_429": 89651,
+        "unsent": 0,
+        "achieved_sent_per_s": 3186.4333333333334,
+        "offered_per_s": 3186.4333333333334,
+        "sched_lag_ns": {
+          "count": 95593,
+          "p50": 530384,
+          "p95": 1002168,
+          "p99": 1111863
+        },
+        "got_conn_wait_ns_p99": 6167,
+        "generator_limited": false,
+        "status_200": 54282,
+        "status_429": 130962,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 6,
+        "rate_per_s": 6400.0,
+        "duration_s": 30.0,
+        "start_ns": 180000000000,
+        "end_ns": 210000000000,
+        "ran": "full",
+        "scheduled": 191403,
+        "planned": 191403,
+        "sent": 191403,
+        "initial": 191403,
+        "duplicates": 0,
+        "retries_429": 205986,
+        "unsent": 0,
+        "achieved_sent_per_s": 6380.1,
+        "offered_per_s": 6380.1,
+        "sched_lag_ns": {
+          "count": 191403,
+          "p50": 532570,
+          "p95": 988257,
+          "p99": 1055556
+        },
+        "got_conn_wait_ns_p99": 14000,
+        "generator_limited": false,
+        "status_200": 95137,
+        "status_429": 302252,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      },
+      {
+        "step": 7,
+        "rate_per_s": 10000.0,
+        "duration_s": 30.0,
+        "start_ns": 210000000000,
+        "end_ns": 240000000000,
+        "ran": "full",
+        "scheduled": 300304,
+        "planned": 300304,
+        "sent": 300304,
+        "initial": 300304,
+        "duplicates": 0,
+        "retries_429": 348488,
+        "unsent": 0,
+        "achieved_sent_per_s": 10010.133333333333,
+        "offered_per_s": 10010.133333333333,
+        "sched_lag_ns": {
+          "count": 300304,
+          "p50": 539496,
+          "p95": 990065,
+          "p99": 1046097
+        },
+        "got_conn_wait_ns_p99": 24917,
+        "generator_limited": false,
+        "status_200": 137253,
+        "status_429": 511539,
+        "unknown_acquires": 0,
+        "unknown_application_outcomes": 0
+      }
+    ],
+    "total": {
+      "scheduled": 680262,
+      "planned": 680262,
+      "sent": 680262,
+      "initial": 680262,
+      "duplicates": 0,
+      "retries_429": 705445,
+      "unsent": 0,
+      "sched_lag_ns": {
+        "count": 680262,
+        "p50": 535684,
+        "p95": 995521,
+        "p99": 1078164
+      },
+      "got_conn_wait_ns_p99": 18667
+    },
+    "stopped_after_step": null,
+    "excluded_step": null,
+    "summary": {
+      "planned": 680262,
+      "launched": 680262,
+      "unsent": 0,
+      "log_drops": 0,
+      "stopped_after_step": null,
+      "excluded_step": null,
+      "skipped_no_eligible": 0
+    },
+    "retry_drops": 0,
+    "generator_drops": 0,
+    "rule": "steps by planned_ns; sent = first attempts written (sent_ns set); unsent = planned \u2212 sent; generator_limited: step p99 of sent_ns \u2212 planned_ns over every planned first attempt, an unwritten one counting above any bound, > 5 ms (\u00a7B9)"
+  },
+  "results": {
+    "requests": 1385707,
+    "by_err": {
+      "ERR-1": 352583,
+      "ERR-2": 0,
+      "ERR-3": 0,
+      "ERR-4": 1033124,
+      "ERR-5": 0,
+      "ERR-6": 0,
+      "ERR-7": 0,
+      "ERR-8": 0,
+      "ERR-9": 0,
+      "ERR-9a": 0,
+      "ERR-10": 0,
+      "ERR-11": 0,
+      "ERR-12": 0,
+      "ERR-12a": 0,
+      "ERR-12b": 0,
+      "ERR-12c": 0,
+      "ERR-12d": 0,
+      "ERR-13": 0,
+      "ERR-14": 0,
+      "ERR-15": 0,
+      "ERR-16": 0
+    },
+    "unmatched": {},
+    "attempt_outcomes": {
+      "initial": {
+        "200": 318394,
+        "429 rate_limited": 361868
+      },
+      "duplicate": {},
+      "retry": {
+        "200": 34189,
+        "429 rate_limited": 671256
+      }
+    },
+    "transport_errors": {
+      "total": 0,
+      "by_kind": {}
+    },
+    "decisions": {
+      "allowed": 352583,
+      "degraded": 0
+    },
+    "releases": 0,
+    "refunds": {
+      "applied": 0,
+      "already_applied": 0,
+      "receipt_expired": 0,
+      "receipt_invalid": 0,
+      "unresolved": 0
+    },
+    "unresolved_reasons": {},
+    "db_rows": 352583,
+    "prf2": {
+      "new_rows": 352583,
+      "duplicate_rows_avoided": 0,
+      "degraded_admissions": 0,
+      "quota_rejections": 1033124,
+      "capacity_refusals": 0,
+      "integrity_failures": 0,
+      "unavailable": 0,
+      "unknown_acquires": 0,
+      "unknown_application_outcomes": 0,
+      "server_failures": 0,
+      "transport_errors": 0,
+      "expired_refunds": 0,
+      "unresolved_refunds": 0,
+      "db_rows": 352583
+    },
+    "unexpected_errors": {
+      "rule": "attempt-1 requests (\u00a7B9): a transport error or timeout (no HTTP response), or a 5xx other than service_aborted_after_acquire whose wall-clock span, from its write to its response, overlaps no fault window [start_ns, end_ns + P]; steps count their observation window: the step minus its first 5 s, by planned_ns",
+      "fault_windows": [],
+      "total": {
+        "attempts": 680262,
+        "unexpected": 0,
+        "rate": 0.0,
+        "transport_errors": 0,
+        "server_errors": 0,
+        "excluded_service_aborted_after_acquire": 0,
+        "excluded_fault_window": 0
+      },
+      "steps": [
+        {
+          "step": 0,
+          "window_start_ns": 5000000000,
+          "window_end_ns": 30000000000,
+          "attempts": 2515,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 1,
+          "window_start_ns": 35000000000,
+          "window_end_ns": 60000000000,
+          "attempts": 4992,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 2,
+          "window_start_ns": 65000000000,
+          "window_end_ns": 90000000000,
+          "attempts": 10009,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 3,
+          "window_start_ns": 95000000000,
+          "window_end_ns": 120000000000,
+          "attempts": 20000,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 4,
+          "window_start_ns": 125000000000,
+          "window_end_ns": 150000000000,
+          "attempts": 39847,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 5,
+          "window_start_ns": 155000000000,
+          "window_end_ns": 180000000000,
+          "attempts": 79634,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 6,
+          "window_start_ns": 185000000000,
+          "window_end_ns": 210000000000,
+          "attempts": 159640,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        },
+        {
+          "step": 7,
+          "window_start_ns": 215000000000,
+          "window_end_ns": 240000000000,
+          "attempts": 250318,
+          "unexpected": 0,
+          "rate": 0.0,
+          "transport_errors": 0,
+          "server_errors": 0,
+          "excluded_service_aborted_after_acquire": 0,
+          "excluded_fault_window": 0
+        }
+      ]
+    },
+    "steps": [
+      {
+        "step": 0,
+        "requests": 3372,
+        "new_rows": 2883,
+        "allowed": 2883,
+        "limited": 489
+      },
+      {
+        "step": 1,
+        "requests": 7798,
+        "new_rows": 5262,
+        "allowed": 5262,
+        "limited": 2536
+      },
+      {
+        "step": 2,
+        "requests": 17445,
+        "new_rows": 9646,
+        "allowed": 9646,
+        "limited": 7799
+      },
+      {
+        "step": 3,
+        "requests": 39050,
+        "new_rows": 17253,
+        "allowed": 17253,
+        "limited": 21797
+      },
+      {
+        "step": 4,
+        "requests": 84619,
+        "new_rows": 30778,
+        "allowed": 30778,
+        "limited": 53841
+      },
+      {
+        "step": 5,
+        "requests": 182640,
+        "new_rows": 54192,
+        "allowed": 54192,
+        "limited": 128448
+      },
+      {
+        "step": 6,
+        "requests": 391411,
+        "new_rows": 94904,
+        "allowed": 94904,
+        "limited": 296507
+      },
+      {
+        "step": 7,
+        "requests": 659372,
+        "new_rows": 137665,
+        "allowed": 137665,
+        "limited": 521707
+      }
+    ]
+  },
+  "timing": {
+    "limiter_ns": {
+      "allowed": {
+        "count": 352583,
+        "p50": 255875,
+        "p95": 621250,
+        "p99": 919584
+      },
+      "limited": {
+        "count": 1033124,
+        "p50": 172334,
+        "p95": 559833,
+        "p99": 787333
+      },
+      "degraded": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "error": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "db_ns": {
+      "count": 352583,
+      "p50": 139959,
+      "p95": 276000,
+      "p99": 805292
+    },
+    "api_total_ns": {
+      "count": 1385707,
+      "p50": 240917,
+      "p95": 676292,
+      "p99": 1042458
+    },
+    "refund_ns": {
+      "all": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "applied": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "already_applied": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "receipt_expired": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "receipt_invalid": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "unresolved": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      }
+    },
+    "end_to_end_ns": {
+      "all": {
+        "count": 680262,
+        "p50": 438000,
+        "p95": 884666,
+        "p99": 1556167
+      },
+      "success": {
+        "count": 318394,
+        "p50": 513791,
+        "p95": 1012834,
+        "p99": 2205583
+      },
+      "limited": {
+        "count": 361868,
+        "p50": 370250,
+        "p95": 757625,
+        "p99": 1019542
+      },
+      "error": {
+        "count": 0,
+        "p50": null,
+        "p95": null,
+        "p99": null
+      },
+      "retries": {
+        "count": 705445,
+        "p50": 206250,
+        "p95": 640000,
+        "p99": 961917
+      }
+    },
+    "steps": [
+      {
+        "step": 0,
+        "window_start_ns": 5000000000,
+        "window_end_ns": 30000000000,
+        "latency_ns": {
+          "count": 2515,
+          "p50": 1549167,
+          "p95": 3642375,
+          "p99": 5005666
+        }
+      },
+      {
+        "step": 1,
+        "window_start_ns": 35000000000,
+        "window_end_ns": 60000000000,
+        "latency_ns": {
+          "count": 4992,
+          "p50": 730500,
+          "p95": 2862542,
+          "p99": 3878042
+        }
+      },
+      {
+        "step": 2,
+        "window_start_ns": 65000000000,
+        "window_end_ns": 90000000000,
+        "latency_ns": {
+          "count": 10009,
+          "p50": 584125,
+          "p95": 2098750,
+          "p99": 3054417
+        }
+      },
+      {
+        "step": 3,
+        "window_start_ns": 95000000000,
+        "window_end_ns": 120000000000,
+        "latency_ns": {
+          "count": 20000,
+          "p50": 520667,
+          "p95": 1165792,
+          "p99": 2778500
+        }
+      },
+      {
+        "step": 4,
+        "window_start_ns": 125000000000,
+        "window_end_ns": 150000000000,
+        "latency_ns": {
+          "count": 39847,
+          "p50": 403625,
+          "p95": 729334,
+          "p99": 972500
+        }
+      },
+      {
+        "step": 5,
+        "window_start_ns": 155000000000,
+        "window_end_ns": 180000000000,
+        "latency_ns": {
+          "count": 79634,
+          "p50": 326250,
+          "p95": 548917,
+          "p99": 669792
+        }
+      },
+      {
+        "step": 6,
+        "window_start_ns": 185000000000,
+        "window_end_ns": 210000000000,
+        "latency_ns": {
+          "count": 159640,
+          "p50": 376458,
+          "p95": 662208,
+          "p99": 819375
+        }
+      },
+      {
+        "step": 7,
+        "window_start_ns": 215000000000,
+        "window_end_ns": 240000000000,
+        "latency_ns": {
+          "count": 250318,
+          "p50": 531542,
+          "p95": 950625,
+          "p99": 1271875
+        }
+      }
+    ],
+    "rewrite_windows": [],
+    "rewrite_p99_ns": null,
+    "rewrite_latency_ns": null,
+    "rule": "limiter_ns by acquire result (every result other than allowed, limited and degraded is an error); db_ns where the DB work ran (db_ns > 0); refund_ns = final_mono_ns \u2212 release_mono_ns; end_to_end_ns from gen.jsonl, attempt 1 with an HTTP response, by status (success 200, limited 429, error other), retries apart; steps: the \u00a7B9 latency population over each observation window; rewrite: attempt-1 responses whose wall-clock span overlaps a rewrite window (TRF-S7)"
+  },
+  "clocks": {
+    "fields": {
+      "context.start_ns, end_ns, faults[].start_ns, end_ns, rewrites[]": "wall clock, ns since the UTC epoch",
+      "api request arrival_ns": "wall clock, ns since the UTC epoch",
+      "samples t_ns": "wall clock, ns since the UTC epoch",
+      "api decision_ns, request decision_ns, gen decision_ns": "budget time: the store's clock in \u00b5s \u00d7 1,000 (API-4); compared only with budget time",
+      "refund credit_decision_ns": "budget time: the store's clock in \u00b5s \u00d7 1,000 (API-4); compared only with budget time",
+      "gen planned_ns, sent_ns": "hitgen's monotonic clock, ns from its t0",
+      "gen latency, got_conn_wait_ns": "hitgen's monotonic clock, ns (durations)",
+      "api limiter_ns, db_ns, total_ns": "hitapi's monotonic clock, ns (durations)",
+      "release release_mono_ns": "hitapi's monotonic clock, ns since the process started",
+      "refund release_mono_ns, final_mono_ns": "the limiter's monotonic clock, ns since it was built"
+    },
+    "t0_wall_ns": 1793745118243076000,
+    "t0_rule": "hitgen's t0 on the wall clock: the time of its sending log line (hitgen.stderr), written just before it takes t0; it places planned_ns and sent_ns on the wall clock for the fault and rewrite windows and arrival_ns on hitgen's steps"
+  },
+  "resources": {
+    "samples": 242,
+    "health_reads": 726,
+    "max_in_flight": 8,
+    "processes": {
+      "hitapi-1": {
+        "cpu_pct_mean": 29.4,
+        "cpu_pct_max": 104.73,
+        "rss_bytes_mean": 34753172,
+        "rss_bytes_max": 42795008,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "hitapi-2": {
+        "cpu_pct_mean": 29.36,
+        "cpu_pct_max": 105.97,
+        "rss_bytes_mean": 34855605,
+        "rss_bytes_max": 40337408,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "hitapi-3": {
+        "cpu_pct_mean": 29.41,
+        "cpu_pct_max": 104.14,
+        "rss_bytes_mean": 34122726,
+        "rss_bytes_max": 42205184,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "hitgen": {
+        "cpu_pct_mean": 53.47,
+        "cpu_pct_max": 180.59,
+        "rss_bytes_mean": 191280762,
+        "rss_bytes_max": 201326592,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "postgres": {
+        "cpu_pct_mean": 10.74,
+        "cpu_pct_max": 33.09,
+        "rss_bytes_mean": 626359710,
+        "rss_bytes_max": 1706524672,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "sampler": {
+        "cpu_pct_mean": 6.34,
+        "cpu_pct_max": 8.49,
+        "rss_bytes_mean": 29461410,
+        "rss_bytes_max": 30408704,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      },
+      "valkey-server": {
+        "cpu_pct_mean": 23.66,
+        "cpu_pct_max": 76.26,
+        "rss_bytes_mean": 11687140,
+        "rss_bytes_max": 13549568,
+        "cpu_readings": 242,
+        "rss_readings": 242
+      }
+    },
+    "store_state": {
+      "live_markers": {
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      "quarantined_keys": {
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      "tracked_buckets": {
+        "max": 9893,
+        "last": 9893,
+        "readings": 242
+      }
+    },
+    "instance_series": [
+      {
+        "instance": 1,
+        "series": "in_flight",
+        "max": 8,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 348,
+        "last": 348,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 4.208799,
+        "last": 0.130837,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 50,
+        "last": 50,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 1,
+        "series": "rl_tracked_buckets",
+        "max": 9893,
+        "last": 9893,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "in_flight",
+        "max": 7,
+        "last": 2,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 390,
+        "last": 390,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 4.503918,
+        "last": 1.183792,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 50,
+        "last": 50,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 2,
+        "series": "rl_tracked_buckets",
+        "max": 9893,
+        "last": 9893,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "in_flight",
+        "max": 8,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "listener_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "log_drops",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"moved\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"quarantined\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"removed\"}",
+        "max": 1839,
+        "last": 1839,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_entries_total{action=\"skipped\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_lag_seconds",
+        "max": 4.435205,
+        "last": 3.208404,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"complete\"}",
+        "max": 50,
+        "last": 50,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_passes_total{status=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"clock_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"config_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"outcome_unknown\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"state_integrity_error\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_cleanup_stops_total{result=\"unavailable\"}",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_clock_lag_microseconds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_listener_drops_total",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_live_markers",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_pending_refunds",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_quarantined_keys",
+        "max": 0,
+        "last": 0,
+        "readings": 242
+      },
+      {
+        "instance": 3,
+        "series": "rl_tracked_buckets",
+        "max": 9893,
+        "last": 9893,
+        "readings": 242
+      }
+    ],
+    "pids": [
+      {
+        "role": "valkey-server",
+        "pid": 38734
+      },
+      {
+        "role": "hitapi",
+        "instance": 1,
+        "pid": 38740
+      },
+      {
+        "role": "hitapi",
+        "instance": 2,
+        "pid": 38741
+      },
+      {
+        "role": "hitapi",
+        "instance": 3,
+        "pid": 38742
+      },
+      {
+        "role": "sampler",
+        "pid": 38743
+      },
+      {
+        "role": "hitgen",
+        "pid": 38744
+      }
+    ]
+  },
+  "traffic": {
+    "schedule_path": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261103-223157-profile-ramp-1/schedule.jsonl",
+    "schedule_sha256": "4e1d9cb0a7271c4fef421897538971d34830235c9c4f21b70f5879beb357e569",
+    "schedule_sha256_context": "4e1d9cb0a7271c4fef421897538971d34830235c9c4f21b70f5879beb357e569",
+    "schedule_sha256_matches": true,
+    "schedule_entries": 680262,
+    "planned_per_step": [
+      3006,
+      5960,
+      11994,
+      24053,
+      47949,
+      95593,
+      191403,
+      300304
+    ],
+    "instances": 3,
+    "requests_per_instance": {
+      "1": 226754,
+      "2": 226754,
+      "3": 226754
+    },
+    "served_per_instance": {
+      "1": 461878,
+      "2": 461961,
+      "3": 461868
+    },
+    "instances_used": 3,
+    "users": 9975,
+    "busiest_user": {
+      "user": "u000000",
+      "first_attempts": 103612,
+      "instances": [
+        1,
+        2,
+        3
+      ]
+    }
+  },
+  "baseline": null,
+  "correctness": {
+    "verdict": "pass",
+    "known_credits": 0,
+    "unknown_credits": 0,
+    "listener_drops": 0,
+    "pre_kill_lines": 0,
+    "pre_kill_read_ok_false": 0,
+    "invalid_reasons": [],
+    "violation": null
+  },
+  "capacity": null,
+  "evidence_validity": {
+    "checks": {
+      "log_drops": {
+        "ok": true,
+        "value": 0,
+        "detail": "log_drops summed over every stop and pre_kill line of every api-N.jsonl"
+      },
+      "listener_drops": {
+        "ok": true,
+        "value": {
+          "sum": 0,
+          "stop_lines": 3,
+          "pre_kill_lines": 0,
+          "pre_kill_unread": 0,
+          "segments_without_count": 0
+        },
+        "detail": "HAR-13: listener_drops summed over every stop and pre_kill line is 0, every pre_kill read succeeded (read_ok), and every process segment holds one of the two, not necessarily as its last line"
+      },
+      "fixtures_off": {
+        "ok": true,
+        "value": {
+          "applies": false,
+          "health_reads": 726,
+          "fixtures_on": 726,
+          "clock_not_store": 0,
+          "faults": 0
+        },
+        "detail": "benchmark runs: every /health read shows fixtures false on the store clock, at least one was read, and no fault ran"
+      },
+      "outage": {
+        "ok": true,
+        "value": {
+          "max_outage_ns": null,
+          "unmeasured": 0
+        },
+        "detail": "every store outage measured (context.json outage_ns of each faultctl store down or pause that ran) and at most 5 s"
+      },
+      "outage_segments": {
+        "ok": true,
+        "value": 0,
+        "detail": "store outage segments armed: faultctl store down or pause, and store refusals that are timed (a duration_ms above 0) or unbounded (neither count nor duration_ms)"
+      },
+      "gen_summary": {
+        "ok": true,
+        "value": 0,
+        "detail": "gen.jsonl ends with its summary line, whose log_drops is 0"
+      },
+      "rewrite_windows": {
+        "ok": true,
+        "value": {
+          "applies": false,
+          "windows": 0
+        },
+        "detail": "a scenario with forced_aof_rewrites_s observed at least one AOF rewrite window"
+      },
+      "correctness": {
+        "ok": true,
+        "value": {
+          "verdict": "pass",
+          "invalid_reasons": []
+        },
+        "detail": "HAR-13: refmodel.check_bud11's BUD-11a verdict (correctness) is pass or violation, not invalid: an invalid verdict means the run's refund evidence is incomplete (invalid_reasons say why; rerun)"
+      }
+    },
+    "valid": true
+  }
+}

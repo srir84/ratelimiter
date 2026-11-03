@@ -58,7 +58,6 @@ const (
 // The files and programs the run uses, relative to the repository root or the run directory
 // (DESIGN §B1, §B8; IMPLEMENTATION_PLAN H3 steps 3 and 5).
 const (
-	storeConf     = "deploy/valkey-durable.conf"
 	pgData        = ".data/pg"
 	pgLog         = ".data/pg.log"
 	runIndex      = "runs/index.jsonl"
@@ -68,6 +67,36 @@ const (
 	reportFile    = "report.json"
 	valkeyProgram = "valkey-server"
 )
+
+// The store profiles (SPEC STA-16, STA-16a; docs/operator-guide.md "Store profiles"): durable
+// is the default and the only one STA-16 calls durable; the others are opt-in and trade loss
+// on an OS crash or power cut for latency.
+const (
+	profileDurable  = "durable"  // appendfsync always
+	profileEverysec = "everysec" // appendfsync everysec
+	profileBarrier  = "barrier"  // appendfsync always with F_BARRIERFSYNC: the patched program
+	profileBuffered = "buffered" // appendfsync no
+	// barrierProgram is the patched valkey-server deploy/build-valkey-barrier.sh builds.
+	barrierProgram = ".data/valkey-barrier/valkey-server"
+)
+
+// storeProfileFiles returns a store profile's config file, a root-relative slash path, and its
+// program: valkeyProgram, looked up on PATH, or barrierProgram, root-relative. "" is durable.
+func storeProfileFiles(profile string) (conf, program string, err error) {
+	switch profile {
+	case "", profileDurable:
+		return "deploy/valkey-durable.conf", valkeyProgram, nil
+	case profileEverysec:
+		return "deploy/valkey-everysec.conf", valkeyProgram, nil
+	case profileBarrier:
+		return "deploy/valkey-barrier.conf", barrierProgram, nil
+	case profileBuffered:
+		return "deploy/valkey-buffered.conf", valkeyProgram, nil
+	default:
+		return "", "", fmt.Errorf("--store-profile %q: want %s, %s, %s or %s", profile,
+			profileDurable, profileEverysec, profileBarrier, profileBuffered)
+	}
+}
 
 // The report steps at a run's end (IMPLEMENTATION_PLAN H5 steps 2, 5, 6 and 7; DESIGN §B5,
 // §B9, §C5), each `python3 …` in the repository root.
@@ -147,6 +176,7 @@ type runner struct {
 	binDir    string // hitapi and rladmin, absolute
 	testBin   string // hitgen and the sampler, absolute
 	storeAddr string // 127.0.0.1:<store port>, config.toml's [store] addr
+	storeConf string // the store profile's config file, root-relative (storeProfileFiles)
 	apis      []apiInstance
 
 	// mu guards the child table (store, apiProcs, procs and pids.json, rec.Children) while the
@@ -552,16 +582,31 @@ func (r *runner) stopStore(ctx context.Context) error {
 }
 
 // prepare checks what the sequence relies on: config.toml names the store the orchestrator
-// starts; the store program is on PATH; each instance's address, config file (an
+// starts; the store profile's program is on PATH, or built for the barrier profile; each instance's address, config file (an
 // --instance-config file is copied into the run directory as instance-N.toml) and kill grace.
 func (r *runner) prepare() error {
 	r.storeAddr = net.JoinHostPort("127.0.0.1", strconv.Itoa(r.in.storePort))
 	if a := r.in.settings.Store.Addr; a != r.storeAddr {
 		return fmt.Errorf("config.toml's [store] addr is %s, but the orchestrator starts the store on %s", a, r.storeAddr)
 	}
-	bin, err := exec.LookPath(valkeyProgram)
+	conf, prog, err := storeProfileFiles(r.in.storeProfile)
 	if err != nil {
+		return err
+	}
+	if prog != valkeyProgram {
+		prog = absPath(r.s.path(prog))
+	}
+	bin, err := exec.LookPath(prog)
+	if err != nil {
+		if prog != valkeyProgram {
+			return fmt.Errorf("finding the store program: %w (run deploy/build-valkey-barrier.sh)", err)
+		}
 		return fmt.Errorf("finding the store program: %w", err)
+	}
+	r.storeConf = conf
+	r.rec.StoreProfile = r.in.storeProfile
+	if r.rec.StoreProfile == "" {
+		r.rec.StoreProfile = profileDurable
 	}
 	r.rec.Versions.ValkeyPath = bin
 	cfg := filepath.Join(r.runPath, configFile)
@@ -609,7 +654,7 @@ func (r *runner) addProc(c *child) error {
 	return nil
 }
 
-// startStore starts valkey-server with the durable profile through the file-limit shell
+// startStore starts valkey-server with the run's store profile through the file-limit shell
 // (storeArgs, runlog.FileLimitCommand) and waits until it answers PING as rl_ops, at most
 // storeStartWait; a store that exits first fails the run.
 func (r *runner) startStore(ctx context.Context) error {
@@ -651,12 +696,12 @@ func (r *runner) storeSpec() childSpec {
 }
 
 // storeArgs returns the run's valkey-server arguments (runlog.StoreArgs, which faultctl's store
-// down rebuilds to restart the store, plan H4 step 3): the repository's durable profile, the
+// down rebuilds to restart the store, plan H4 step 3): the run's store profile file, the
 // store port, runs/<id>/store and its acl.conf; production rewrite settings only when the
 // scenario forces rewrites.
 func (r *runner) storeArgs() []string {
 	dir := filepath.Join(r.runPath, storeDir)
-	return runlog.StoreArgs(absPath(r.s.path(storeConf)), r.in.storePort, dir, filepath.Join(dir, aclFile),
+	return runlog.StoreArgs(absPath(r.s.path(r.storeConf)), r.in.storePort, dir, filepath.Join(dir, aclFile),
 		len(r.in.scenario.ForcedAOFRewritesS) > 0)
 }
 

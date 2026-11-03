@@ -2,7 +2,7 @@
 
 A Go library that lets every copy of a service share **one rate limit per user**, enforce it exactly, and **give the token back when the protected work fails**. The shared budgets live in one Valkey store, which is compatible with Redis. The repository also holds the test rig that measures the library under real traffic and injected faults.
 
-**Status:** v1, built from scratch and tested end to end on one laptop. It has not run in production. Correctness held in every test run. Throughput reached 10,000 req/s with no errors. Tail latency did not meet its target: on this Mac, slow disk flushes push p99 to about 0.5 s (see [Measured results](#measured-results)).
+**Status:** v1, built from scratch and tested end to end on one laptop. It has not run in production. Correctness held in every test run. Throughput reached 10,000 req/s with no errors. Tail latency did not meet its target in the default `durable` store profile: on this Mac, slow disk flushes push p99 to about 0.5 s. Opt-in [store profiles](#store-profiles) bring p99 under 3 ms in exchange for some loss on a crash or power cut.
 
 ## In one minute
 
@@ -178,19 +178,24 @@ Clients retry after a 429, up to 2 times, so the limiter runs send more requests
   - The one-instance ramp's first step had no slowdown and passed.
   - The design's p99 of 33 ms (DESIGN §A3.0 row 9) was a store-only benchmark. It did not include these slowdowns.
 
-**Follow-up runs (2026-11-03)**
+### Store profiles
 
-Same machine and harness. Test build (`run_kind = "test"`), no verdict, early stop off. These are kept outside `runs/` so the H6 evidence is unchanged.
+The slow part is Valkey making each decision permanent on disk before it answers. You can choose how strict that is when you start the store. The library itself does not change.
 
-| Run | `appendfsync` | Limiter p50 | Limiter p99 | Errors | Correctness |
-|---|---|---|---|---|---|
-| s2-users-1000 | always | 10.2 ms | 519 ms | 0 | pass |
-| s2-users-1000 | everysec | **0.2 ms** | **1.1 ms** | 0 | pass |
-| s1 ramp, every step to 10,000 req/s | always | 7.5–15.2 ms | 16–843 ms; 16–54 ms outside slowdowns | 0 | pass |
-| s1 ramp, every step to 10,000 req/s | everysec | 0.1–0.3 ms | 0.4–4.0 ms | 0 | pass |
+- **`durable`** (default): every answer is on disk first. Nothing answered is ever lost, even on a power cut. On this Mac: p50 about 10–13 ms, p99 about 0.5 s.
+- **`barrier`**: every answer is on its way to disk, in order. A Valkey or OS crash loses nothing. A power cut can lose the last few writes. On this Mac: p50 about 0.6–0.8 ms, p99 under 3 ms. It needs a Valkey built with a one-line patch (`deploy/build-valkey-barrier.sh`).
+- **`everysec`**: Valkey flushes to disk about once a second. An OS crash or power cut can lose about 1–2 s of decisions. p50 0.2 ms, p99 under 1.5 ms.
+- **`buffered`**: macOS decides when to flush. An OS crash or power cut can lose about 30 s or more. p50 0.2 ms, p99 under 1.5 ms.
 
-- **Throughput ceiling: not reached.** At the 10,000 req/s step, including 429 retries, the limiter decided about 21,400–21,700 calls a second with no errors under both settings. Valkey's CPU peaked at 59% of one core with `always` and 76% with `everysec`.
-- **The trade-off.** `everysec` removes the latency cost, but a store crash can lose about 1 s of acknowledged decisions, or up to about 2 s when fsync is slow. It is not the shipped profile: SPEC `STA-16` would need rewording (DESIGN §D2 option B). Linux with a power-loss-protected SSD, where a plain `fsync` is durable, has not been measured.
+How to pick one:
+
+```bash
+deploy/start-store.sh --profile barrier --port 6390 --dir /path/to/store --aclfile /path/to/acl.conf
+# or: RL_STORE_PROFILE=everysec deploy/start-store.sh --port …
+bin/test/orchestrator --scenario scenarios/profile-ramp.toml --store-profile everysec   # harness runs
+```
+
+All four profiles passed correctness with no failed requests, up to 10,000 req/s offered. The three opt-in profiles handled about 21,400 decisions a second at the top step. Under `durable`, the test client fell behind from 3,200 req/s during the disk pauses (3.6% of requests unsent). A lost write under an opt-in profile cannot be detected later, so the guarantee does not cover it (SPEC `STA-16a`). The full comparison, run IDs and advice on which to use are in the [operator guide](docs/operator-guide.md#store-profiles). Linux has not been measured.
 
 ## What it does not do
 
@@ -219,7 +224,7 @@ The full document list is at the [end of this file](#documents).
 | Part | What it is | Code |
 |---|---|---|
 | Limiter library (product) | The public API: `New`, `Acquire`, permits finished with `Done` or `Release`, a refund listener, `Close`, `Health`, `Metrics`. Inside: receipts and slots, refund workers, the epoch watch, the cleanup runner and the store adapter | `limiter/`, `internal/` |
-| Limiter store (product) | One Valkey server per deployment with the durable profile (AOF `appendfsync always`, `noeviction`) and ACL users. It holds every budget, refund marker, cleanup index entry, quarantine flag and the epoch record. The library defines its contents and loads its scripts | `deploy/`, `internal/scripts/` |
+| Limiter store (product) | One Valkey server per deployment with the durable profile by default (AOF `appendfsync always`, `noeviction`; opt-in [store profiles](#store-profiles) trade crash safety for speed) and ACL users. It holds every budget, refund marker, cleanup index entry, quarantine flag and the epoch record. The library defines its contents and loads its scripts | `deploy/`, `internal/scripts/` |
 | Admin tool (product) | `rladmin`: start or replace an epoch, restore and clear quarantined keys, status and inspect, store info and AOF rewrite | `cmd/rladmin/` |
 | Test-only entry point (product) | `limitertest`: fixture hooks, compiled only with `-tags rltest`, never into production builds (`CMP-9`) | `limitertest/` |
 | Harness | One host service plus the verification rig: `hitapi` (an HTTP API over PostgreSQL that embeds the library), `hitgen` (seeded open-loop traffic), the `orchestrator`, `sampler` and `faultctl`, a reference model in Python and a report builder | `cmd/hit*`, `cmd/orchestrator/`, `cmd/sampler/`, `cmd/faultctl/`, `harness/`, `refmodel/`, `report/`, `scenarios/` |
@@ -249,7 +254,8 @@ ratelimiter/
   refmodel/       HARNESS reference model (Python)
   report/         HARNESS report builder (Python)
   scenarios/      HARNESS scenario files
-  deploy/         valkey-durable.conf, valkey-fast.conf, acl.conf.tmpl, pg-schema.sql
+  deploy/         store profiles (valkey-durable/-barrier/-everysec/-buffered.conf), valkey-fast.conf,
+                  start-store.sh, build-valkey-barrier.sh + valkey-barrier.patch, acl.conf.tmpl, pg-schema.sql
   docs/           host integration guide, operator guide, code map
   tools/trace/    repository checks: test IDs, import boundary, ACL lists, script lint, API, …
   tools/mutate/   mutation testing

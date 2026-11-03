@@ -1,0 +1,41 @@
+# profile-s2-users-1000 (docs/operator-guide.md "Store profiles"; README "Store profiles"): the
+# s2-users-1000 traffic, used to compare the store profiles (orchestrator --store-profile). Three
+# instances; 500 req/s for 60 s, 10 req/s for 90 s, then 500 req/s for 60 s, over a main cohort of
+# 1,000 users (away from 60 s to 150 s) and a background cohort of 10 always-active users.
+# Plan choices, each with its reason:
+# - run_kind test, verdict none: the comparison measures latency per profile and judges nothing, so
+#   it needs no frozen thresholds or baseline; every profile runs the same bin/test build.
+# - Users, cohorts and policy as s2-users-1000.toml (its comments give the reasons). No [[faults]]
+#   and no forced rewrites (auto-aof-rewrite-percentage 0, runlog.StoreArgs).
+name = "profile-s2-users-1000"
+seed = 1
+run_kind = "test"
+instances = 3
+verdict = "none"
+[[steps]]
+rate_per_s = 500
+duration_s = 60
+
+[[steps]]
+rate_per_s = 10
+duration_s = 90
+
+[[steps]]
+rate_per_s = 500
+duration_s = 60
+
+[users]
+count = 1010
+zipf_s = 1.1
+
+# The main cohort: active in [0, 60 s), back from 150 s.
+[[cohorts]]
+users = [0, 999]
+start_s = 0
+stop_s = 60
+revisit_s = 150
+
+# The background cohort: always active (no stop_s).
+[[cohorts]]
+users = [1000, 1009]
+start_s = 0

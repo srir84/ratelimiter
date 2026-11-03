@@ -72,6 +72,7 @@ type flags struct {
 	baseline        bool
 	instanceConfigs map[int]string // --instance-config: instance number → its config file
 	binDir          string         // --bin-dir; "" means bin/<run_kind>
+	storeProfile    string         // --store-profile; "" means durable (storeProfileFiles)
 }
 
 // orchestrate runs the orchestrator and returns its exit code: the command line, preflight,
@@ -185,7 +186,8 @@ func newKillClient() *http.Client {
 }
 
 // parseFlags parses the command line (plan H3 step 8): --scenario is required;
-// --instance-config may repeat, once per instance.
+// --instance-config may repeat, once per instance; --store-profile names one of the store
+// profiles (docs/operator-guide.md "Store profiles"), durable by default.
 func parseFlags(args []string, stderr io.Writer) (flags, error) {
 	fs := flag.NewFlagSet("orchestrator", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -205,6 +207,8 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 			return nil
 		})
 	fs.StringVar(&f.binDir, "bin-dir", "", "the directory hitapi and rladmin run from (default bin/<run_kind>)")
+	fs.StringVar(&f.storeProfile, "store-profile", profileDurable,
+		"the store profile: durable, everysec, barrier or buffered (SPEC STA-16, STA-16a)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -213,6 +217,12 @@ func parseFlags(args []string, stderr io.Writer) (flags, error) {
 		return flags{}, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	case f.scenario == "":
 		return flags{}, errors.New("--scenario is required")
+	}
+	if f.storeProfile == "" {
+		return flags{}, errors.New("--store-profile is empty")
+	}
+	if _, _, err := storeProfileFiles(f.storeProfile); err != nil {
+		return flags{}, err
 	}
 	return f, nil
 }

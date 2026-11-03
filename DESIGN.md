@@ -23,7 +23,7 @@
 | Time inside the store | **Microseconds since the Unix epoch** from `TIME`; the API reports `ns = µs × 1000` | `TIME` resolution is µs; µs timestamps (~1.8 × 10^15) stay below 2^53 until about 2255 | Nanoseconds (above 2^53, not exact in Lua) |
 | Exact arithmetic | Every in-script integer < 2^53; budget time < 2^53 − 2^43; guarded multiply; no division except one exact helper; retry delay computed in Go | Lua 5.1 numbers are doubles (lab: `2^53 + 1 == 2^53`) | Multiword integers in Lua |
 | Data layout | Per key: one hash (bucket **and** its markers) and one sorted set of its marker index entries; one shared sorted set of keys by next due time; one quarantine hash; one epoch record hash; budget data under an epoch namespace | Every index entry of a key lives under a name derived from the key, so "no state for this key" (`STA-8`) is exact; cascade delete is one `DEL` of `k` and `mi` plus one `ZREM` from `ix`; epoch replace is a pointer switch | One global index of all entries (an orphan entry cannot be found by key) |
-| Durability | AOF `appendfsync always`, `no-appendfsync-on-rewrite no`, `maxmemory-policy noeviction` (`STA-16`) | Reply only after the write is on disk | `everysec` (see §D2, owner decision 1) |
+| Durability | AOF `appendfsync always`, `no-appendfsync-on-rewrite no`, `maxmemory-policy noeviction` (`STA-16`) | Reply only after the write is on disk | Opt-in profiles `everysec`, `barrier`, `buffered` (`STA-16a`; §D2 owner decision 1) |
 | Refund timing | Refund workers on their own pipelined refund connections; a startup check proves `REF-5` from the settings | The deadline holds by construction (assuming one outage segment per refund window, §D2 decision 2), not by measured percentiles | Sharing the call connections, and a latency estimate |
 | Receipts | In-memory struct, HMAC-SHA256, 32-byte per-instance key from `crypto/rand` (`RCP-4`) | Process-local, nothing to distribute | — |
 | IDs | `epoch_id` = 128-bit `crypto/rand`; generation = per-epoch counter in the epoch record; `deduction_id` = hash of the deduction identity | IDs never repeat after a wipe; generation never reused within an epoch | — |
@@ -1157,7 +1157,7 @@ sequenceDiagram
 | `gen.jsonl` | sent request or retry; one final `summary` line | §B4 |
 | `samples.jsonl` | sample | process stats, metrics snapshot, `ADM-4` status |
 | `db_rows.json` | run | final `SELECT count(*) FROM hits` |
-| `context.json` | run | hardware, OS, versions (Go, Valkey, PostgreSQL), store and PostgreSQL settings, F_FULLFSYNC floor and durable single-client script p50 (latest §C2 result), settings, scenario name, path and SHA-256, seed, schedule hash, frozen thresholds hash, faults with actual start/end, start/end (`PRF-5`) |
+| `context.json` | run | hardware, OS, versions (Go, Valkey and its path, PostgreSQL), the store profile (`store_profile`, `--store-profile`, §D2 decision 1), store and PostgreSQL settings, F_FULLFSYNC floor and durable single-client script p50 (latest §C2 result), settings, scenario name, path and SHA-256, seed, schedule hash, frozen thresholds hash, faults with actual start/end, start/end (`PRF-5`) |
 
 **Report** (`report.md` + `report.json`): run context and run kind; load (planned vs sent, lag, retries); results by outcome; timing (limiter decision time from `limiter_ns`, DB time, refund release-to-final time, end-to-end from `gen.jsonl`, p50/p95/p99 per class, and p99 inside AOF rewrite windows for `TRF-S7`); resources; correctness (`BUD-11`/`BUD-11a` window check via `refmodel` from `decision`, `release`, `refund` and `lifecycle` records); baseline comparison; capacity verdicts (`T-RPT-2`, benchmark runs only); **evidence validity** (log drops = 0, listener drops = 0 summed over every process including pre-kill reads, every pre-kill read successful (`read_ok`), every process segment of an instance log (from one `start` line to the next) holding a `stop` or `pre_kill` line, fixtures off for benchmarks (at least one `/health` read, each showing fixtures off and the store clock, and no fault), a measured outage (`context.json` faults `outage_ns`) for every `faultctl store down` or `store pause` that ran, and every measured outage ≤ 5 s, store outage segments armed ≤ 1, `gen.jsonl` summary present with log_drops = 0, for `TRF-S7` at least one AOF rewrite window observed, and the correctness verdict pass or violation, not invalid (`HAR-13`)).
 
@@ -1426,6 +1426,17 @@ The tests and checkers are tested too: every checker has fixtures it must catch,
 | B. `appendfsync everysec` | ~0.5 ms p50 | About 1 s of acknowledged decisions can be lost (up to about 2 s when fsync is slow); treated like a stale snapshot (`STA-11`) | Reword `STA-16` to "durable against a store-process crash; host power loss is out of scope like `STA-11`" |
 
 This design keeps option A. The §C2 curve measured on the production OS and disk decides whether to revisit it.
+
+**Decided 2026-11-03 (owner):** option A stays the default, and three opt-in store profiles are added under the new `STA-16a`. The operator picks one with `deploy/start-store.sh --profile` (or `RL_STORE_PROFILE`), and the orchestrator with `--store-profile`; `context.json` records it as `store_profile`.
+
+| Profile | Store setting | Program |
+|---|---|---|
+| `durable` (default) | `deploy/valkey-durable.conf`, `appendfsync always` | stock `valkey-server` |
+| `everysec` | `deploy/valkey-everysec.conf`, `appendfsync everysec` | stock `valkey-server` |
+| `barrier` | `deploy/valkey-barrier.conf`, `appendfsync always` | `.data/valkey-barrier/valkey-server`, built by `deploy/build-valkey-barrier.sh` from Valkey 9.1.2 with `deploy/valkey-barrier.patch`: on macOS the per-write AOF sync uses `F_BARRIERFSYNC`; rewrites, RDB and the ACL file keep `F_FULLFSYNC`; on Linux nothing changes |
+| `buffered` | `deploy/valkey-buffered.conf`, `appendfsync no` | stock `valkey-server` |
+
+The measured comparison is in the operator guide ("Store profiles").
 
 **Settled** (applied to SPEC.md on 2026-10-03, at the recommended defaults)
 

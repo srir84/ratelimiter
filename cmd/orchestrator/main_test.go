@@ -35,10 +35,17 @@ func TestParseFlags(t *testing.T) {
 		args []string
 		want *flags // nil: refused
 	}{
-		{"scenario only", []string{"--scenario", "s.toml"}, &flags{scenario: "s.toml"}},
+		{"scenario only", []string{"--scenario", "s.toml"}, &flags{scenario: "s.toml", storeProfile: "durable"}},
 		{"every flag", []string{"--scenario", "s.toml", "--baseline", "--instance-config", "3=x.toml",
-			"--instance-config", "1=y.toml", "--bin-dir", "d"},
-			&flags{scenario: "s.toml", baseline: true, instanceConfigs: map[int]string{1: "y.toml", 3: "x.toml"}, binDir: "d"}},
+			"--instance-config", "1=y.toml", "--bin-dir", "d", "--store-profile", "barrier"},
+			&flags{scenario: "s.toml", baseline: true, instanceConfigs: map[int]string{1: "y.toml", 3: "x.toml"}, binDir: "d",
+				storeProfile: "barrier"}},
+		{"store profile everysec", []string{"--scenario", "s.toml", "--store-profile", "everysec"},
+			&flags{scenario: "s.toml", storeProfile: "everysec"}},
+		{"store profile buffered", []string{"--scenario", "s.toml", "--store-profile", "buffered"},
+			&flags{scenario: "s.toml", storeProfile: "buffered"}},
+		{"unknown store profile", []string{"--scenario", "s.toml", "--store-profile", "fast"}, nil},
+		{"empty store profile", []string{"--scenario", "s.toml", "--store-profile", ""}, nil},
 		{"no --scenario", []string{"--baseline"}, nil},
 		{"empty --scenario", []string{"--scenario", ""}, nil},
 		{"positional argument", []string{"--scenario", "s.toml", "extra"}, nil},
@@ -58,7 +65,8 @@ func TestParseFlags(t *testing.T) {
 			case c.want != nil && err != nil:
 				t.Errorf("parseFlags(%q): %v", c.args, err)
 			case c.want != nil && (got.scenario != c.want.scenario || got.baseline != c.want.baseline ||
-				got.binDir != c.want.binDir || !maps.Equal(got.instanceConfigs, c.want.instanceConfigs)):
+				got.binDir != c.want.binDir || !maps.Equal(got.instanceConfigs, c.want.instanceConfigs) ||
+				got.storeProfile != c.want.storeProfile):
 				t.Errorf("parseFlags(%q) = %+v, want %+v", c.args, got, *c.want)
 			}
 		})

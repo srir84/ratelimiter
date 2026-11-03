@@ -43,7 +43,7 @@ flowchart LR
 
 ## Store profile
 
-[`deploy/valkey-durable.conf`](../deploy/valkey-durable.conf) is the profile for production, benchmarks and durability tests. The fast profile ([`deploy/valkey-fast.conf`](../deploy/valkey-fast.conf), `appendfsync no`) is for logic tests only. Both leave `port`, `dir` and `aclfile` to the command line:
+[`deploy/valkey-durable.conf`](../deploy/valkey-durable.conf) is the profile for production, benchmarks and durability tests. Three opt-in profiles trade crash safety for speed; see [Store profiles](#store-profiles). The fast profile ([`deploy/valkey-fast.conf`](../deploy/valkey-fast.conf), `appendfsync no`) is for logic tests only. Every profile file leaves `port`, `dir` and `aclfile` to the command line:
 
 ```bash
 valkey-server deploy/valkey-durable.conf --port 6390 --dir /path/to/store --aclfile /path/to/store/acl.conf
@@ -236,14 +236,44 @@ Only that key changes. Its old receipts end `receipt_invalid`, or `receipt_expir
 
 **Disk full or AOF write errors.** With `appendfsync always` the store exits rather than acknowledge a write it cannot persist. Calls in flight get `outcome_unknown`; later calls get `unavailable`. Free space and restart the store: it reloads the AOF, dropping at most an incomplete final write that was never acknowledged. Confirm with `rladmin status`.
 
-## Durability choice
+## Store profiles
 
-SPEC `STA-16` requires a reply only after the write survives a power loss. DESIGN §D2 owner decision 1 weighs that against latency:
+The store can run in one of four profiles. They differ only in how hard Valkey pushes each write to disk before it answers, which trades safety on a crash or power cut for speed. `durable` is the default and the only profile SPEC `STA-16` calls durable; the other three are opt-in under `STA-16a` (owner decision, DESIGN §D2 decision 1).
 
-| Option | Limiter decision latency on the development Mac | Guarantee after a power loss | SPEC change |
-|---|---|---|---|
-| **A. `appendfsync always` (this design)** | ~15–20 ms p50; throughput holds through group commit | Nothing acknowledged is lost | None |
-| B. `appendfsync everysec` | ~0.5 ms p50 | About 1 s of acknowledged decisions can be lost (up to about 2 s when fsync is slow), treated like a stale snapshot (`STA-11`) | Reword `STA-16` to "durable against a store-process crash; host power loss is out of scope like `STA-11`" |
+| Profile | What happens on each write | What a crash can lose |
+|---|---|---|
+| `durable` (default) | `appendfsync always`: written and fully flushed to the drive (`F_FULLFSYNC` on macOS) before the reply | Nothing that was answered, even on a power cut |
+| `barrier` | `appendfsync always`, but on macOS the flush is `F_BARRIERFSYNC`: the write is on its way to the drive, in order, before the reply | Valkey or OS crash: nothing. Power cut: the last few writes, never out of order |
+| `everysec` | `appendfsync everysec`: written to the OS at once, flushed about once a second | OS crash or power cut: about 1–2 s. A Valkey crash during a slow flush: up to about 2 s |
+| `buffered` | `appendfsync no`: written to the OS at once; the OS decides when it reaches the drive | OS crash or power cut: about 30 s or more |
 
-- The design keeps option A: the shipped durable profile uses `appendfsync always` with `no-appendfsync-on-rewrite no`. On Linux servers with NVMe and `fdatasync` the fsync cost is typically well under 1 ms.
-- The store conformance curve (DESIGN §C2), measured on the production OS and disk, decides whether to revisit it. Option B would need the SPEC change above first.
+Any loss under the opt-in profiles cannot be detected afterwards (like a stale snapshot, `STA-11`), and the `BUD-11` guarantee does not cover the lost writes: a user may get some tokens twice.
+
+**How to choose one**
+
+- Start the store with `deploy/start-store.sh --profile <name>` followed by the usual `--port`, `--dir` and `--aclfile`. `RL_STORE_PROFILE=<name>` does the same; `--profile` wins.
+- `barrier` needs the patched Valkey first: `deploy/build-valkey-barrier.sh` downloads Valkey 9.1.2, checks its checksum, applies `deploy/valkey-barrier.patch` (one call in `aof.c`) and writes `.data/valkey-barrier/valkey-server`. On Linux the patch changes nothing, so `barrier` behaves like `durable` there.
+- Harness runs take `--store-profile <name>` (`bin/test/orchestrator --scenario … --store-profile everysec`), and `context.json` records it as `store_profile`. The H6 results and every verdict in this repository use `durable`.
+- The library needs no change: it works the same with every profile.
+
+**Measured on the development Mac (2026-11-03)**
+
+MacBook Pro (Mac15,9, 16 cores), three `hitapi` instances, test build, no verdict. Each profile ran `scenarios/profile-s2-users-1000.toml` (500 → 10 → 500 req/s over 1,010 users) and `scenarios/profile-ramp.toml` (100 req/s doubling to 6,400, then 10,000, 30 s each, 10,000 users, no early stop). Limiter time is the `Acquire` call as each API instance saw it.
+
+| Profile | s2-users-1000: p50 / p99 / worst | Ramp, all steps: p50 / p99 / worst | Ramp top step: decisions/s | Runs |
+|---|---|---|---|---|
+| `durable` | 10.4 ms / 506 ms / 559 ms | 13.2 ms / 547 ms / 763 ms | 19,737 (the client fell behind from 3,200 req/s) | `20261103-222009-profile-s2-users-1000-1`, `20261103-222345-profile-ramp-1` |
+| `barrier` | 0.80 ms / 2.6 ms / 22 ms | 0.56 ms / 1.7 ms / 20 ms | 21,397 | `20261103-223635-…`, `20261103-224010-…` |
+| `everysec` | 0.21 ms / 1.4 ms / 14 ms | 0.20 ms / 0.82 ms / 144 ms | 21,389 | `20261103-222822-…`, `20261103-223157-…` |
+| `buffered` | 0.21 ms / 1.2 ms / 14 ms | 0.20 ms / 0.84 ms / 16 ms | 21,390 | `20261103-224448-…`, `20261103-224824-…` |
+
+- **Correctness passed and no request failed in all eight runs.** Valkey's CPU peaked at 68–78% of one core on the top step.
+- **`durable` is slow here because of this Mac's drive, not the limiter.** Each full flush takes about 6 ms, and about every 2,800 full flushes the drive pauses for about 3.6 s. During those pauses the test client reached its cap of 20,000 requests in flight, so from 3,200 req/s it could not send everything (24,180 of 680,262 scheduled requests unsent). A bare flush loop with no Valkey shows the same pauses; the evidence is in `.data/logs/perf-2026-11-03/` on the development machine.
+- **`barrier` is the closest to `durable` in safety and keeps p99 under 3 ms.** `everysec` and `buffered` are faster still at the median but can lose more.
+- **Linux has not been measured.** There `fsync` normally makes data durable, and on a server SSD with power-loss protection the `durable` profile is expected to cost well under 1 ms per flush; measure before relying on it.
+
+**Which to use**
+
+- Production, or anything where a lost decision matters: `durable`, ideally on Linux.
+- A Mac where `durable`'s pauses hurt: `barrier`.
+- Development or load tests where speed matters more than a power cut: `everysec`, or `buffered`.
