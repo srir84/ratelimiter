@@ -1,6 +1,19 @@
 # Rate limiter
 
-A distributed token-bucket rate limiter, built from scratch as a **Go library** that every instance of a host service imports. All instances spend from one budget per key, kept in a dedicated **Valkey store**, where each decision runs as one atomic Lua script on the store's own clock. An allowed call returns a permit with a signed receipt, so a confirmed failure gets its token back. An **admin tool**, `rladmin`, starts epochs and repairs state. A **test harness** plays a host service and measures the limiter under scheduled traffic and injected faults.
+A Go library that lets every copy of a service share **one rate limit per user**, enforce it exactly, and **give the token back when the protected work fails**. The shared budgets live in one Valkey store, which is compatible with Redis. The repository also holds the test rig that measures the library under real traffic and injected faults.
+
+**Status:** v1, built from scratch and tested end to end on one laptop. It has not run in production. Correctness held in every test run. Throughput reached 10,000 req/s with no errors. Tail latency did not meet its target: on this Mac, slow disk flushes push p99 to about 0.5 s (see [Measured results](#measured-results)).
+
+## In one minute
+
+- **The problem.** You run three copies of an API, and each user may make 10 requests a second with bursts of 20. If each copy counts on its own, a user gets up to three times the limit. If the copies share a naive counter, they race, their clocks disagree, and a failed request still costs the user a token.
+- **What this does.** Every copy imports the library. One call, `Acquire(ctx, key)`, runs a single atomic script in the shared store and returns one of these:
+  - **allowed**: go ahead, with a permit;
+  - **limited**: the budget is spent; the result says how long to wait;
+  - **degraded**: open mode only; the store was unreachable and nothing was charged, so the call may proceed uncounted;
+  - a **refusal** that names its cause. For example, `unavailable` means the store provably did not run the command. `outcome_unknown` means it may have run, so the call may already be charged. Others include `busy` and `capacity_error`.
+- **Fair refunds.** If your work fails for certain, `permit.Release()` returns the token in the background, exactly once, even when retries repeat the refund.
+- **Admin tool.** `rladmin` sets the shared policy and repairs damaged state.
 
 ![Flowchart](diagrams/README-d1-d968d72b.png)
 
@@ -35,6 +48,173 @@ flowchart LR
 ```
 
 </details>
+
+## What you can use it for
+
+| Use | How |
+|---|---|
+| Per-user or per-API-key quotas across replicas | The key is whatever you pass to `Acquire`: a user ID, an API key or a tenant. Every replica spends from the same bucket. |
+| Shielding an expensive dependency | The check runs before the work, so a rejected call never touches your database or paid API. In the three s2 runs, with the same schedule of first attempts, database writes fell from 61,033 to between 36,426 and 47,791. |
+| Metering where failures should not cost | `Release()` refunds a call that failed for certain. A call whose outcome is unknown keeps its charge. |
+| Studying distributed rate limiting | The spec, design, independent reference model and fault-injection harness are all here. Every spec rule has an ID, and the tests are named after the spec's test IDs. |
+
+**Not a fit** if you need sub-second p99 on macOS with per-decision durability, several stores or regions, a non-Go host, or live policy changes. The full list is under [What it does not do](#what-it-does-not-do).
+
+## How one request works
+
+![Sequence diagram](diagrams/README-d2-05aa5f8d.png)
+
+<details><summary>Diagram source (mermaid — sequence diagram)</summary>
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant H as Host code
+  participant L as limiter library
+  participant S as Valkey store
+  participant D as Host database
+  H->>L: Acquire(ctx, "user-42")
+  L->>S: EVALSHA acquire script (one round trip)
+  Note over S: one atomic script<br/>read the store clock, refill the bucket,<br/>take 1 token, write
+  Note over S: append-only file synced<br/>to disk before the reply
+  S-->>L: allowed + receipt fields
+  L-->>H: Allowed + permit (HMAC-signed receipt)
+  H->>D: do the protected work
+  alt success, or outcome unknown
+    H->>L: permit.Done() - the charge stays
+  else confirmed failure
+    H->>L: permit.Release() - does not wait
+    L->>S: refund script, retried in the background
+    Note over S: refund marker:<br/>credit at most once
+  end
+```
+
+</details>
+
+If the bucket is empty, the store's reply is `limited` with the wait time instead, and the host answers `429` with `Retry-After`. Nothing is queued.
+
+**Terms used below**
+
+| Term | Meaning |
+|---|---|
+| Permit, receipt | What an allowed call returns. The receipt is signed with HMAC under a key that lives only in this process's memory, so only the process that issued it can refund it. |
+| Refund marker | A short-lived store entry written together with a refund credit. A repeated refund sees it and is not credited twice. |
+| Budget time, high-water mark | Time read from the store's clock inside a script. The high-water mark is the latest budget time stored, and budget time never moves below it. |
+| Epoch, fingerprint | `rladmin` starts an epoch: a record holding a hash (the fingerprint) of the shared policy. Instances join only if their settings hash the same. A new policy means a new epoch. |
+| Quarantine, integrity hold | When stored state is missing or damaged, one key is refused (quarantine), or every key is refused (hold), until an operator restores it or starts a new epoch. |
+| Closed and open mode | What happens when the store cannot be reached: refuse the call (closed) or let it through uncharged as `degraded` (open). |
+| AOF, `appendfsync always` | Valkey's append-only log, synced to disk on every write, so an acknowledged decision survives a store crash. |
+
+## What makes it different
+
+Most Redis rate limiters are an `INCR` plus `EXPIRE`, or a Lua script that trusts the app server's clock. This one is built to stay correct when things go wrong:
+
+| Concern | Typical shared limiter | This library |
+|---|---|---|
+| **Atomicity** | Read-then-write from the app, or `MULTI`/`WATCH` | One Lua script per decision. Every check runs before the first write, so a script never half-applies. No locks are kept in the store. |
+| **Time** | Each app server's clock, so skew leaks budget | The store's own clock, read inside the script. Budget time never moves backwards. |
+| **Arithmetic** | Floating-point refill | Integer units (1 token = `rate_period_ns` units). An independent Python model reproduces every balance exactly. |
+| **Store errors** | Usually "allow" or "deny", silently | A closed set of results. `unavailable` and `outcome_unknown` are kept apart, so the host knows whether the call may have been charged. Open mode bypasses only when nothing could have been charged. |
+| **Failed work** | The token is lost | Signed receipts plus refund markers. A confirmed failure is credited exactly once. |
+| **Config drift** | Undetected: replicas enforce different limits | An instance whose policy fingerprint differs from the epoch's refuses to serve. |
+| **State loss** | A wiped key becomes a full bucket again | A missing or damaged key is quarantined, and an epoch-wide loss holds every key. A damaged bucket is never silently reset to full. |
+| **Durability** | Often in memory only | AOF with `appendfsync always`: each decision is on disk before the reply. This is also the main cost (see below). |
+| **Memory** | Grows with keys | Fixed caps on tracked buckets and markers, plus a cleanup pass that removes full, idle buckets. |
+
+**The core guarantee** (SPEC `BUD-11` and `BUD-11a`): in any window of `T` seconds of store time, one key's normal allows are at most `capacity + rate × T`, plus the refunds applied in that window. Integration and harness runs check this from their operation logs.
+
+## How it is verified
+
+- **[SPEC.md](SPEC.md)** gives every rule an ID. Its test table names the rules each test ID covers, and each test ID is a Go or Python test of the same name (`T-COR-1` → `TestT_COR_1`).
+- **Six test layers:**
+  - L0: store conformance;
+  - L1: unit tests with a fake store;
+  - L2: each Lua script against a real Valkey with a controlled clock;
+  - L3: several limiters sharing one store;
+  - L4: the full HTTP harness;
+  - L5: scenario runs.
+
+  Tests spawn their own store, and a missing tool fails the run rather than skipping. See [Tests](#tests).
+- **An independent reference model** in Python uses integers only and shares no code with the Go. It replays integration-test operation logs and checks the guarantee above.
+- **Mutation testing** (`make mutate`). Planted bugs must each make a named test fail. Every surviving automatic mutation is either killed by a new test or explained.
+- **The harness** plays a real host:
+  - an HTTP API over PostgreSQL, run as three processes;
+  - seeded, open-loop traffic: requests leave on schedule and never wait for earlier replies;
+  - faults: the store goes down, pauses, loses state or runs out of capacity;
+  - each benchmark scenario runs with and without the limiter.
+
+## Measured results
+
+The October 2026 scenario runs (`runs/h6-manifest.json`) used:
+- a MacBook Pro (Mac15,9, 16 cores);
+- three `hitapi` instances unless noted;
+- Valkey 9.1.2 with `appendfsync always`, and PostgreSQL 14;
+- a policy of 10 tokens a second with capacity 20, per user.
+
+Clients retry after a 429, up to 2 times, so the limiter runs send more requests than the runs without it. "Correctness" is the guarantee check.
+
+| Scenario | Traffic | Requests | Allowed | DB rows: no limiter → limiter | Correctness | Performance verdict |
+|---|---|---|---|---|---|---|
+| s1-ramp | 100 req/s, doubling every 30 s, 10,000 users | 3,444 | 2,950 | stopped early | pass | **no sustainable step**: p99 0.50 s at 100 req/s (threshold 61 ms) |
+| s1-ramp-1api | same, one instance | 11,179 | 8,167 | stopped early | pass | **100 req/s sustained** (p99 24 ms). 200 req/s failed (p99 0.52 s) |
+| s2-users-100 | 500 → 10 → 500 req/s. 100 users away 60–150 s, plus 10 always active | 117,953 | 36,426 | 61,033 → 36,426 | pass | — |
+| s2-users-1000 | same, 1,000 users | 100,882 | 43,991 | 61,033 → 43,991 | pass | — |
+| s2-users-10000 | same, 10,000 users | 92,493 | 47,791 | 61,033 → 47,791 | pass | — |
+| s3-busy-user | one user at 100/s beside 100 users at 5/s each | 94,426 | 61,163 | 71,866 → 61,163 | pass | — |
+| s4-spike | 100 → 500 → 100 req/s | 25,039 | 18,175 | 19,961 → 18,175 | pass | **recovery not met**: p99 0.52 s after the spike (threshold 59 ms), 0 errors |
+| s5-retry | 200 req/s over 10 users (heavy retry load) | 55,160 | 10,965 | 24,028 → 10,965 | pass | — |
+| s7-long | 70 req/s for 10 min, two forced AOF rewrites, 2% of allowed calls released for refund | 43,018 | 41,022 | 41,170 → 41,022 | pass | — |
+| s6 (8 runs) | store down, paused, state deleted, capacity exhausted, each in closed and open mode | — | — | — | pass | — |
+
+- **Without the limiter**, the same API ran every step of the s1 ramp, up to 10,000 req/s (680,262 requests), with an overall p99 of 3.8 ms.
+- **Refunds.** In s7-long, all 833 released calls were credited. In s6-down-closed, refunds went through a store outage: 710 were applied, 2 retries were recognized as already applied, and none were left unresolved.
+- **Latency cost: durable profile.** The limiter adds about **8–12 ms at p50** and **0.5–0.75 s at p99**. Without it, the API's p50 is 0.2–0.8 ms and its p99 is 3.1–4.4 ms.
+- **Cause: this Mac's SSD.**
+  - Each decision waits for `F_FULLFSYNC`, about 6 ms.
+  - About every 2,750 flushes, the SSD runs about 15 flushes at 0.23–0.51 s each, over 3.6 s. Those windows hold 8–15% of requests and set p99. Outside them, p99 is 19–25 ms.
+  - A bare `F_FULLFSYNC` loop, with no Valkey and no limiter, shows the same pattern (5 min, 39,161 flushes: p50 6.4 ms, p99.9 262 ms, worst 513 ms).
+- **The failed verdicts are flush slowdowns, not throughput.** Each step's p99 is judged over 30 s.
+  - In s1-ramp, one slowdown at 28.5 s (251 requests, 7%) failed the 100 req/s step and stopped the run.
+  - The one-instance ramp's first step had no slowdown and passed.
+  - The design's p99 of 33 ms (DESIGN §A3.0 row 9) was a store-only benchmark. It did not include these slowdowns.
+
+**Follow-up runs (2026-11-03)**
+
+Same machine and harness. Test build (`run_kind = "test"`), no verdict, early stop off. These are kept outside `runs/` so the H6 evidence is unchanged.
+
+| Run | `appendfsync` | Limiter p50 | Limiter p99 | Errors | Correctness |
+|---|---|---|---|---|---|
+| s2-users-1000 | always | 10.2 ms | 519 ms | 0 | pass |
+| s2-users-1000 | everysec | **0.2 ms** | **1.1 ms** | 0 | pass |
+| s1 ramp, every step to 10,000 req/s | always | 7.5–15.2 ms | 16–843 ms; 16–54 ms outside slowdowns | 0 | pass |
+| s1 ramp, every step to 10,000 req/s | everysec | 0.1–0.3 ms | 0.4–4.0 ms | 0 | pass |
+
+- **Throughput ceiling: not reached.** At the 10,000 req/s step, including 429 retries, the limiter decided about 21,400–21,700 calls a second with no errors under both settings. Valkey's CPU peaked at 59% of one core with `always` and 76% with `everysec`.
+- **The trade-off.** `everysec` removes the latency cost, but a store crash can lose about 1 s of acknowledged decisions, or up to about 2 s when fsync is slow. It is not the shipped profile: SPEC `STA-16` would need rewording (DESIGN §D2 option B). Linux with a power-loss-protected SSD, where a plain `fsync` is durable, has not been measured.
+
+## What it does not do
+
+v1 scope, from SPEC §1:
+- **One store.** There is no sharding, replica failover or multi-region setup.
+- **One policy per epoch.** It is a single token bucket for every key, and each call costs 1. Changing the policy means starting a new epoch, which resets every budget.
+- **No deduplication.** A retried request spends another token.
+- **Go only.** It is a library, with no network API.
+- **Limited refund guarantee.** Refunds are guaranteed only within the declared bounds: release delay, outage length and drain time. A crash that loses receipts, a longer outage or a forward clock jump is out of scope. Because the signing key lives only in memory, a restarted process cannot refund calls made before the restart.
+- **Limited corruption detection.** Some corruption cannot be detected with bounded state, such as a bucket deleted together with its index entry, or a stale snapshot (SPEC `STA-11`).
+
+## Where to read next
+
+- **Try it:** [Prerequisites and setup](#prerequisites-and-setup), then [Quick start](#quick-start). To see it under load, use [Harness runs](#harness-runs) (`make run SCENARIO=…`).
+- **Use it:** [docs/host-integration.md](docs/host-integration.md).
+- **Understand it:**
+  1. [ARCHITECTURE.md](ARCHITECTURE.md) §1 and §4: the pieces, and each main flow as a diagram.
+  2. [docs/code-map.html](docs/code-map.html): an interactive map from overview to paths to components, linked to the source.
+  3. [SPEC.md](SPEC.md), then [DESIGN.md](DESIGN.md): the exact rules, then how each is built.
+
+The full document list is at the [end of this file](#documents).
+
+## The pieces
+
 
 | Part | What it is | Code |
 |---|---|---|
