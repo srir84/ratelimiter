@@ -1,0 +1,56 @@
+name: tests
+
+# Started by hand for now: the repository is private, and macOS runner minutes count ten
+# times against the free allowance. When the repository is public, add `push` and
+# `pull_request` triggers here.
+on:
+  workflow_dispatch:
+    inputs:
+      extended:
+        description: "Also run the full store conformance suite (make test-store)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: lint, unit and Python tests
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: make check
+      - run: make test-unit
+      - run: make test-py
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checks-out
+          path: .out/
+          if-no-files-found: ignore
+
+  store:
+    name: store, script and integration tests
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: make test-store-quick
+      - run: make test-scripts
+      - run: make test-integration
+      - if: ${{ inputs.extended }}
+        run: make test-store
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-out
+          path: .out/
+          if-no-files-found: ignore

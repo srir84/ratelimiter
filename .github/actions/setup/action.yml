@@ -1,0 +1,46 @@
+name: Set up the toolchain
+description: >
+  Installs what `make setup` checks for (DESIGN §C8) on a GitHub macOS arm64 runner:
+  Go (go.mod's toolchain line), Python 3.13, PostgreSQL 14, Valkey 9.1, luacheck 1.2 and
+  stylua 2.5.2, then runs `make setup` for golangci-lint, the Python dev tools and the
+  harness PostgreSQL cluster.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.13"
+        cache: pip
+        cache-dependency-path: requirements-dev.txt
+
+    - name: Install Valkey, PostgreSQL 14 and luacheck
+      shell: bash
+      run: |
+        brew install valkey postgresql@14 luacheck
+        echo "$(brew --prefix postgresql@14)/bin" >> "$GITHUB_PATH"
+
+    # Homebrew's stylua is newer than the pinned 2.5.x, so take the release archive.
+    - name: Install stylua 2.5.2
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="$RUNNER_TEMP/stylua"
+        mkdir -p "$dir"
+        curl -fsSL --retry 3 -o "$dir/stylua.zip" \
+          https://github.com/JohnnyMorganz/StyLua/releases/download/v2.5.2/stylua-macos-aarch64.zip
+        echo "92ff0889e16324801bc072692974bb67f8161e62010fc90f96c62a17f81f32c7  $dir/stylua.zip" | shasum -a 256 -c -
+        unzip -q "$dir/stylua.zip" -d "$dir"
+        chmod 0755 "$dir/stylua"
+        echo "$dir" >> "$GITHUB_PATH"
+
+    - name: make setup
+      shell: bash
+      run: |
+        valkey-server --version
+        stylua --version
+        make setup
