@@ -31,7 +31,7 @@
     "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
   },
   "store_settings": {
-    "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-132845-s1-ramp-1/store/acl.conf",
+    "aclfile": "runs/20261010-132845-s1-ramp-1/store/acl.conf",
     "aof-use-rdb-preamble": "yes",
     "appendfsync": "always",
     "appendonly": "yes",

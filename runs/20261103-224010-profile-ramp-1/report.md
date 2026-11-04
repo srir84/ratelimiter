@@ -25,10 +25,10 @@
 | os.ProductVersion | 27.0.1 |
 | versions.go | go1.27.1 |
 | versions.valkey | Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=b05ed710465b7a1 |
-| versions.valkey_path | /Users/srirondla/distributed-systems/ratelimiter/.data/valkey-barrier/valkey-server |
+| versions.valkey_path | .data/valkey-barrier/valkey-server |
 | versions.postgres | postgres (PostgreSQL) 14.19 (Homebrew) |
 | store_profile | barrier |
-| store_settings.aclfile | /Users/srirondla/distributed-systems/ratelimiter/runs/20261103-224010-profile-ramp-1/store/acl.conf |
+| store_settings.aclfile | runs/20261103-224010-profile-ramp-1/store/acl.conf |
 | store_settings.aof-use-rdb-preamble | yes |
 | store_settings.appendfsync | always |
 | store_settings.appendonly | yes |
@@ -532,7 +532,7 @@
 
 | field | value |
 |---|---|
-| schedule_path | /Users/srirondla/distributed-systems/ratelimiter/runs/20261103-224010-profile-ramp-1/schedule.jsonl |
+| schedule_path | runs/20261103-224010-profile-ramp-1/schedule.jsonl |
 | schedule_sha256 | 4e1d9cb0a7271c4fef421897538971d34830235c9c4f21b70f5879beb357e569 |
 | schedule_sha256_context | 4e1d9cb0a7271c4fef421897538971d34830235c9c4f21b70f5879beb357e569 |
 | schedule_sha256_matches | true |

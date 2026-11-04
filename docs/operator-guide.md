@@ -274,6 +274,9 @@ MacBook Pro (Mac15,9, 16 cores), three `hitapi` instances, test build, no verdic
 
 **Which to use**
 
-- Production, or anything where a lost decision matters: `durable`, ideally on Linux.
-- A Mac where `durable`'s pauses hurt: `barrier`.
-- Development or load tests where speed matters more than a power cut: `everysec`, or `buffered`.
+A lost decision means a user gets back budget they had already spent, so they may make a few extra requests right after the crash. Nobody loses data, and nothing breaks.
+
+- A few extra requests after a rare crash or power cut are fine (most uses): `everysec`.
+- Every decision must survive a power cut, for example quotas you bill on or legal caps: `durable`. Measure it on the real server first, ideally Linux.
+- A Mac where `durable`'s pauses hurt, but you want close to its safety: `barrier`.
+- Local development and load tests: `buffered` or `everysec`.

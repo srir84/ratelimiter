@@ -32,7 +32,7 @@
   },
   "store_profile": "durable",
   "store_settings": {
-    "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261103-222009-profile-s2-users-1000-1/store/acl.conf",
+    "aclfile": "runs/20261103-222009-profile-s2-users-1000-1/store/acl.conf",
     "aof-use-rdb-preamble": "yes",
     "appendfsync": "always",
     "appendonly": "yes",

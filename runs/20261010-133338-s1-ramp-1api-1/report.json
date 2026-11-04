@@ -33,7 +33,7 @@
       "postgres": "postgres (PostgreSQL) 14.19 (Homebrew)"
     },
     "store_settings": {
-      "aclfile": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-133338-s1-ramp-1api-1/store/acl.conf",
+      "aclfile": "runs/20261010-133338-s1-ramp-1api-1/store/acl.conf",
       "aof-use-rdb-preamble": "yes",
       "appendfsync": "always",
       "appendonly": "yes",
@@ -1585,7 +1585,7 @@
     ]
   },
   "traffic": {
-    "schedule_path": "/Users/srirondla/distributed-systems/ratelimiter/runs/20261010-133338-s1-ramp-1api-1/schedule.jsonl",
+    "schedule_path": "runs/20261010-133338-s1-ramp-1api-1/schedule.jsonl",
     "schedule_sha256": "f324f3262fbc0222b117e949101b5e94e43cf71604ce9e4c08fbec8258b64a95",
     "schedule_sha256_context": "f324f3262fbc0222b117e949101b5e94e43cf71604ce9e4c08fbec8258b64a95",
     "schedule_sha256_matches": true,

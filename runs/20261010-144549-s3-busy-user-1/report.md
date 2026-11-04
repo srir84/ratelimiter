@@ -27,7 +27,7 @@
 | versions.valkey | Valkey server v=9.1.2 sha=00000000:1 malloc=libc bits=64 build=1af85cd1d1bb3237 |
 | versions.valkey_path | /opt/homebrew/bin/valkey-server |
 | versions.postgres | postgres (PostgreSQL) 14.19 (Homebrew) |
-| store_settings.aclfile | /Users/srirondla/distributed-systems/ratelimiter/runs/20261010-144549-s3-busy-user-1/store/acl.conf |
+| store_settings.aclfile | runs/20261010-144549-s3-busy-user-1/store/acl.conf |
 | store_settings.aof-use-rdb-preamble | yes |
 | store_settings.appendfsync | always |
 | store_settings.appendonly | yes |
@@ -496,7 +496,7 @@
 
 | field | value |
 |---|---|
-| schedule_path | /Users/srirondla/distributed-systems/ratelimiter/runs/20261010-144549-s3-busy-user-1/schedule.jsonl |
+| schedule_path | runs/20261010-144549-s3-busy-user-1/schedule.jsonl |
 | schedule_sha256 | 57e95706be6344c8a33831478f6d04282dc82243112f8d9c5c9c45e6ded45080 |
 | schedule_sha256_context | 57e95706be6344c8a33831478f6d04282dc82243112f8d9c5c9c45e6ded45080 |
 | schedule_sha256_matches | true |
