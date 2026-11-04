@@ -79,7 +79,7 @@ func TestOOMRefusal(t *testing.T) {
 // refund (plain #!lua) before they run: capacity_error with an OOM store error, the store
 // unchanged. The allow-oom maintenance scripts run and free memory: due_entries returns the due
 // key and stores hwm, cleanup_entry removes its eligible bucket, and reclaim unlinks 100
-// old-epoch keys of 10 KB each, so used_memory drops by at least 0.5 MB. maxmemory is restored
+// old-epoch keys of 10 KB each, so used_memory_dataset drops by at least 0.5 MB. maxmemory is restored
 // afterwards.
 func TestMaintenanceScriptsUnderOOM(t *testing.T) {
 	p := testPolicy()
@@ -112,18 +112,22 @@ func TestMaintenanceScriptsUnderOOM(t *testing.T) {
 		}
 	}
 	t.Cleanup(restore) // before the teardown audit, which Store registered earlier
-	usedMemory := func() int64 {
+	memory := func(field string) int64 {
 		t.Helper()
-		used, err := strconv.ParseInt(storeproc.ParseInfo(mustDo(t, ops, "INFO", "memory").Str)["used_memory"], 10, 64)
+		n, err := strconv.ParseInt(storeproc.ParseInfo(mustDo(t, ops, "INFO", "memory").Str)[field], 10, 64)
 		if err != nil {
-			t.Fatalf("used_memory: %v", err)
+			t.Fatalf("%s: %v", field, err)
 		}
-		return used
+		return n
 	}
-	full := usedMemory()
+	full := memory("used_memory")
 	if full < 3_000_000 {
 		t.Fatalf("used_memory %d, want at least the 3 MB of filler and old-epoch data", full)
 	}
+	// The freed amount is measured on the dataset: used_memory also counts the script cache,
+	// which grows when this test first runs each script (more under RL_SCRIPT_AUDIT, whose
+	// instrumented copies are longer) and so hides part of what the scripts free.
+	dataset := memory("used_memory_dataset")
 	mustDo(t, ops, "CONFIG", "SET", "maxmemory", strconv.FormatInt(full/2, 10))
 
 	before := e.snap()
@@ -138,8 +142,8 @@ func TestMaintenanceScriptsUnderOOM(t *testing.T) {
 	checkReply(t, "due_entries", e.run(e.la, dueReq(e.fp, 10, 0)), rep(0, now0, "", pastX, encA))
 	checkReply(t, "cleanup_entry", e.step(encA), rep(30, now0, "", 0))
 	checkReply(t, "reclaim", e.run(e.la, reclaimReq(old...)), rep(40, 0, "", len(old)))
-	if freed := full - usedMemory(); freed < 500_000 {
-		t.Errorf("the maintenance scripts freed %d bytes of used_memory, want at least 500,000", freed)
+	if freed := dataset - memory("used_memory_dataset"); freed < 500_000 {
+		t.Errorf("the maintenance scripts freed %d bytes of used_memory_dataset, want at least 500,000", freed)
 	}
 	want := removedState(t, before, encA, now0)
 	for _, k := range old {
