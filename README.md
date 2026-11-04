@@ -1,5 +1,7 @@
 # Rate limiter
 
+[![tests](https://github.com/srir84/ratelimiter/actions/workflows/ci.yml/badge.svg)](https://github.com/srir84/ratelimiter/actions/workflows/ci.yml)
+
 A rate limiter decides how many requests each user may make, for example 10 a second. This one is for a service that runs on several servers at once. It gives each user exactly their share, however many servers there are, and gives a request back when the work behind it fails.
 
 It is a Go library, a piece of code that each server includes. The shared counts live in a small, fast database called the store. The store is [Valkey](https://valkey.io), a free, open-source copy of the popular Redis database.

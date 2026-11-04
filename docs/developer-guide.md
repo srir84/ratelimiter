@@ -228,6 +228,15 @@ The [host integration guide](host-integration.md) covers every host rule (`HOST-
 - Test order is shuffled: `bin/trace gotest` adds `-shuffle=on` (repeat an order with `-shuffle=<seed>`), and pytest takes `--shuffle-seed=N`.
 - `make check` runs golangci-lint (untagged and with each of `rltest`, `conformance`, `scripttest`), stylua, ruff, mypy and `tools/trace`; `make fmt` formats. `make slice-check S=<id>` is the gate for a build slice, `make mutate` runs mutation testing, `make test-report` runs the smoke runs and the report tests.
 
+## Automatic tests on GitHub
+
+`.github/workflows/ci.yml` runs on a GitHub macOS runner (`macos-15`, Apple silicon). It is started by hand from the Actions tab for now (the repository is private, and macOS minutes count ten times). It runs two jobs side by side:
+
+- **lint, unit and Python tests:** `make check`, `make test-unit`, `make test-py` (about 5 minutes);
+- **store, script and integration tests:** `make test-store-quick`, `make test-scripts`, `make test-integration` (about 9 minutes). Ticking *extended* adds the full `make test-store`.
+
+`.github/actions/setup` installs the same tools `make setup` checks for, including stylua 2.5.2 from its release archive, since Homebrew's is newer. When a test fails, the job log shows its output, and `.out/` is attached to the run. Benchmarks never run there, because a shared machine's timing means nothing.
+
 ## Harness runs
 
 ```bash
