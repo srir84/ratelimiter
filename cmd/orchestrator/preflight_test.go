@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // testBins are Go binaries built from testdata/buildinfo: clean without tags, rltest with

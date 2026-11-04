@@ -12,10 +12,10 @@ import (
 	"testing/iotest"
 	"time"
 
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // The lifecycle tests build limiters through newLimiter with a hookSet, so they run in the

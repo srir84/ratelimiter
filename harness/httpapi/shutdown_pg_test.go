@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/harness/pgtest"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/pgtest"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The harness cluster (DESIGN §B2 db_dsn), and the same with a pool of one connection: a /hit

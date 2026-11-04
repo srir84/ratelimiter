@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 // The tests of this file build no limiter and run before limiter_test.go's: go test runs a

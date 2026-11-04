@@ -3,8 +3,8 @@ package limiter
 import (
 	"time"
 
-	"ratelimiter/internal/core"
-	"ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/core"
+	"github.com/srir84/ratelimiter/internal/settings"
 )
 
 // The public types (DESIGN §A5.2, §A5.11).

@@ -11,10 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // Exit codes (DESIGN §A6, for every command).

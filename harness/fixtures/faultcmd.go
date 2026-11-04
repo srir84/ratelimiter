@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/keys"
 )
 
 // faultctl's command grammar (DESIGN §B6; IMPLEMENTATION_PLAN H4 step 3). cmd/faultctl parses

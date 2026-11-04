@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // arrival is one call that reached a countingAdapter, and when.

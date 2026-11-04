@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // conn is rladmin's one connection to the store (DESIGN §A6; plan S8 step 3: no adapter):

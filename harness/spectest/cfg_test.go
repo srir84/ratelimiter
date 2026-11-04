@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storestate"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // serve runs one acquire on each of instances 0 and 1, one at a time, 30 ms of controlled

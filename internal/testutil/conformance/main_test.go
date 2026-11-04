@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // measurements collects what the tests measure, by key, for .data/conformance.json, and

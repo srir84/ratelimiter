@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/scriptrun"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // The S8 admin script tests' values (IMPLEMENTATION_PLAN S8 Tests (a)): the balance most

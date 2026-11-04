@@ -3,11 +3,11 @@
 package main
 
 import (
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/httpapi"
-	"ratelimiter/limiter"
-	"ratelimiter/limitertest"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/httpapi"
+	"github.com/srir84/ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limitertest"
 )
 
 // construct builds the test binary's limiter through limitertest.New (DESIGN §B5

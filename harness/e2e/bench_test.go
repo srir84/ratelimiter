@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // buildWait bounds one go build or go version run of these tests.

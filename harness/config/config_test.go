@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/settings"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // b2Policy, b2Instance and storeAndAPI are the tables of the DESIGN §B2 file.

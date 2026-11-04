@@ -5,11 +5,11 @@ import (
 	"strconv"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // tBound is TBOUND = 2^53 − 2^43 (§A3.1): every budget time t_us lies below it.

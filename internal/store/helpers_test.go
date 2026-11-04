@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // testD is the dependency deadline D of the unit tests (IMPLEMENTATION_PLAN S3 Tests (a)).

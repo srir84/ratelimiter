@@ -5,9 +5,9 @@ package scripts_test
 import (
 	"testing"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // unattributable is the ix member TestCleanupEntryCheckOrderPairs uses for the is_enc check:

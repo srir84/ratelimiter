@@ -6,9 +6,9 @@ import (
 	"context"
 	"testing"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // TestClock_SetControlled (plan H3 step 3; DESIGN §B6 "Controlled time"): the rltest build

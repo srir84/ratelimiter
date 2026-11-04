@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // Mode is a store fault (DESIGN §B6; the names are HARNESS's fault modes).

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // A run's child processes (DESIGN §B1, §C8 "left to the plan"; IMPLEMENTATION_PLAN H3 step 4).

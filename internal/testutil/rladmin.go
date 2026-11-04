@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // rladminEnv overrides the rladmin binary the harness driver runs (IMPLEMENTATION_PLAN S8 step

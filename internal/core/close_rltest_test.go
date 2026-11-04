@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // TestCloseAndKill: Close (nothing pending to drain) and Kill each stop the epoch watch and close

@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // records returns the op-log records from line from on, decoded with exact numbers.

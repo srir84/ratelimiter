@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 func TestC2_Row08_AOFMultiExec(t *testing.T) {

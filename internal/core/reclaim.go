@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // reclaimScans is the most SCAN calls the reclaimer makes after one completed pass (DESIGN

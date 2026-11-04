@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // Store fault timing (DESIGN §B6; IMPLEMENTATION_PLAN H4 step 1).

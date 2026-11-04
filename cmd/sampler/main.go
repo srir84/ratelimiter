@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 const (

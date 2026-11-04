@@ -25,12 +25,12 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // The child processes these tests start from their own binary (TestMain), named by helperEnv

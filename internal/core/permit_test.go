@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 func allStates() []permitState {

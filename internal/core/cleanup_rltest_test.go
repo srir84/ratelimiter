@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // TestCleanupRunnerKill (plan S7 step 8, L1; DESIGN §A5.12): Kill stops the cleanup runner at

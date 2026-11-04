@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // Limiter is one limiter instance (DESIGN §A5.1, §A5.2): its own store connections, slots,

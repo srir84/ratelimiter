@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // healthBody is /health (DESIGN §B8; plan H1 step 9): the library's Health JSON plus the

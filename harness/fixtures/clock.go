@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"sync"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // Error is a fixture error with a fixed text (plan choice): its values are constants,

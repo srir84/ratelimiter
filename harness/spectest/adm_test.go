@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storestate"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // admTraffic runs T-ADM-1's traffic on its own goroutine: acquires one at a time across the

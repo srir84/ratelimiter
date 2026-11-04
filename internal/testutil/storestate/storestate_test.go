@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"testing"
 
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 const (

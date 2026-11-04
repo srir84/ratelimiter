@@ -19,8 +19,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/internal/testutil/golden"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/internal/testutil/golden"
 )
 
 // goldenAPI is the hand-written api-N.jsonl golden file (DESIGN §C5).

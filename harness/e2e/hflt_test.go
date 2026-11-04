@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // T-HFLT-2 to T-HFLT-5's bounds (IMPLEMENTATION_PLAN H4 Tests; HARNESS §8; plan choices unless

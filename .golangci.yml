@@ -38,7 +38,7 @@ linters:
           list-mode: strict
           allow:
             - $gostd
-            - ratelimiter
+            - github.com/srir84/ratelimiter
           deny:
             - pkg: net/http
               desc: "the product makes no HTTP calls"
@@ -63,7 +63,7 @@ linters:
           list-mode: strict
           allow:
             - $gostd
-            - ratelimiter
+            - github.com/srir84/ratelimiter
             - github.com/BurntSushi/toml
             - github.com/jackc/pgx/v5
             - github.com/shirou/gopsutil/v4
@@ -73,7 +73,7 @@ linters:
           list-mode: strict
           allow:
             - $gostd
-            - ratelimiter
+            - github.com/srir84/ratelimiter
             - github.com/BurntSushi/toml
         no-math-rand-v1:
           files:
@@ -235,4 +235,4 @@ formatters:
   settings:
     goimports:
       local-prefixes:
-        - ratelimiter
+        - github.com/srir84/ratelimiter

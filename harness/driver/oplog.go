@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
-	"ratelimiter/limitertest"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limitertest"
 )
 
 // The op log (DESIGN §C4; IMPLEMENTATION_PLAN S5 step 11): JSONL, one object per line with a

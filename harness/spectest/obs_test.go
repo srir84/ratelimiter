@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // a511Families are the metric families of DESIGN §A5.11's table, which carry SPEC API-1g's

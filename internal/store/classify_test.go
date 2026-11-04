@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // handlerFor answers a script with a valid reply of its own layout.

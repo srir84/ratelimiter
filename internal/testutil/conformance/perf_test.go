@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 const (

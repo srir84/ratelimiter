@@ -7,9 +7,9 @@ import (
 	"slices"
 	"testing"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // lateGuardAdapter is a store adapter whose every call returns res: the driver's recorder

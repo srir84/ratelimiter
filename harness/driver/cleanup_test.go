@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // scanJSON and stepJSON are the op log's cleanup_scan and cleanup records as the driver writes

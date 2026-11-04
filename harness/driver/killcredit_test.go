@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestDriverKilledReleaseCredit (F1; the unknown-time credit of HARNESS §8 T-HFLT-4 through

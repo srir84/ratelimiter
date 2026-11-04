@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 const (

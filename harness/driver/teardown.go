@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storestate"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The teardown checks of every L3 test (DESIGN §C1, §C4; IMPLEMENTATION_PLAN S5 step 16, S6

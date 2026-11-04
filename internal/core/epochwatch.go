@@ -5,12 +5,12 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // watchState is the epoch watch's state (DESIGN §A5.7, SPEC CFG-6).

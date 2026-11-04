@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // maxReleaseDelay is the host's declared max_release_delay (P): the longest time from just

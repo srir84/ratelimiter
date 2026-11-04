@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/internal/keys"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestT_KEY_1 [D] (SPEC T-KEY-1; API-1, API-7, BUD-1): valid keys (1 and 256 bytes of ASCII,

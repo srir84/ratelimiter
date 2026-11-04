@@ -17,14 +17,14 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // fakeAdapter is the store behind the store wrapper in these tests: every call is sent and

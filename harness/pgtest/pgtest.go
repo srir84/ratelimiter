@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // The cluster's directory and log, relative to the module root (DESIGN §C8).

@@ -8,8 +8,8 @@ import (
 	"sync"
 	"testing"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/fixtures"
 )
 
 // fakeHitDB is the database behind the wrapper: it records each call's stop channel and

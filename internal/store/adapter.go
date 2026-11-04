@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // Kind names a connection set (DESIGN §A5.4).

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 func TestPipelinedRepliesMatchInOrder(t *testing.T) {

@@ -18,17 +18,17 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/fixtures/respproxy"
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/internal/testutil/storestate"
-	"ratelimiter/limiter"
-	"ratelimiter/limitertest"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/fixtures/respproxy"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limitertest"
 )
 
 // DefaultStartNs is the controlled time New writes unless Options.StartNs is set (plan

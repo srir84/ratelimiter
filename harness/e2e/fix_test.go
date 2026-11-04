@@ -17,9 +17,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // T-FIX-1's bounds (IMPLEMENTATION_PLAN H4 Tests; DESIGN §B6; plan choices unless noted).

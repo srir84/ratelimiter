@@ -7,7 +7,7 @@ import (
 	"errors"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // errNotTestBuild is why an untagged orchestrator cannot drive the controlled clock or run

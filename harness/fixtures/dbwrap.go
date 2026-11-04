@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"sync"
 
-	"ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/dbclient"
 )
 
 // DBMode is a database fault (DESIGN §B6 FLT-5, FLT-9; the names are the /_test/faults modes

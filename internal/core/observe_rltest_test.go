@@ -12,11 +12,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // a511Family is one row of the DESIGN §A5.11 metrics table, written out with the label values

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // The reader limits of IMPLEMENTATION_PLAN S3 step 2, written out.

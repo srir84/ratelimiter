@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestT_COR_2 (SPEC T-COR-2; EX-1): a frozen clock and 100 concurrent acquires of one key

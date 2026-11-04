@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // preparedRun runs preflight on scenario text in a fresh test site (newTestSite, shell-script

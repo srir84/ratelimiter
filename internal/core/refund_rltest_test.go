@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // refundInstance is testInstance with a 1 ms → 4 ms refund backoff, so retries come quickly

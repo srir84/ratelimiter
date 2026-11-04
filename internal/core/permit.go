@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 // permitState is a permit's lifecycle state (§A5.5, SPEC API-1h). DONE, FINAL and DEGRADED

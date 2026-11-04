@@ -5,11 +5,11 @@ package scripts_test
 import (
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
 )
 
 // reclaimReq is a reclaim call (§A4.1): KEYS rl:epoch, then the candidates; no ARGV.

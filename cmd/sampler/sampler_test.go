@@ -24,10 +24,10 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
-	"ratelimiter/internal/testutil/golden"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/golden"
 )
 
 // goldenSamples is the hand-written golden samples.jsonl (DESIGN §C5; plan H3 step 7).

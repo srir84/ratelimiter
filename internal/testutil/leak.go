@@ -13,8 +13,8 @@ import (
 const leakWait = 5 * time.Second
 
 // VerifyNoLeaks runs the tests and, when they pass, waits up to 5 s for every other
-// goroutine whose stack has a frame in ratelimiter/internal/core or
-// ratelimiter/internal/store to end. If any is still running it prints their stacks to
+// goroutine whose stack has a frame in github.com/srir84/ratelimiter/internal/core or
+// github.com/srir84/ratelimiter/internal/store to end. If any is still running it prints their stacks to
 // stderr and returns 1; otherwise it returns the tests' exit code. A package's TestMain
 // calls it: os.Exit(testutil.VerifyNoLeaks(m)).
 func VerifyNoLeaks(m *testing.M) int {
@@ -22,7 +22,7 @@ func VerifyNoLeaks(m *testing.M) int {
 	if code != 0 {
 		return code
 	}
-	prefixes := []string{"ratelimiter/internal/core", "ratelimiter/internal/store"}
+	prefixes := []string{"github.com/srir84/ratelimiter/internal/core", "github.com/srir84/ratelimiter/internal/store"}
 	deadline := time.Now().Add(leakWait)
 	for {
 		left := leaked(prefixes)

@@ -18,13 +18,13 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/limiter"
-	"ratelimiter/limitertest"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limitertest"
 )
 
 // recTB is a testing.TB that records failures and skips instead of acting on them, so a

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // The orchestrator's faultctl runner (IMPLEMENTATION_PLAN H4 step 7; DESIGN §B4 [[faults]], §B5

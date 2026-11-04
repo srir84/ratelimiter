@@ -27,12 +27,12 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/harness/pgtest"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/pgtest"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // The orchestrator runs these tests make (IMPLEMENTATION_PLAN H3; plan choices for the bounds).

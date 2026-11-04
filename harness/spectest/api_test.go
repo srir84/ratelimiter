@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestT_API_1 (SPEC T-API-1 [D]; API-1, API-7c, API-12, API-21, API-22, REF-7; plan S9 Tests

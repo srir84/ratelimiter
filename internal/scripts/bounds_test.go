@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // stepCommands is C of plan S7's TestScriptCommandBounds: the fixed reads and writes of one

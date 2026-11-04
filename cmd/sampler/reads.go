@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 const (

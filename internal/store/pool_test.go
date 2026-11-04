@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 func TestReconnectBackoff(t *testing.T) {

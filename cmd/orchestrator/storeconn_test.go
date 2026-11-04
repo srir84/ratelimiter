@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // TestDialStoreCancelEndsWait's times: the dial's deadline, which only a wait that the cancel

@@ -8,11 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestT_ORD_1 (SPEC T-ORD-1 [D]; API-1a, API-2, API-2a, API-19, CLK-4; plan S9 Tests (b)): two

@@ -19,10 +19,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // faultctlFaults is the [[faults]] tables of cmds, each at 1 s, to every instance.

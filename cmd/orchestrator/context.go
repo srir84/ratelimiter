@@ -17,7 +17,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // The run's outcome in context.json (plan choice).

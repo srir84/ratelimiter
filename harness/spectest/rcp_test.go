@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
-	"ratelimiter/limitertest"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limitertest"
 )
 
 // TestT_RCP_6 (SPEC T-RCP-6; API-12a, RCP-3; FLT-10): with a frozen clock and the signer

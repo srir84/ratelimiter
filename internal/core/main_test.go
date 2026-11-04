@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"ratelimiter/internal/testutil"
+	"github.com/srir84/ratelimiter/internal/testutil"
 )
 
 // TestMain fails the package when a goroutine of internal/core or internal/store outlives

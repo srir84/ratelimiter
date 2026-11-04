@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // TestParseFlags (plan H2 step 8): --scenario, --targets and --out are required; every target

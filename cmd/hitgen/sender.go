@@ -24,7 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // maxInFlight is the most attempts in flight at once, each in its own goroutine (plan choice):

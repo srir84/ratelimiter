@@ -16,7 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/scripts"
 )
 
 // Limits (plan choice).

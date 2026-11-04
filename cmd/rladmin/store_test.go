@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // TestDialCancelEndsWait's cancel points and its bound.

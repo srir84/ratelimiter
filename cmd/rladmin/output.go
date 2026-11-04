@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // redacted stands in for the password wherever text would carry it.

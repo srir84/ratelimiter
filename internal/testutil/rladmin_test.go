@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // TestRLAdminBin: RLAdminBin returns $RL_RLADMIN_BIN when it names a file, and

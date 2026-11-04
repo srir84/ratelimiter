@@ -3,8 +3,8 @@ package core
 import (
 	"io"
 
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // hookSet holds the test hooks of the test-only entry point (DESIGN §A5.12). It stays

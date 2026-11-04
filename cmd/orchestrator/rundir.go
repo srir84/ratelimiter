@@ -18,7 +18,7 @@ import (
 	"text/template"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // A run directory's files (DESIGN §B1, §B8; IMPLEMENTATION_PLAN H3 step 2).

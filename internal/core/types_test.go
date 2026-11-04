@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	"ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/metrics"
 )
 
 // familyLabels returns the label values of the named family in a fresh registry.

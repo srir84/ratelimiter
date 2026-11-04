@@ -22,10 +22,10 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 // The run directory's files and the store users faultctl uses (DESIGN §A2, §B1).

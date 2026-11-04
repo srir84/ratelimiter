@@ -3,7 +3,7 @@ package httpapi
 import (
 	"time"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The api-N.jsonl record kinds and lifecycle events (DESIGN §B8).

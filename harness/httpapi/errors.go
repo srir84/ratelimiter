@@ -3,8 +3,8 @@ package httpapi
 import (
 	"net/http"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The stable error codes of the HARNESS ERR table (HTTP-7), the only source of HTTP outcomes

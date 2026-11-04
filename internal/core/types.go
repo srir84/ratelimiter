@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/settings"
 )
 
 // Settings and metrics types from the leaf packages (§A5.2).

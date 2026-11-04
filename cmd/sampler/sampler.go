@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // sample is one samples.jsonl line (DESIGN §B7, §B8; IMPLEMENTATION_PLAN H3 step 7; the field

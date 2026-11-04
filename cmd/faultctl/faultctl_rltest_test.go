@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // testPassword is the fake store's rl_fixture password in these tests.

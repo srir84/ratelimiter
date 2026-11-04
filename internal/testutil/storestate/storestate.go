@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // Type is a key's type as Snapshot reads it: one of the three types of the §A3.2 layout.

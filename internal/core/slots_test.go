@@ -3,7 +3,7 @@ package core
 import (
 	"testing"
 
-	"ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/metrics"
 )
 
 // TestSlotsPairedTry: the paired try reserves one slot of each kind or neither, so the

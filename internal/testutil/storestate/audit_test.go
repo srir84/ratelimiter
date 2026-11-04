@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // The fixture's key names, written out (DESIGN §A3.2): the current namespace nsID with the

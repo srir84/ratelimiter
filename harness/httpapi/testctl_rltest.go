@@ -16,7 +16,7 @@ import (
 	"strconv"
 	"time"
 
-	"ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/fixtures"
 )
 
 // Fixtures are the test build's fault fixtures that the /_test routes drive (DESIGN §B6): the

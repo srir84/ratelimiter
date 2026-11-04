@@ -3,7 +3,7 @@ package core
 import (
 	"sync"
 
-	"ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/metrics"
 )
 
 // slots are the two counting semaphores of DESIGN §A5.5 (SPEC RCP-9): held receipts

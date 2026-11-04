@@ -16,7 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
-	"ratelimiter/harness/pgtest"
+	"github.com/srir84/ratelimiter/harness/pgtest"
 )
 
 // testDSN is the DESIGN §B2 db_dsn: the harness cluster, a 2.5 s statement_timeout.

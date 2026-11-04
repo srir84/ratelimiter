@@ -7,7 +7,7 @@ import (
 	"slices"
 	"sync"
 
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 // SignerMode is a signer fault (DESIGN §B6 FLT-10).

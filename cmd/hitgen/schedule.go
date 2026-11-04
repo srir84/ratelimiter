@@ -20,7 +20,7 @@ import (
 	"os"
 	"slices"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // The entry kinds in schedule.jsonl (and gen.jsonl, whose retries add "retry").

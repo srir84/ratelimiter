@@ -7,9 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // The maintenance calls of the cleanup runner and the reclaimer (DESIGN §A4.5, §A4.7, §A5.4,

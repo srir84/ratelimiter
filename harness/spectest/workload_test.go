@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The T-COR-1 workload (IMPLEMENTATION_PLAN S6 Tests (b); DESIGN §C4): a seeded generator

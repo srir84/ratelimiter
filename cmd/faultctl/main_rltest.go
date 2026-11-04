@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
 )
 
 const (

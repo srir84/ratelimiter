@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // The store's ACL user the orchestrator itself uses (DESIGN §A2): rl_ops for CONFIG GET,

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // header is the identity every test scenario starts with.

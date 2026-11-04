@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // Limiter is what the API needs from the rate limiter.

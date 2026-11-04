@@ -3,7 +3,7 @@ package httpapi
 import (
 	"context"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // FromLimiter adapts the library's limiter to Limiter.

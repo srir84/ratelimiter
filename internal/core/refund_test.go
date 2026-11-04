@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // testRefunds returns refunds without workers (no attempt function) for the unit tests: a

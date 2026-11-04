@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // field is one integer position of a reply and its inclusive bounds.

@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // connError is a constant error of the connection layer, matched with errors.Is.

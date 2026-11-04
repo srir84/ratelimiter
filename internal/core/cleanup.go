@@ -5,8 +5,8 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // passStatus is how a cleanup pass ended (SPEC API-1f, DESIGN §A5.8): complete, or the result

@@ -5,10 +5,10 @@ package limitertest
 import (
 	"io"
 
-	"ratelimiter/internal/core"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/core"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // Adapter is the store adapter interface that store wrappers implement (plan choice).

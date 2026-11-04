@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"io"
 
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // Hooks are the test hooks of NewWithHooks (DESIGN §A5.12; shape: plan choice). The zero

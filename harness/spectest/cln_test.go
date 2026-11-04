@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The cleanup tests (IMPLEMENTATION_PLAN S7 Tests (b)): the driver on driver.FastPolicy (a 6 s

@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/keys"
 )
 
 // usage is what --help prints: one line per subcommand (plan choice).

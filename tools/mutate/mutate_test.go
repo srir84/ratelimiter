@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
 )
 
 // fixtureModule copies testdata/mutfix, the fixture module with its own go.mod, into a fresh

@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/testutil/golden"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/testutil/golden"
 )
 
 // KillAPI test values (IMPLEMENTATION_PLAN H4 step 2 and tests).

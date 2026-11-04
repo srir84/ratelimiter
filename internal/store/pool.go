@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 // connSet is the connections of one Kind (DESIGN §A5.4). Each slot runs its own dial loop

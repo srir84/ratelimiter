@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // TestCheckPID: checkPID refuses every PID a fault must never signal — 0 and -1 (kill(2) would

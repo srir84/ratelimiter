@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 const (

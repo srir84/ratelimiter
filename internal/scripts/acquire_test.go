@@ -6,11 +6,11 @@ import (
 	"strconv"
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // bucketValue is a bucket hash as the store holds it: u, t, g, s, x, mc and the given

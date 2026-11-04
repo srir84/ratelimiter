@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
 )
 
 // The tests of this file run first in the package's untagged build, which bin/mutate --sweep

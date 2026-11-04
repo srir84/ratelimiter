@@ -6,8 +6,8 @@ import (
 	"slices"
 	"testing"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // The check_key rows' start state (plan S8 Tests (a)): the healthy record, the controlled time

@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/internal/testutil/golden"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/internal/testutil/golden"
 )
 
 // goldenGen is the hand-written golden gen.jsonl (DESIGN §C5; plan H2 step 6).

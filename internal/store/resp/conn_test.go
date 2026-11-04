@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
 )
 
 // newPassword returns a fresh store password: 32 random bytes in hex.

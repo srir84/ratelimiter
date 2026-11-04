@@ -19,12 +19,12 @@ import (
 	"unicode"
 	"unicode/utf16"
 
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The driver's admin support (IMPLEMENTATION_PLAN S8 steps 5 and 10; DESIGN §A6, §C4): rladmin

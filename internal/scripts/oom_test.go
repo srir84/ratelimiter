@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/scriptrun"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // TestOOMRefusal (plan S4, L2; DESIGN §A3.0 row 6, §C2 bullet 2): with used memory above

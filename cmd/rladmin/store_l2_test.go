@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/testutil/scriptrun"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // infoOf reads one INFO section through c.

@@ -11,11 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // attemptResult is how one refund attempt ended (DESIGN §A5.6, §A4.9). final marks codes 3,

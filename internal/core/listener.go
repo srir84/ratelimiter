@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/internal/metrics"
 )
 
 // WithRefundListener has f receive each released permit's one final refund event (SPEC

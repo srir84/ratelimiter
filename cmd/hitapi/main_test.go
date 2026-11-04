@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // harnessTOML is the repo's §B2 config file.

@@ -22,7 +22,7 @@ func selfHeader() string {
 }
 
 func TestLeakDetector(t *testing.T) {
-	prefixes := []string{"ratelimiter/internal/testutil"}
+	prefixes := []string{"github.com/srir84/ratelimiter/internal/testutil"}
 	self := selfHeader()
 	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	go func() {
@@ -37,14 +37,14 @@ func TestLeakDetector(t *testing.T) {
 		if strings.HasPrefix(s, self) {
 			t.Errorf("leaked reported the calling goroutine:\n%s", s)
 		}
-		if strings.Contains(s, "ratelimiter/internal/testutil.parkUntil(") {
+		if strings.Contains(s, "github.com/srir84/ratelimiter/internal/testutil.parkUntil(") {
 			parked++
 		}
 	}
 	if parked != 1 || len(stacks) != 1 {
 		t.Fatalf("leaked = %d stacks, %d of them the parked goroutine; want just it:\n%s", len(stacks), parked, strings.Join(stacks, "\n\n"))
 	}
-	if got := leaked([]string{"ratelimiter/internal/testut"}); len(got) != 0 {
+	if got := leaked([]string{"github.com/srir84/ratelimiter/internal/testut"}); len(got) != 0 {
 		t.Errorf("a prefix that only starts the package path matched %d goroutines", len(got))
 	}
 

@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/store/resp"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // clockTimeout bounds one rl_fixture exchange on the local store: a dial, AUTH and the few

@@ -1,4 +1,4 @@
-module ratelimiter
+module github.com/srir84/ratelimiter
 
 go 1.24
 

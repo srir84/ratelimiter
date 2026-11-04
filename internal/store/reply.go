@@ -3,8 +3,8 @@ package store
 import (
 	"fmt"
 
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store/resp"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store/resp"
 )
 
 const (

@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The /hit headers (HTTP-2, HTTP-3).

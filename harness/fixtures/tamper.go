@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // TamperConn is the one method Tamper needs from a connection authenticated as rl_fixture

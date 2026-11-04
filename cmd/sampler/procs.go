@@ -15,7 +15,7 @@ import (
 
 	"github.com/shirou/gopsutil/v4/process"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // postmasterPIDFile is the file in PostgreSQL's data directory whose first line is the

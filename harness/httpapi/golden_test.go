@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/internal/testutil/golden"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/internal/testutil/golden"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // goldenAPI is the hand-written golden api.jsonl (DESIGN §C5; plan H1 step 8).

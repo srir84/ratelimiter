@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/settings"
 )
 
 // Lines returns one name=value line per fingerprinted setting of CFG-8, named as in the

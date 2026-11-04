@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // interval is the driver's epoch re-read interval (DESIGN §A5.10: 1 s at the harness values).

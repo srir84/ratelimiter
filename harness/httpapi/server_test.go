@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/internal/metrics"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/internal/metrics"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // waitFor is the bound on every wait for another goroutine in these tests.

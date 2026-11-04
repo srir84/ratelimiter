@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"ratelimiter/internal/receipt"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/receipt"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The driver's refund support (IMPLEMENTATION_PLAN S6 steps 10 and 13; HARNESS §9.4): the

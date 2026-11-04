@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // nsID is the epoch namespace of the rl:e:<id>:* keys the probes and fixtures use: any

@@ -19,10 +19,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/harness/runlog"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The run sequence's waits (IMPLEMENTATION_PLAN H3 steps 3 and 4; plan choices unless noted).

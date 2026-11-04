@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/dbclient"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/dbclient"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // The limits preflight enforces (DESIGN §B4, §A7, §B9).

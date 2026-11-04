@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
 )
 
 // recordTB is a testing.TB whose Errorf records the message instead of failing the test,

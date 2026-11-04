@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/settings"
 )
 
 // harnessPolicy is the DESIGN §B2 [policy] table, written out.

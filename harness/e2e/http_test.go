@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/config"
 )
 
 // digits matches a decimal string of digits (arrival_ns, decision_ns; HTTP-5, HTTP-6).

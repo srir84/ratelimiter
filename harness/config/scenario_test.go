@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // writeScenario writes a scenario file into a fresh temporary directory and returns its path.

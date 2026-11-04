@@ -3,7 +3,7 @@ package scripts_test
 import (
 	"testing"
 
-	"ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/scripts"
 )
 
 func TestNewHashesText(t *testing.T) {

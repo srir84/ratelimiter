@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/driver"
-	"ratelimiter/harness/fixtures"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/testutil/storeproc"
-	"ratelimiter/internal/testutil/storestate"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/driver"
+	"github.com/srir84/ratelimiter/harness/fixtures"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // recConn records every command a Tamper sends, then passes it to the driver's recording

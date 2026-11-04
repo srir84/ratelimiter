@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/testutil/storeproc"
+	"github.com/srir84/ratelimiter/internal/testutil/storeproc"
 )
 
 // hitgenWait bounds a bin/test/hitgen run of a few seconds of schedule and its retries.

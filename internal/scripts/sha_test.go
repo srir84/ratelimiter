@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/testutil/scriptrun"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/testutil/scriptrun"
 )
 
 // luaFiles are the script sources as the package embeds them.

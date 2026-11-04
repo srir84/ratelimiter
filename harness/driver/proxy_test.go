@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/scripts"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // proxyGoneWait bounds the wait for a driver's proxies to end after its teardown (plan choice).
@@ -29,7 +29,7 @@ func proxyStacks() []string {
 	}
 	var out []string
 	for _, g := range strings.Split(string(buf), "\n\n") {
-		if strings.Contains(g, "ratelimiter/harness/fixtures/respproxy.") {
+		if strings.Contains(g, "github.com/srir84/ratelimiter/harness/fixtures/respproxy.") {
 			out = append(out, g)
 		}
 	}

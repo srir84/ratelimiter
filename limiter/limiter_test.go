@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/testutil/fakeresp"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/testutil/fakeresp"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // TestNewRejectsControlled: production construction refuses the controlled clock (DESIGN

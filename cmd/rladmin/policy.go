@@ -9,10 +9,10 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/settings"
-	"ratelimiter/internal/store"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/settings"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // policyTable is the [policy] table of the shared config file (DESIGN §B2): every key is a

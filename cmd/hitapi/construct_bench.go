@@ -3,9 +3,9 @@
 package main
 
 import (
-	"ratelimiter/harness/config"
-	"ratelimiter/harness/httpapi"
-	"ratelimiter/limiter"
+	"github.com/srir84/ratelimiter/harness/config"
+	"github.com/srir84/ratelimiter/harness/httpapi"
+	"github.com/srir84/ratelimiter/limiter"
 )
 
 // construct builds the benchmark binary's limiter through limiter.New (DESIGN §B5

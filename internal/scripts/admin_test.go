@@ -5,10 +5,10 @@ package scripts_test
 import (
 	"testing"
 
-	"ratelimiter/internal/fingerprint"
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/scripts"
-	"ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/fingerprint"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/scripts"
+	"github.com/srir84/ratelimiter/internal/store"
 )
 
 // statusReq is an admin_status call (§A4.1: KEYS epoch, q; ARGV expected_id).

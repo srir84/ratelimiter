@@ -4,7 +4,7 @@ import (
 	"os"
 	"testing"
 
-	"ratelimiter/internal/testutil"
+	"github.com/srir84/ratelimiter/internal/testutil"
 )
 
 func TestMain(m *testing.M) { os.Exit(testutil.VerifyNoLeaks(m)) }

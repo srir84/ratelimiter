@@ -23,7 +23,7 @@ import (
 	"testing"
 	"time"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // TestParseFlags (plan H3 step 8): --scenario is required; --baseline, --bin-dir and

@@ -5,9 +5,9 @@ package scripts_test
 import (
 	"testing"
 
-	"ratelimiter/internal/keys"
-	"ratelimiter/internal/store"
-	"ratelimiter/internal/testutil/storestate"
+	"github.com/srir84/ratelimiter/internal/keys"
+	"github.com/srir84/ratelimiter/internal/store"
+	"github.com/srir84/ratelimiter/internal/testutil/storestate"
 )
 
 // pairNow is the controlled time of the check-order test: 50 ms after hwm0, so an empty

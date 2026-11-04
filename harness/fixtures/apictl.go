@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	"ratelimiter/harness/runlog"
+	"github.com/srir84/ratelimiter/harness/runlog"
 )
 
 // API kill timing and routes (DESIGN §B6 FLT-6; IMPLEMENTATION_PLAN H4 step 2).
