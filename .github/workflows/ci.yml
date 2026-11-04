@@ -10,6 +10,10 @@ on:
         description: "Also run the full store conformance suite (make test-store)"
         type: boolean
         default: false
+      store_only:
+        description: "Run only the store, script and integration job"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -21,6 +25,7 @@ concurrency:
 jobs:
   checks:
     name: lint, unit and Python tests
+    if: ${{ !inputs.store_only }}
     runs-on: macos-15
     timeout-minutes: 45
     steps:
@@ -30,10 +35,14 @@ jobs:
       - run: make test-unit
       - run: make test-py
       - if: failure()
+        name: Show the output of failed tests
+        run: python3 .github/show-failures.py .out
+      - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: checks-out
           path: .out/
+          include-hidden-files: true
           if-no-files-found: ignore
 
   store:
@@ -49,8 +58,12 @@ jobs:
       - if: ${{ inputs.extended }}
         run: make test-store
       - if: failure()
+        name: Show the output of failed tests
+        run: python3 .github/show-failures.py .out
+      - if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: store-out
           path: .out/
+          include-hidden-files: true
           if-no-files-found: ignore
